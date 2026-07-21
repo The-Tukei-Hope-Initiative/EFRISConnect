@@ -1,0 +1,20 @@
+#!/bin/sh
+# Fires after `git pull` / `git merge`. Reminds you to restart the relay so the
+# new backend/frontend code actually takes effect - the running Node process holds
+# the OLD code (and the OLD index.html) in memory until it is restarted.
+#
+# One-time activation (run once in the repo):   git config core.hooksPath .githooks
+#
+# Only nag when code that the running server actually serves has changed.
+changed=$(git diff-tree -r --name-only ORIG_HEAD HEAD 2>/dev/null)
+echo "$changed" | grep -Eq '^(backend/|frontend/)' || exit 0
+
+printf '\n'
+printf '============================================================\n'
+printf '  Code changed - RESTART THE RELAY for it to take effect:\n'
+printf '     Windows service:   net stop EFRISConnect ^&^& net start EFRISConnect\n'
+printf '     Windows console:   Ctrl+C, then  node backend\\server.js\n'
+printf '     macOS / Linux:     Ctrl+C, then  ./start.sh  (or node backend/server.js)\n'
+printf '  (The running server keeps the old code + old page until restart.)\n'
+printf '============================================================\n\n'
+exit 0

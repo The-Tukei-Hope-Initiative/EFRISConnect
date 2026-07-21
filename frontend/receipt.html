@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>EFRISConnect - Receipt</title>
+<!-- Fully offline: no CDN fonts or QR library. Fonts use system stacks; the QR
+     encoder is injected from the local relay at the marker below. -->
+<script>/*@QRLIB@*/</script>
+<style>
+/* ── Token system ── */
+:root {
+  --ground:    #ffffff;
+  --text:      #1a1a1a;
+  --muted:     #6b7280;
+  --border:    #d1d5db;
+  --row-alt:   #f4f7f4;
+  --hd:        #f2f4f7;   /* the ONLY fill allowed - light grey table header */
+  --accent:    #1b4332;
+  --accent-lt: #2d6a4f;
+  --stamp:     #c9963a;
+  --mono:      ui-monospace, Consolas, 'Courier New', monospace;
+  --serif:     Georgia, 'Times New Roman', serif;
+  --sans:      'Segoe UI', system-ui, -apple-system, Roboto, Arial, sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 13px; }
+body { font-family: var(--sans); background: #e8ece8; color: var(--text); min-height: 100vh; padding: 20px 0 60px; }
+
+/* ── Controls (screen only) - a slim, calm toolbar: one primary action plus a
+   compact page selector. The branding controls live behind "Customize" so the
+   default view reads as a clean document, not a control panel. ── */
+#controls {
+  max-width: 794px; margin: 0 auto 14px; background: #fff;
+  border-radius: 10px; padding: 10px 14px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.12); font-size: 12px;
+}
+#ctrlMain { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
+#controls label { display: flex; align-items: center; gap: 5px; color: #374151; font-weight: 500; cursor: pointer; }
+#controls input[type=color] { width: 26px; height: 22px; border: 1px solid var(--border); border-radius: 3px; padding: 1px; cursor: pointer; }
+#controls input[type=checkbox] { accent-color: var(--accent); width: 13px; height: 13px; }
+#controls select { font-size: 12px; padding: 4px 7px; border: 1px solid var(--border); border-radius: 5px; background: #fff; }
+.ctrl-sep { width: 1px; height: 22px; background: var(--border); }
+#printBtn { margin-left: auto; background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 8px 18px; font-size: 13px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+#printBtn:hover { background: var(--accent-lt); }
+/* Customize disclosure */
+#custToggle { background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 4px 2px; display: inline-flex; align-items: center; gap: 4px; }
+#custToggle:hover { color: var(--accent); }
+#custToggle .chev { transition: transform .15s; font-size: 9px; }
+#controls.adv-open #custToggle .chev { transform: rotate(180deg); }
+#advCtrls { display: none; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+#controls.adv-open #advCtrls { display: flex; }
+.ctrl-hint { flex-basis: 100%; font-size: 10px; color: #888; margin-top: 2px; }
+
+/* ── A4 Sheet ── */
+#sheet { width: 794px; min-height: 1123px; margin: 0 auto; background: var(--ground); display: flex; flex-direction: column; box-shadow: 0 2px 10px rgba(0,0,0,.14); }
+
+/* ── Responsive (screen only): below the sheet width, let it become fluid so it
+   fits the viewport and reflows instead of overflowing sideways. Print always
+   uses the true fixed page size selected in the toolbar. ── */
+/* Scoped to body:not(.thermal) so 80mm thermal mode (its own single-column
+   reflow below) is never overridden by these screen-fit rules. */
+@media screen and (max-width: 840px) {
+  body { padding: 12px 0 40px; }
+  #controls { max-width: 94vw; }
+  body:not(.thermal) #sheet { width: 94vw; min-height: 0; }
+  body:not(.thermal) #hdr, body:not(.thermal) #subhdr, body:not(.thermal) #descLine, body:not(.thermal) #itemsWrap, body:not(.thermal) #bottomZone, body:not(.thermal) #stampBar, body:not(.thermal) #signBar, body:not(.thermal) #footer, body:not(.thermal) #simpleFooter, body:not(.thermal) #uraTag { padding-left: 4vw; padding-right: 4vw; }
+}
+@media screen and (max-width: 560px) {
+  body:not(.thermal) #hdr { flex-direction: column; gap: 10px; }
+  body:not(.thermal) #stamp { align-items: flex-start; }
+  body:not(.thermal) #docMeta { text-align: left; }
+  body:not(.thermal) #subhdr { grid-template-columns: 1fr; }
+  body:not(.thermal) .sh-block + .sh-block { border-left: none; padding-left: 0; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 8px; }
+  body:not(.thermal) #bottomZone { flex-direction: column; align-items: stretch; }
+  body:not(.thermal) #totalsTable { width: 100%; }
+  body:not(.thermal) #footer { grid-template-columns: 1fr; }
+  body:not(.thermal) #footerLeft { border-right: none; border-bottom: 1px solid var(--border); }
+}
+
+/* ── Header (white sheet, anchored by a thin accent rule - no filled band) ── */
+#hdr { background: var(--ground); padding: 24px 32px 18px; display: flex; align-items: flex-start; gap: 18px; border-bottom: 2px solid var(--accent); }
+#hdrLeft { flex: 1; display: flex; align-items: flex-start; gap: 14px; }
+#logo { width: 64px; height: 64px; object-fit: contain; flex-shrink: 0; background: transparent; }
+#logoPlaceholder { width: 52px; height: 52px; border-radius: 5px; background: rgba(0,0,0,.05); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-family: var(--serif); font-size: 20px; color: var(--muted); }
+#bizBlock { flex: 1; }
+#bizName { font-family: var(--serif); font-size: 19px; color: var(--text); line-height: 1.15; margin-bottom: 4px; }
+#bizDetails { font-size: 10.5px; color: var(--muted); line-height: 1.7; }
+#bizDetails span { display: block; }
+
+/* document title - the one place both brand colours show: accent text + stamp underline */
+#stamp { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
+#docTypeStamp { border-bottom: 2px solid var(--stamp); padding: 0 2px 3px; }
+#docTypeStamp span { font-family: var(--serif); font-size: 22px; color: var(--accent); letter-spacing: 2px; display: block; line-height: 1; }
+#docMeta { text-align: right; font-size: 10.5px; color: var(--muted); line-height: 1.75; }
+#docMeta strong { color: var(--text); font-weight: 600; font-family: var(--mono); letter-spacing: .5px; }
+
+/* ── Sub-header: bill to + payment info ── */
+#subhdr { padding: 14px 32px; border-bottom: 1.5px solid var(--border); display: grid; grid-template-columns: 1fr 1fr; }
+.sh-block + .sh-block { border-left: 1.5px solid var(--border); padding-left: 20px; }
+.sh-label { font-size: 9px; font-weight: 600; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }
+.sh-value { font-size: 12.5px; font-weight: 500; color: var(--text); line-height: 1.5; }
+.sh-sub { font-size: 10.5px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+
+/* ── Description line ── */
+#descLine { padding: 8px 32px; font-size: 11px; color: var(--muted); border-bottom: 1.5px solid var(--border); font-style: italic; }
+
+/* ── Line items ── */
+#itemsWrap { padding: 0 32px; flex: 1; }
+#itemsTable { width: 100%; border-collapse: collapse; }
+#itemsTable thead tr { background: var(--hd); }
+#itemsTable thead th {
+  padding: 8px 8px; text-align: left; font-size: 8.5px; font-weight: 700;
+  letter-spacing: .9px; text-transform: uppercase; color: var(--accent);
+  border-bottom: 1px solid var(--border);
+}
+#itemsTable thead th.r { text-align: right; }
+#itemsTable tbody tr:nth-child(even) { background: var(--row-alt); }
+#itemsTable tbody td { padding: 8px 8px; font-size: 11.5px; vertical-align: top; border-bottom: 1px solid #eef0ee; }
+#itemsTable tbody td.r { text-align: right; font-family: var(--mono); font-size: 11px; }
+.itm-cat { font-size: 9.5px; color: var(--accent); font-weight: 600; letter-spacing: .3px; margin-bottom: 1px; }
+.itm-code { font-family: var(--mono); font-size: 9px; color: var(--muted); margin-bottom: 2px; }
+.itm-name { font-weight: 500; font-size: 11.5px; }
+.itm-desc { font-size: 10px; color: var(--muted); margin-top: 1px; }
+.vat-badge { display: inline-block; background: #e8f5e9; color: #2d6a4f; font-size: 8.5px; font-weight: 700; padding: 1px 4px; border-radius: 3px; letter-spacing: .3px; vertical-align: middle; }
+.disc-val { color: #c62828; }
+
+/* ── Totals ── */
+#bottomZone { padding: 0 32px; display: flex; align-items: flex-end; gap: 20px; margin-top: 4px; }
+#paymentBlock { flex: 1; font-size: 11px; }
+#paymentBlock .pb-label { font-size: 9px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+#paymentBlock .pb-row { display: flex; gap: 6px; align-items: center; margin-bottom: 3px; }
+#paymentBlock .pb-method { font-weight: 600; font-size: 11.5px; }
+#paymentBlock .pb-amount { font-family: var(--mono); color: var(--muted); font-size: 10.5px; }
+#payTermsBlock { font-size: 10.5px; color: var(--muted); margin-top: 8px; }
+#payTermsBlock strong { color: var(--text); }
+#totalsTable { width: 300px; border-collapse: collapse; flex-shrink: 0; }
+#totalsTable td { padding: 4px 8px; font-size: 11.5px; }
+#totalsTable td:last-child { text-align: right; font-family: var(--mono); }
+.tot-label { color: var(--muted); }
+.tot-line td { border-top: 1.5px solid var(--border); }
+.tot-disc td { color: #c62828; }
+/* Grand total reads as a prominent band (accent rule + light fill + large mono
+   figure), the way a payslip's Net Pay anchors the page. */
+.tot-grand td { font-size: 16px; font-weight: 700; padding: 9px 8px; color: var(--accent); background: var(--hd); border-top: 2px solid var(--accent); }
+.tot-grand td:first-child { text-transform: uppercase; letter-spacing: 1.4px; font-size: 10.5px; vertical-align: middle; }
+.tot-words td { font-size: 9.5px; color: var(--muted); padding-top: 2px; font-style: italic; white-space: normal; }
+
+/* ── Paid + issued-by bar ── */
+#stampBar { padding: 8px 32px 4px; display: flex; align-items: center; justify-content: space-between; }
+#paidStamp { border: 2.5px solid #2d6a4f; border-radius: 4px; padding: 3px 16px; color: #2d6a4f; font-weight: 700; font-size: 12px; letter-spacing: 2.5px; text-transform: uppercase; }
+#servedBy { font-size: 10.5px; color: var(--muted); }
+#servedBy strong { color: var(--text); }
+
+/* ── Signature lines (invoices / credit notes) ── */
+#signBar { padding: 26px 32px 6px; display: flex; gap: 44px; }
+#signBar .sig { flex: 1; border-top: 1px solid #9aa3b2; padding-top: 6px; font-size: 10px; color: var(--muted); }
+body.thermal #signBar { flex-direction: column; gap: 22px; padding: 20px 10px 6px; }
+
+/* ── EFRIS footer ── */
+#footer { margin: 14px 32px 24px; border: 1.5px solid var(--border); border-radius: 6px; overflow: hidden; display: grid; grid-template-columns: 1fr auto; }
+#footerLeft { padding: 14px 18px; border-right: 1.5px solid var(--border); }
+#footerLabel { font-size: 8.5px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+#footerLabel::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.efris-row { display: grid; grid-template-columns: 150px 1fr; gap: 3px 8px; margin-bottom: 4px; align-items: baseline; }
+.efris-key { font-size: 9.5px; color: var(--muted); font-weight: 500; }
+.efris-val { font-family: var(--mono); font-size: 10.5px; color: var(--text); font-weight: 500; word-break: break-all; }
+.efris-val.fdn { font-size: 12.5px; color: var(--accent); font-weight: 600; }
+#footerRight { padding: 12px 14px; display: flex; flex-direction: column; align-items: center; gap: 5px; background: #fafafa; min-width: 114px; }
+#qrBox { width: 84px; height: 84px; }
+#qrBox canvas, #qrBox img { width: 84px !important; height: 84px !important; }
+#qrLabel { font-size: 8px; text-align: center; color: var(--muted); line-height: 1.4; }
+
+/* ── Non-EFRIS footer ── */
+#simpleFooter { margin: 14px 32px 24px; padding: 10px 0; border-top: 1.5px solid var(--border); display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: var(--muted); }
+#simpleFooter strong { color: var(--text); }
+
+/* ── URA tagline ── */
+#uraTag { margin: 0 32px 18px; font-size: 9.5px; color: var(--muted); text-align: center; padding-top: 6px; border-top: 1px solid var(--border); }
+#uraTag strong { color: var(--accent); }
+
+/* ── Thermal (80mm) single-column reflow ─────────────────────────────
+   Everything that sits side-by-side on A4/A5 stacks into one narrow column,
+   with tighter padding and smaller type so it fits a receipt roll. */
+body.thermal { font-size: 12px; }
+body.thermal #hdr { flex-direction: column; align-items: center; text-align: center; padding: 12px 10px 10px; gap: 6px; }
+/* On a thermal roll the whole header is centred with the logo on TOP, business
+   details beneath it, then the doc stamp - a single clean centred column. */
+body.thermal #hdrLeft { flex-direction: column; align-items: center; text-align: center; gap: 6px; width: 100%; }
+body.thermal #logoArea { display: flex; justify-content: center; }
+body.thermal #bizBlock { text-align: center; }
+body.thermal #bizDetails { align-items: center; }
+body.thermal #stamp { width: 100%; align-items: center; }
+body.thermal #docTypeStamp { text-align: center; }
+body.thermal #logo, body.thermal #logoPlaceholder { width: 46px; height: 46px; }
+body.thermal #bizName { font-size: 16px; }
+body.thermal #stamp { align-items: center; }
+body.thermal #docMeta { text-align: center; }
+body.thermal #subhdr { grid-template-columns: 1fr; padding: 10px 10px; gap: 8px; }
+body.thermal .sh-block + .sh-block { border-left: none; padding-left: 0; border-top: 1px dashed var(--border); padding-top: 8px; }
+body.thermal #descLine { padding: 6px 10px; }
+body.thermal #itemsWrap { padding: 0 10px; }
+body.thermal #itemsTable thead th { font-size: 8px; padding: 6px 3px; }
+body.thermal #itemsTable tbody td { font-size: 10.5px; padding: 6px 3px; }
+body.thermal #itemsTable tbody td.r { font-size: 10px; }
+/* On an 80mm strip there is no room for the URA Category and per-line VAT columns.
+   Drop both - the category/code is already folded under the item name, and the
+   per-rate VAT totals still appear in the VAT breakdown below. */
+body.thermal #itemsTable .col-cat,
+body.thermal #itemsTable .col-vat { display: none; }
+body.thermal #bottomZone { flex-direction: column; align-items: stretch; padding: 0 10px; gap: 6px; }
+body.thermal #totalsTable { width: 100%; }
+body.thermal #payTermsBlock { margin-top: 6px; }
+body.thermal #stampBar { flex-direction: column; align-items: flex-start; gap: 6px; padding: 8px 10px 4px; }
+body.thermal #footer { grid-template-columns: 1fr; margin: 12px 10px 16px; }
+body.thermal #footerLeft { border-right: none; border-bottom: 1px solid var(--border); padding: 10px 12px; }
+body.thermal .efris-row { grid-template-columns: 96px 1fr; }
+body.thermal #footerRight { min-width: 0; padding: 12px; }
+body.thermal #simpleFooter { flex-direction: column; align-items: flex-start; gap: 4px; margin: 12px 10px 16px; }
+body.thermal #uraTag { margin: 0 10px 14px; }
+
+/* ── Print ── */
+@media print {
+  body { background: white; padding: 0; }
+  #controls { display: none !important; }
+  #sheet { box-shadow: none; width: 100%; min-height: auto; }
+  @page { margin: 0; size: A4; }
+}
+</style>
+</head>
+<body>
+
+<!-- Controls: minimal by default (page size + Print); branding behind Customize -->
+<div id="controls">
+  <div id="ctrlMain">
+    <label>Page <select id="selPage" onchange="setPageSize(this.value)">
+      <option value="A5" selected>A5 (half)</option>
+      <option value="A4">A4</option>
+      <option value="Letter">Letter</option>
+      <option value="80mm">80mm receipt</option>
+    </select></label>
+    <button id="custToggle" type="button" onclick="document.getElementById('controls').classList.toggle('adv-open')">Customize <span class="chev">&#9660;</span></button>
+    <button id="printBtn" onclick="window.print()">Print / Save as PDF</button>
+  </div>
+  <div id="advCtrls">
+    <label>Primary colour <input type="color" id="clrAccent" value="#1b4332" oninput="syncHex('clrAccent','clrAccentHex');applyColors()"/>
+      <input type="text" id="clrAccentHex" value="#1b4332" spellcheck="false" oninput="syncPicker('clrAccentHex','clrAccent');applyColors()" style="width:84px;font-family:monospace;font-size:11px;padding:2px 4px;" title="HEX e.g. #1b4332 - you can also type rgb(27,67,50) or a colour name"/></label>
+    <label>Stamp colour <input type="color" id="clrStamp" value="#c9963a" oninput="syncHex('clrStamp','clrStampHex');applyColors()"/>
+      <input type="text" id="clrStampHex" value="#c9963a" spellcheck="false" oninput="syncPicker('clrStampHex','clrStamp');applyColors()" style="width:84px;font-family:monospace;font-size:11px;padding:2px 4px;" title="HEX e.g. #c9963a - you can also type rgb(...) or a colour name"/></label>
+    <div class="ctrl-sep"></div>
+    <label><input type="checkbox" id="chkLogo" checked onchange="toggleVis('logoArea',this.checked)"/> Logo</label>
+    <label><input type="checkbox" id="chkServed" checked onchange="toggleVis('servedBy',this.checked)"/> Served by</label>
+    <label><input type="checkbox" id="chkCodes" checked onchange="toggleCodes(this.checked)"/> EFRIS codes</label>
+    <div class="ctrl-sep"></div>
+    <label>Type <select id="selDocType" onchange="setDocType(this.value)">
+      <option value="Receipt">Receipt</option>
+      <option value="e-Receipt">e-Receipt</option>
+      <option value="Tax Invoice">Tax Invoice</option>
+      <option value="Invoice">Invoice</option>
+      <option value="Credit Note">Credit Note</option>
+    </select></label>
+    <div class="ctrl-hint">Colours accept <strong>HEX</strong> (#1b4332), <strong>rgb(...)</strong>, or a colour name. Branding is set once and remembered.</div>
+  </div>
+</div>
+
+<div id="sheet">
+
+  <!-- Header -->
+  <div id="hdr">
+    <div id="hdrLeft">
+      <div id="logoArea">
+        <img id="logo" src="" alt="" style="display:none"/>
+        <div id="logoPlaceholder"></div>
+      </div>
+      <div id="bizBlock">
+        <div id="bizName"></div>
+        <div id="bizDetails">
+          <span id="bizAddr"></span>
+          <span id="bizTinLine"></span>
+          <span id="bizContact"></span>
+        </div>
+      </div>
+    </div>
+    <div id="stamp">
+      <div id="docTypeStamp"><span id="docTypeLabel">Receipt</span></div>
+      <div id="docMeta">
+        <div>No. <strong id="metaRef">-</strong></div>
+        <div>Date <strong id="metaDate">-</strong></div>
+        <div id="metaFDNLine" style="display:none;">FDN <strong id="metaFDN">-</strong></div>
+        <div>Currency <strong id="metaCurrency">UGX</strong></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Customer + payment header -->
+  <div id="subhdr">
+    <div class="sh-block">
+      <div class="sh-label">Issued to</div>
+      <div class="sh-value" id="custName">-</div>
+      <div class="sh-sub" id="custMeta"></div>
+    </div>
+    <div class="sh-block">
+      <div class="sh-label">Payment &amp; Terms</div>
+      <div id="payMethodsList"></div>
+      <div class="sh-sub" id="payTermsLine"></div>
+      <div class="sh-sub" id="custTypeLine"></div>
+    </div>
+  </div>
+
+  <!-- Description / reference -->
+  <div id="descLine"></div>
+
+  <!-- Line items -->
+  <div id="itemsWrap">
+    <table id="itemsTable">
+      <thead>
+        <tr id="tblHead"></tr>
+      </thead>
+      <tbody id="itemsBody"></tbody>
+    </table>
+  </div>
+
+  <!-- Totals + payment breakdown -->
+  <div id="bottomZone">
+    <div id="paymentBlock">
+      <div class="pb-label">Payment received</div>
+      <div id="paymentRows"></div>
+      <div id="payTermsBlock"></div>
+    </div>
+    <table id="totalsTable"><tbody id="totalsBody"></tbody></table>
+  </div>
+
+  <!-- Paid stamp + issued by -->
+  <div id="stampBar">
+    <div id="paidStamp">Paid in Full</div>
+    <div id="servedBy"></div>
+  </div>
+
+  <!-- Signature lines (shown for invoices / credit notes) -->
+  <div id="signBar" style="display:none;">
+    <div class="sig" id="sigReceived">Received by</div>
+    <div class="sig" id="sigAuth">For and on behalf of the business</div>
+  </div>
+
+  <!-- EFRIS verification footer (shown only if FDN present) -->
+  <div id="footer" style="display:none;">
+    <div id="footerLeft">
+      <div id="footerLabel">URA Fiscal Invoice Verification</div>
+      <div class="efris-row"><span class="efris-key">Buyer Name</span><span class="efris-val" id="fBuyer">-</span></div>
+      <div class="efris-row"><span class="efris-key">FDN No.</span><span class="efris-val fdn" id="fFDN">-</span></div>
+      <div class="efris-row"><span class="efris-key">URA INV ID</span><span class="efris-val" id="fInvId" style="display:none;">-</span></div>
+      <div class="efris-row"><span class="efris-key">Submission Date</span><span class="efris-val" id="fSubDate">-</span></div>
+      <div class="efris-row"><span class="efris-key">Device No.</span><span class="efris-val" id="fDevice">-</span></div>
+    </div>
+    <div id="footerRight">
+      <div id="qrBox"></div>
+      <div id="qrLabel">Scan to verify<br>on URA EFRIS</div>
+      <div id="fVerCodeWrap" style="text-align:center;margin-top:6px;max-width:110px;">
+        <div style="font-size:8px;color:var(--muted);margin-bottom:2px;letter-spacing:.5px;text-transform:uppercase;">Verification Code</div>
+        <div id="fVerCode" style="font-family:var(--mono);font-size:8.5px;word-break:break-all;color:var(--text);">-</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Simple footer for non-EFRIS -->
+  <div id="simpleFooter">
+    <div><strong id="sfBizName"></strong></div>
+    <div id="sfNote">Thank you for your business.</div>
+    <div id="sfContact"></div>
+  </div>
+
+  <!-- URA tagline (EFRIS only) -->
+  <div id="uraTag" style="display:none;">
+    This document was electronically submitted to <strong>Uganda Revenue Authority (URA) EFRIS</strong>
+    and bears a valid Fiscal Document Number. Verify at <strong>efris.ura.go.ug</strong>
+  </div>
+
+</div><!-- /sheet -->
+
+<script>
+/* ════════════════════════════════════════════
+   URL param reader
+════════════════════════════════════════════ */
+const _ps = new URLSearchParams(window.location.search);
+function qp(k, def) { return _ps.get(k) || def || ''; }
+function qpBool(k) { return _ps.get(k) === '1'; }
+function qpJSON(k) { try { return JSON.parse(decodeURIComponent(_ps.get(k)||'null'))||[]; } catch(e){ return []; } }
+
+/* ── DATA ── */
+const DATA = {
+  // Business
+  bizName:   qp('bizName',  'Your Business Name'),
+  bizAddr:   qp('bizAddr',  ''),
+  bizTin:    qp('bizTin',   ''),
+  bizPhone:  qp('bizPhone', ''),
+  bizEmail:  qp('bizEmail', ''),
+  // A data-URI logo can exceed the request size limit, so the app stashes it in
+  // localStorage and passes the marker "__local__" instead.
+  logoUrl:   (function(){ var v=qp('logoUrl',''); if(v==='__local__'){ try{ return localStorage.getItem('efris_print_logo')||''; }catch(e){ return ''; } } return v; })(),
+  logoInit:  qp('logoInit', ''),
+
+  // Document
+  docType:   qp('docType',  'Receipt'),
+  // The seller's own document reference (Receipt/Invoice No.). Never fall back to
+  // the FDN - the FDN is a separate URA number shown on its own line.
+  ref:       qp('ref',      ''),
+  fdn:       qp('fdn',      ''),
+  date:      qp('date',     new Date().toLocaleDateString('en-UG',{day:'2-digit',month:'short',year:'numeric'})),
+  currency:  qp('currency', 'UGX'),
+  dueDate:   qp('dueDate',  ''),
+
+  // Customer
+  custName:  qp('custName', 'Walk-in Customer'),
+  custTin:   qp('custTin',  ''),
+  custType:  qp('custType', ''),  // B2C / B2B / B2G / Foreign
+  custAddr:  qp('custAddr', ''),
+  passport:  qp('passport', ''),
+  nationality: qp('nationality', ''),
+
+  // Payment
+  // payMethods: [{label, amount}]  or single string
+  payMethods: qpJSON('payMethods'),
+  payMethod:  qp('payMethod', ''),
+  payTerms:   qp('payTerms', ''),
+
+  // Lines
+  // [{name, desc, itemCode, commodityCode, categoryPath, qty, unit, rate, vatRate, vatAmt, discount, total}]
+  lines: qpJSON('lines'),
+
+  // Totals
+  subtotal:   qp('subtotal',   ''),
+  discount:   qp('discount',   ''),
+  taxAmount:  qp('taxAmount',  ''),
+  grandTotal: qp('grandTotal', ''),
+  grandWords: qp('grandWords', ''),
+  showVat:    qpBool('showVat'),
+
+  // Issued by
+  issuedBy:  qp('issuedBy', ''),
+
+  // EFRIS
+  verCode:       qp('verCode',       ''),
+  invId:         qp('invId',         ''),
+  subDate:       qp('subDate',       ''),
+  deviceNo:      qp('deviceNo',      ''),
+  validationUrl: qp('validationUrl', ''),
+  // Cash tendered / change (for cash payments with overpayment)
+  cashTendered:  qp('cashTendered',  ''),
+  cashChange:    qp('cashChange',    ''),
+};
+
+/* ── Demo data when opened directly ── */
+const _isDemo = !_ps.has('bizName');
+if (_isDemo) {
+  Object.assign(DATA, {
+    bizName:  'Demo Company Uganda Ltd',
+    bizAddr:  'Plot 45, Kampala Road, Kampala, Uganda',
+    bizTin:   '1000987654',
+    bizPhone: '+256 700 123 456',
+    bizEmail: 'accounts@business.ug',
+    logoInit: 'AS',
+    docType:  'e-Receipt',
+    ref:      'REC-2026-0034',
+    fdn:      '325043855047',
+    date:     new Date().toLocaleDateString('en-UG',{day:'2-digit',month:'short',year:'numeric'}),
+    currency: 'UGX',
+    custName: 'James Omondi',
+    custType: 'B2C',
+    payMethods: [{label:'Mobile Money (MTN)', amount:'360,000.00'}],
+    payTerms: 'Paid on receipt',
+    showVat: false,
+    subtotal: '360,000.00',
+    grandTotal: '360,000.00',
+    grandWords: 'Uganda Shillings Three Hundred Sixty Thousand only',
+    issuedBy: 'Sarah Nakato',
+    verCode:      '79289983322183978289',
+    invId:        '10977703248839344',
+    subDate:      new Date().toISOString().slice(0,10),
+    deviceNo:     '1000987654_01',
+    validationUrl:'https://efristest.ura.go.ug/site_new/#/invoiceValidation?invoiceNo=325043855047&antiFakeCode=79289983322183978289',
+    cashTendered: '400,000.00',
+    cashChange:   '40,000.00',
+    showVat: true,
+    subtotal:   '360,000.00',
+    taxAmount:   '46,441.00',
+    grandTotal: '360,000.00',
+    grandWords: 'Uganda Shillings Three Hundred Sixty Thousand only',
+    lines: [
+      {
+        name: 'Safari Day Trip - Per Person',
+        desc: 'Full-day guided wildlife drive, park fees included',
+        itemCode: 'TOUR-001',
+        commodityCode: '90121501',
+        categoryPath: 'Travel and Food and Lodging and Entertainment Services >> Travel facilitation >> Travel agents',
+        qty: 2, unit: 'Person', rate: '152,542.37',
+        vatRate: 18, vatAmt: '54,915.25', discount: '0.00', total: '360,000.00'
+      },
+      {
+        name: 'Bottled Water (500ml)',
+        desc: 'Complimentary items - exempt from VAT',
+        itemCode: 'MISC-001',
+        commodityCode: '50202302',
+        categoryPath: 'Food Beverage and Tobacco Products >> Beverages >> Water',
+        qty: 4, unit: 'Each', rate: '2,500.00',
+        vatRate: 0, vatAmt: '0.00', discount: '0.00', total: '10,000.00'
+      }
+    ]
+  });
+}
+
+/* ════════════════════════════════════════════
+   HELPERS
+════════════════════════════════════════════ */
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function fmt(n, curr) {
+  const num = parseFloat(String(n||0).replace(/,/g,''));
+  if (isNaN(num)) return String(n||'-');
+  const s = num.toLocaleString('en-UG',{minimumFractionDigits:2,maximumFractionDigits:2});
+  return curr ? (curr + ' ' + s) : s;
+}
+
+function shortCat(path) {
+  if (!path) return '';
+  const parts = path.split('>>').map(p=>p.trim()).filter(Boolean);
+  // Show last 2 segments joined with ›
+  return parts.slice(-2).join(' › ');
+}
+
+// EFRIS unit-of-measure codes are internal (PCE, PS, 207, 101, …). On a printed
+// receipt show a readable name for the codes we know for certain; otherwise print
+// the code as-is. Never print a bare "101" that reads like a stray number.
+const _UOM_LABELS = {
+  '101':'Unit','PCE':'Piece','PS':'Per Person','207':'Per Hour','HR':'Hour','MIN':'Minute',
+  'DAY':'Day','KGM':'Kilogram','GRM':'Gram','LTR':'Litre','MTR':'Metre','KM':'Kilometre',
+  'SET':'Set','BX':'Box','PK':'Pack','NPR':'Pair','DZN':'Dozen','BO':'Bottle','BG':'Bag',
+  'CT':'Carton','TNE':'Tonne','VEH':'Vehicle','KWH':'kWh',
+};
+function uomLabel(u) {
+  const c = String(u||'').trim();
+  if (!c) return '';
+  return _UOM_LABELS[c.toUpperCase()] || _UOM_LABELS[c] || c;
+}
+
+function el(id) { return document.getElementById(id); }
+function setTxt(id, v) { const e=el(id); if(e) e.textContent=v; }
+function setHTML(id, v) { const e=el(id); if(e) e.innerHTML=v; }
+
+/* ════════════════════════════════════════════
+   RENDER
+════════════════════════════════════════════ */
+function render() {
+  const D = DATA;
+  const hasFDN = !!D.fdn;
+
+  /* ── Business ── */
+  setTxt('bizName', D.bizName);
+  setTxt('bizAddr', D.bizAddr);
+  if (D.bizTin) setTxt('bizTinLine', 'TIN: ' + D.bizTin);
+  const contact = [D.bizPhone, D.bizEmail].filter(Boolean).join('  ·  ');
+  if (contact) setTxt('bizContact', contact);
+
+  /* ── Logo ── */
+  // Only accept a data:image URI (the usual case, stashed locally) or an https
+  // URL. Anything else (http, javascript:, etc.) is ignored, so a crafted URL
+  // can't point the logo at an arbitrary/insecure resource.
+  const _logoOk = D.logoUrl && (/^data:image\//i.test(D.logoUrl) || /^https:\/\//i.test(D.logoUrl));
+  if (_logoOk) {
+    el('logo').src = D.logoUrl;
+    el('logo').style.display = 'block';
+    el('logoPlaceholder').style.display = 'none';
+  } else {
+    el('logoPlaceholder').textContent = D.logoInit || D.bizName.charAt(0).toUpperCase();
+  }
+
+  /* ── Stamp / doc type ── */
+  setDocType(D.docType);
+  el('selDocType').value = D.docType;
+  setTxt('metaRef', D.ref || '-');
+  setTxt('metaDate', D.date || '-');
+  setTxt('metaCurrency', D.currency || 'UGX');
+  if (hasFDN) {
+    el('metaFDNLine').style.display = '';
+    setTxt('metaFDN', D.fdn);
+  }
+
+  /* ── Customer ── */
+  setTxt('custName', D.custName || '-');
+  const custMeta = [];
+  if (D.custTin) custMeta.push('TIN: ' + D.custTin);
+  if (D.custAddr) custMeta.push(D.custAddr);
+  if (D.passport) custMeta.push('Passport: ' + D.passport + (D.nationality ? ' (' + D.nationality + ')' : ''));
+  setHTML('custMeta', custMeta.map(esc).join('<br>'));
+
+  /* ── Payment methods ── */
+  let methods = D.payMethods.length ? D.payMethods : (D.payMethod ? [{label: D.payMethod, amount:''}] : [{label:'Cash', amount:''}]);
+  setHTML('payMethodsList', methods.map(m =>
+    `<div class="sh-value">${esc(m.label)}${m.amount ? `<span style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:8px;">${esc(m.amount)}</span>` : ''}</div>`
+  ).join(''));
+  if (D.payTerms) setHTML('payTermsLine', `<span>Terms: ${esc(D.payTerms)}</span>${D.dueDate ? ` · Due: ${esc(D.dueDate)}`:''}` );
+
+  const typeLabels = {B2C:'Individual',B2B:'Business',B2G:'Government',Foreign:'Foreign / Tourist'};
+  if (D.custType && typeLabels[D.custType]) {
+    setTxt('custTypeLine', 'Customer type: ' + typeLabels[D.custType]);
+  }
+
+  /* ── Description line ── */
+  if (D.description) { el('descLine').textContent = D.description; }
+  else { el('descLine').style.display = 'none'; }
+
+  /* ── Determine columns ── */
+  const hasCodes    = D.lines.some(l => l.commodityCode || l.itemCode || l.categoryPath);
+  const hasDiscount = D.lines.some(l => parseFloat(String(l.discount||0).replace(/,/g,'')) > 0);
+  const hasVat      = D.showVat || D.lines.some(l => parseFloat(String(l.vatAmt||0).replace(/,/g,'')) > 0);
+
+  /* ── Table header ── */
+  const heads = [];
+  heads.push(`<th style="width:${hasCodes?'36%':'50%'}">Item &amp; Description</th>`);
+  if (hasCodes) heads.push(`<th class="col-cat" style="width:14%">URA Category &amp; Code</th>`);
+  heads.push(`<th class="r" style="width:8%">Qty</th>`);
+  heads.push(`<th class="r" style="width:12%">Unit Price</th>`);
+  if (hasVat) heads.push(`<th class="r col-vat" style="width:10%">VAT</th>`);
+  if (hasDiscount) heads.push(`<th class="r" style="width:10%">Discount</th>`);
+  heads.push(`<th class="r" style="width:${hasVat||hasDiscount?'12%':'18%'}">Amount</th>`);
+  el('tblHead').innerHTML = heads.join('');
+
+  /* ── Table rows ── */
+  el('itemsBody').innerHTML = D.lines.map(l => {
+    const catShort = shortCat(l.categoryPath);
+    const vatNum   = parseFloat(String(l.vatAmt||0).replace(/,/g,''));
+    const discNum  = parseFloat(String(l.discount||0).replace(/,/g,''));
+
+    let itemCell = '';
+    if (hasCodes) {
+      if (catShort) itemCell += `<div class="itm-cat">${esc(catShort)}</div>`;
+      if (l.commodityCode) itemCell += `<div class="itm-code">Code: ${esc(l.commodityCode)}${l.itemCode ? ' · ' + esc(l.itemCode) : ''}</div>`;
+      else if (l.itemCode) itemCell += `<div class="itm-code">${esc(l.itemCode)}</div>`;
+    }
+    itemCell += `<div class="itm-name">${esc(l.name)}</div>`;
+    if (l.desc) itemCell += `<div class="itm-desc">${esc(l.desc)}</div>`;
+
+    // For the "codes" cell: show category path + commodity code
+    let codeCell = '';
+    if (hasCodes) {
+      if (catShort) codeCell += `<div class="itm-cat" style="font-size:9px;">${esc(catShort)}</div>`;
+      if (l.commodityCode) codeCell += `<div class="itm-code" style="font-size:9.5px;">${esc(l.commodityCode)}</div>`;
+    }
+
+    // Tax flag: T = taxable (any rate > 0), EXMPT = exempt, ZERO = zero-rated
+    const vatRate = parseFloat(l.vatRate) || 0;
+    const taxFlag = vatRate > 0
+      ? `<span class="vat-badge" style="margin-left:4px;">${vatRate}% T</span>`
+      : (l.vatCat === 'B' ? `<span class="vat-badge" style="background:#fff8e1;color:#f9a825;margin-left:4px;">ZERO</span>`
+        : `<span class="vat-badge" style="background:#f5f5f5;color:var(--muted);margin-left:4px;">EXMPT</span>`);
+
+    let vatCell = '', discCell = '';
+    if (hasVat) {
+      if (vatNum > 0) {
+        vatCell = `<td class="r col-vat"><span class="vat-badge">${l.vatRate||18}%</span><br>${fmt(l.vatAmt)}</td>`;
+      } else {
+        vatCell = `<td class="r col-vat" style="color:var(--muted);font-size:10px;">Exempt</td>`;
+      }
+    }
+    if (hasDiscount) {
+      discCell = discNum > 0
+        ? `<td class="r disc-val">-${fmt(l.discount)}</td>`
+        : `<td class="r" style="color:var(--muted);">-</td>`;
+    }
+
+    // Qty display: show "3 × 1,000" when qty > 1
+    const qtyNum = parseFloat(l.qty) || 1;
+    const qtyDisplay = qtyNum > 1
+      ? `${qtyNum} &times; ${fmt(l.rate)}`
+      : esc(String(l.qty||1));
+    const unitTxt = uomLabel(l.unit);
+    const unitSpan = unitTxt ? `<br><span style="font-size:9.5px;color:var(--muted);">${esc(unitTxt)}</span>` : '';
+
+    return `<tr>
+      <td>${itemCell}</td>
+      ${hasCodes ? `<td class="col-cat">${codeCell}</td>` : ''}
+      <td class="r">${qtyDisplay}${unitSpan}</td>
+      <td class="r">${fmt(l.rate)}</td>
+      ${vatCell}
+      ${discCell}
+      <td class="r"><strong>${fmt(l.total)}</strong>${taxFlag}</td>
+    </tr>`;
+  }).join('');
+
+  /* ── Payment breakdown ── */
+  setHTML('paymentRows', methods.map(m =>
+    `<div class="pb-row"><span class="pb-method">${esc(m.label)}</span>${m.amount?`<span class="pb-amount">${esc(m.amount)}</span>`:''}</div>`
+  ).join(''));
+  if (D.payTerms) el('payTermsBlock').innerHTML = `Terms: <strong>${esc(D.payTerms)}</strong>${D.dueDate ? ' · Due: <strong>'+esc(D.dueDate)+'</strong>' : ''}`;
+
+  /* ── Totals ── */
+  const discNum2= parseFloat(String(D.discount||0).replace(/,/g,''));
+  const rows = [];
+
+  // VAT breakdown by category (matches URA receipt format)
+  const vatGroups = {};
+  D.lines.forEach(l => {
+    const rate = parseFloat(l.vatRate) || 0;
+    const key  = rate > 0 ? rate + '%' : (l.vatCat === 'B' ? 'ZERO' : 'EXMPT');
+    if (!vatGroups[key]) vatGroups[key] = { incl: 0, vat: 0 };
+    vatGroups[key].incl += parseFloat(String(l.total||0).replace(/,/g,''));
+    vatGroups[key].vat  += parseFloat(String(l.vatAmt||0).replace(/,/g,''));
+  });
+
+  const vatKeys = Object.keys(vatGroups);
+  const showBreakdown = vatKeys.length > 1 || (vatKeys.length === 1 && vatGroups[vatKeys[0]].vat > 0);
+
+  if (showBreakdown) {
+    // Header row
+    rows.push(`<tr><td class="tot-label" style="font-size:9px;letter-spacing:.8px;text-transform:uppercase;">VAT%</td><td class="tot-label" style="font-size:9px;letter-spacing:.8px;text-transform:uppercase;text-align:right;">Amt Incl.</td><td class="tot-label" style="font-size:9px;letter-spacing:.8px;text-transform:uppercase;text-align:right;">VAT</td></tr>`);
+    vatKeys.forEach(k => {
+      const g = vatGroups[k];
+      rows.push(`<tr style="border-top:1px solid var(--border)">
+        <td class="tot-label">${esc(k)}</td>
+        <td style="text-align:right;font-family:var(--mono);font-size:11px;">${fmt(g.incl)}</td>
+        <td style="text-align:right;font-family:var(--mono);font-size:11px;">${fmt(g.vat)}</td>
+      </tr>`);
+    });
+    const totalVat = vatKeys.reduce((s,k)=>s+vatGroups[k].vat,0);
+    const totalIncl = vatKeys.reduce((s,k)=>s+vatGroups[k].incl,0);
+    rows.push(`<tr style="border-top:1.5px solid var(--border)">
+      <td class="tot-label">TOTAL</td>
+      <td style="text-align:right;font-family:var(--mono);font-size:11px;">${fmt(totalIncl)}</td>
+      <td style="text-align:right;font-family:var(--mono);font-size:11px;">${fmt(totalVat)}</td>
+    </tr>`);
+  } else {
+    rows.push(`<tr><td class="tot-label">Subtotal</td><td>${fmt(D.subtotal||D.grandTotal)}</td></tr>`);
+    if (discNum2 > 0) rows.push(`<tr class="tot-disc"><td class="tot-label">Discount</td><td>-${fmt(D.discount)}</td></tr>`);
+  }
+
+  rows.push(`<tr class="tot-line tot-grand"><td>Total</td><td colspan="2">${fmt(D.grandTotal||D.subtotal)}</td></tr>`);
+  if (D.grandWords) rows.push(`<tr class="tot-words"><td colspan="3">${esc(D.grandWords)}</td></tr>`);
+
+  // Cash tendered / change
+  const tendered = parseFloat(String(D.cashTendered||0).replace(/,/g,''));
+  const change   = parseFloat(String(D.cashChange||0).replace(/,/g,''));
+  if (tendered > 0) rows.push(`<tr style="border-top:1px solid var(--border)"><td class="tot-label">Cash</td><td colspan="2" style="text-align:right;font-family:var(--mono);">${fmt(D.cashTendered)}</td></tr>`);
+  if (change > 0)   rows.push(`<tr><td class="tot-label">Change</td><td colspan="2" style="text-align:right;font-family:var(--mono);color:#c62828;">-${fmt(D.cashChange)}</td></tr>`);
+
+  el('totalsBody').innerHTML = rows.join('');
+
+  /* ── Issued by ── */
+  if (D.issuedBy) { el('servedBy').innerHTML = `Issued by: <strong>${esc(D.issuedBy)}</strong>`; }
+  else { el('servedBy').style.display = 'none'; }
+
+  /* ── Signature lines: invoices and credit notes carry them; a paid receipt
+     does not need one (the Paid stamp is the acknowledgement). ── */
+  const _dt = (D.docType || '').toLowerCase();
+  if (/invoice|credit note/.test(_dt)) {
+    el('signBar').style.display = '';
+    if (D.custName && D.custName !== 'Walk-in Customer') el('sigReceived').textContent = 'Received by (' + D.custName + ')';
+  }
+
+  /* ── EFRIS footer vs simple footer ── */
+  if (hasFDN) {
+    el('footer').style.display    = '';
+    el('simpleFooter').style.display = 'none';
+    el('uraTag').style.display    = '';
+    // Buyer name: B2C = "Cash Customer" (matches URA standard), B2B/B2G = company name.
+    // custType arrives lowercase ('b2b'/'b2g') from every caller - compare case-insensitively.
+    const ct = (D.custType || '').toLowerCase();
+    const buyerLabel = (ct === 'b2b' || ct === 'b2g') ? D.custName : 'Cash Customer';
+    setTxt('fBuyer',   buyerLabel);
+    setTxt('fFDN',     D.fdn     || '-');
+    if (D.invId) { setTxt('fInvId', D.invId); el('fInvId').style.display = ''; }
+    setTxt('fVerCode', D.verCode || '-');
+    setTxt('fSubDate', D.subDate || new Date().toISOString().slice(0,10));
+    setTxt('fDevice',  D.deviceNo|| '-');
+    const qrContent = D.validationUrl || D.verCode || D.fdn;
+    if (qrContent && typeof qrcode !== 'undefined') {
+      try {
+        const q = qrcode(0, 'M'); q.addData(qrContent); q.make();
+        el('qrBox').innerHTML = '<img alt="QR" style="width:84px;height:84px;" src="' + q.createDataURL(4, 0) + '"/>';
+      } catch (e) { /* QR optional - never block the receipt */ }
+    }
+  } else {
+    el('footer').style.display    = 'none';
+    el('simpleFooter').style.display = '';
+    el('uraTag').style.display    = 'none';
+    setTxt('sfBizName', D.bizName);
+    const sfContact = [D.bizPhone, D.bizEmail].filter(Boolean).join('  ·  ');
+    if (sfContact) setTxt('sfContact', sfContact);
+  }
+}
+
+/* ── Controls ── */
+function applyColors() {
+  // Prefer the text box (accepts HEX, rgb(), or colour names); fall back to picker.
+  const a = (el('clrAccentHex') && el('clrAccentHex').value.trim()) || el('clrAccent').value;
+  const s = (el('clrStampHex') && el('clrStampHex').value.trim()) || el('clrStamp').value;
+  document.documentElement.style.setProperty('--accent', a);
+  document.documentElement.style.setProperty('--accent-lt', a);
+  document.documentElement.style.setProperty('--stamp', s);
+}
+// Keep the colour picker and its HEX text box in sync.
+function syncHex(pickerId, hexId){ const p=el(pickerId), h=el(hexId); if(p&&h) h.value=p.value; }
+function syncPicker(hexId, pickerId){ const h=el(hexId), p=el(pickerId); if(h&&p){ const v=h.value.trim(); if(/^#[0-9a-fA-F]{6}$/.test(v)) p.value=v; } }
+// Switch the print page size (and on-screen sheet width). Narrow rolls (80mm)
+// also get a single-column "thermal" reflow via a body class.
+function setPageSize(v){
+  const sizes={A4:['210mm 297mm',794],A5:['148mm 210mm',559],Letter:['216mm 279mm',816],'80mm':['80mm auto',302]};
+  const cfg=sizes[v]||sizes.A4;
+  let st=document.getElementById('pageStyle'); if(!st){ st=document.createElement('style'); st.id='pageStyle'; document.head.appendChild(st); }
+  st.textContent='@media print{@page{size:'+cfg[0]+';margin:0;}} #sheet{width:'+cfg[1]+'px;min-height:auto;}';
+  document.body.classList.toggle('thermal', v==='80mm');
+}
+function toggleVis(id, show) { const e=el(id); if(e) e.style.display = show?'':'none'; }
+function setDocType(val) { setTxt('docTypeLabel', val); }
+function toggleCodes(show) {
+  document.querySelectorAll('.itm-cat, .itm-code').forEach(e => e.style.display = show?'':'none');
+}
+
+/* ── Init ── */
+render();
+// Default to A5 (the common receipt size); user can switch in the Page control.
+try{ setPageSize((el('selPage')&&el('selPage').value)||'A5'); }catch(e){}
+</script>
+</body>
+</html>
