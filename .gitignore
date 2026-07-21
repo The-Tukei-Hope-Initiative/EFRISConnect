@@ -1,0 +1,63 @@
+node_modules/
+backend/node_modules/
+.env
+*.env.*
+*.log
+.DS_Store
+.claude/
+
+# Old/archive folders - kept locally, never pushed
+backend/Old*
+frontend/Old*
+
+# Sensitive files
+*.pem
+*.key
+*.p12
+*.pfx
+*.der
+backend/keys/
+
+# Local working files
+tash*
+
+# Non-shipping files: internal docs, tests, scratch - keep local, don't push
+TEST_PLAN.md
+/index.html
+backend/__tests__/
+**/*.test.js
+scratch*
+*.scratch
+docs/
+# ...but the public self-hosting guide IS shipped (internal infra notes stay ignored).
+!docs/
+docs/*
+!docs/self-hosting.md
+
+# Runtime/local data - never commit (may contain real business data or secrets)
+backend/data/offline_queue.json
+backend/data/goods_cache_*.json
+backend/data/receipt_snapshots.json
+backend/data/submission_log.json
+backend/data/https_cert.cer
+backend/data/https_pfx_pass.txt
+backend/data/https.pfx
+backend/daemon/
+# Stray files sometimes created by redirected shell output
+/git
+/node
+
+# Backup: filled container-group (contains secrets) + any service-account keys
+backup/manager-group.yaml
+backup/*service-account*.json
+backup/*sa*.json
+backup/*.conf
+backup/rclone.conf
+# Any rclone config anywhere - never commit (it can carry cloud credentials)
+**/rclone.conf
+
+# Credential vault (encrypted secrets + local master key) - never commit
+backend/data/credentials_vault.json
+backend/data/.vault_master
+backend/data/uom_synced.json
+backend/data/goods_search_cache_*.json
