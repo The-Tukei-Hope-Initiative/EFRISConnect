@@ -8,6 +8,7 @@ RUN npm ci --omit=dev
 COPY backend/*.js ./
 COPY backend/data/ ./data/
 COPY frontend/ /frontend/
+COPY VERSION ./VERSION
 
 ENV NODE_ENV=production
 

@@ -73,7 +73,13 @@ app.use(express.json({ limit: '5mb' }));   // cap request bodies to guard agains
 // it against the public repo's tag. Read from the VERSION file, fall back to
 // package.json, then 'dev'.
 const APP_VERSION = (() => {
-  try { const v = fs.readFileSync(path.join(__dirname, '..', 'VERSION'), 'utf8').trim(); if (v) return v; } catch (_) {}
+  // Try the VERSION file both where it sits in the container (/app/VERSION, copied
+  // by the Dockerfile) and where it sits in a source checkout (repo-root/VERSION,
+  // one level above backend/). Fall back to package.json, then 'dev'.
+  for (const p of [path.join(__dirname, 'VERSION'), path.join(__dirname, '..', 'VERSION')]) {
+    try { const v = fs.readFileSync(p, 'utf8').trim(); if (v) return v; } catch (_) {}
+  }
+  try { return require('./package.json').version || 'dev'; } catch (_) {}
   try { return require('../package.json').version || 'dev'; } catch (_) { return 'dev'; }
 })();
 app.get('/api/version', (req, res) => res.json({ version: APP_VERSION }));
