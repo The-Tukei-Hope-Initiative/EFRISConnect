@@ -109,6 +109,8 @@
   body{display:flex;flex-direction:column;min-height:100vh;}
   .scr,.wrap,#sNone{flex:1;min-width:0;width:100%;}
   .ftr a{color:var(--gold);text-decoration:none;}.reg{color:rgba(255,255,255,.5);font-size:9px;}
+  .appver{position:absolute;top:50%;right:14px;transform:translateY(-50%);font-size:12px;font-weight:600;color:var(--gold);}
+  @media(max-width:640px){ .appver{position:static;display:block;top:auto;right:auto;transform:none;margin-top:5px;} }
   .hidden{display:none!important;}.mt{margin-top:7px;}hr{border:none;border-top:1px solid var(--bdr);margin:8px 0;}
   .pem-hidden{-webkit-text-security:disc;}
   .ctype-btn{padding:10px 10px;font-size:12.5px;border:1px solid var(--bdr);border-radius:8px;background:#f9f9f9;cursor:pointer;color:var(--txt);transition:all .15s;line-height:1.2;}
@@ -1782,7 +1784,7 @@
 
 </div>
 <div class="ftr" style="position:relative;">
-  <span id="appVersion" style="position:absolute;top:16px;right:14px;font-size:12px;font-weight:600;color:var(--gold);"></span>
+  <span id="appVersion" class="appver"></span>
   <div>
     <img class="flag-svg" src="/uganda-flag.svg" alt="Flag of Uganda" width="24" height="16" style="border-radius:2px;vertical-align:middle;object-fit:contain;box-shadow:0 0 0 .5px rgba(0,0,0,.15);"/>
     <span id="brandFooter">EFRISConnect</span> - Free &amp; Open Source
