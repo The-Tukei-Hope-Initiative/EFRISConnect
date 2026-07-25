@@ -365,7 +365,9 @@
   <div class="card">
     <div class="ct"><span class="ico" data-icon="check"></span> You're connected</div>
     <div class="al as"><span class="ico" data-icon="check"></span> EFRIS &amp; Manager.io setup saved.</div>
-    <p style="font-size:13px;color:var(--gray);margin:10px 0 4px;">Next: let's make sure your goods are registered with EFRIS. Every receipt line must reference a good or service that's registered under your TIN - reconciling now means your first receipt won't bounce.</p>
+    <p style="font-size:13px;color:var(--gray);margin:10px 0 4px;"><strong>Readiness check</strong> - here's what's ready and what still needs your attention. Fix anything flagged before you issue your first receipt.</p>
+    <div id="obDoneAudit" style="margin:10px 0;"></div>
+    <p style="font-size:13px;color:var(--gray);margin:14px 0 4px;">Next: let's make sure your goods are registered with EFRIS. Every receipt line must reference a good or service that's registered under your TIN - reconciling now means your first receipt won't bounce.</p>
     <div id="obDoneResult" style="margin:12px 0;"></div>
     <div class="row mt" id="obDoneBtns">
       <button class="btn bg" onclick="obReconcile()"><span class="ico" data-icon="search"></span> Reconcile my goods</button>
@@ -2227,7 +2229,7 @@ function finOB(){
   // With EFRIS on, hand off to the goods-reconcile step before the main app -
   // registering goods is the true first thing to do after connecting. With EFRIS
   // off (item-setup-only mode) there's nothing to reconcile, so go straight in.
-  if(CFG.efrisEnabled!==false){ showScr('sObDone'); const r=$('obDoneResult'); if(r) r.innerHTML=''; return; }
+  if(CFG.efrisEnabled!==false){ showScr('sObDone'); const r=$('obDoneResult'); if(r) r.innerHTML=''; const a=$('obDoneAudit'); if(a) a.innerHTML=''; obRunAudit(); return; }
   obDoneFinish();
 }
 // ── Onboarding hand-off: reconcile goods right after connecting ──────────────
@@ -7407,32 +7409,43 @@ async function stkVerifySupplierTin(){
 }
 
 // ── Readiness audit - proactive hunt for hidden Manager setup steps ─────────
-async function runReadinessAudit(btn){
-  const ep=gvi('sMgr')||CFG.managerEndpoint||MGR_EP, tk=gvi('sTok')||CFG.accessToken||MGR_TK;
-  if(!ep||!tk){ ht('auditResults','<div class="st se">Enter the Manager endpoint and access token first.</div>'); return; }
-  if(btn){btn.disabled=true;btn.textContent='Auditing…';}
-  ht('auditResults','<div class="st si"><span class="sp ico" style="vertical-align:-.15em;width:1em;height:1em;display:inline-block;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9" stroke-opacity=".25"/><path d="M21 12a9 9 0 0 0-9-9"/></svg></span> Running checks against Manager…</div>');
+// Fetch the audit and render the checklist into `targetId`. Shared by the
+// Settings panel and the onboarding "You're connected" screen so both show the
+// exact same "what's ready / what to handle" list.
+async function _runAuditInto(ep, tk, targetId){
+  if(!ep||!tk){ ht(targetId,'<div class="st se">Enter the Manager endpoint and access token first.</div>'); return; }
+  ht(targetId,'<div class="st si"><span class="sp ico" style="vertical-align:-.15em;width:1em;height:1em;display:inline-block;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9" stroke-opacity=".25"/><path d="M21 12a9 9 0 0 0-9-9"/></svg></span> Running checks against Manager…</div>');
   try{
     const r=await fetch(RELAY+'/api/manager/readiness-audit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({managerEndpoint:ep,accessToken:tk})});
     const d=await r.json();
     // In Goods Configurator mode (EFRIS off) the FDN/commodity fields are
     // irrelevant, so don't check for or nag about them.
     if(d.checks && CFG.efrisEnabled===false) d.checks=d.checks.filter(c=>c.id!=='customfields' && c.title!=='EFRIS custom fields');
-    if(!d.success){ ht('auditResults','<div class="st se">'+esc(d.error||'Audit failed')+'</div>'); }
-    else{
-      const icon=s=>s==='ok'?'<span style="color:var(--g);">'+ic('check')+'</span>':s==='warn'?'<span style="color:#b26a00;">'+ic('warning')+'</span>':'<span style="color:#c62828;">'+ic('x')+'</span>';
-      ht('auditResults',
-        '<div style="border:1px solid var(--bdr);border-radius:6px;overflow:hidden;">'
-        +d.checks.map(c=>'<div style="display:flex;gap:8px;align-items:flex-start;padding:7px 10px;border-bottom:1px solid #f0f0f0;font-size:12px;">'
-          +'<span style="flex-shrink:0;margin-top:1px;">'+icon(c.status)+'</span>'
-          +'<div><strong>'+esc(c.title)+'</strong> - '+esc(c.detail)
-          +(c.fix?'<div style="color:var(--gray);font-size:11px;margin-top:2px;"><strong>Fix:</strong> '+esc(c.fix)+'</div>':'')
-          +'</div></div>').join('')
-        +'</div>'
-        +(d.overall==='ok'?'<div class="st ss" style="margin-top:5px;">'+ic('check')+' All checks passed - no hidden setup gaps found.</div>':''));
-    }
-  }catch(e){ ht('auditResults','<div class="st se">Network error: '+esc(e.message)+'</div>'); }
+    if(!d.success){ ht(targetId,'<div class="st se">'+esc(d.error||'Audit failed')+'</div>'); return; }
+    const icon=s=>s==='ok'?'<span style="color:var(--g);">'+ic('check')+'</span>':s==='warn'?'<span style="color:#b26a00;">'+ic('warning')+'</span>':'<span style="color:#c62828;">'+ic('x')+'</span>';
+    ht(targetId,
+      '<div style="border:1px solid var(--bdr);border-radius:6px;overflow:hidden;">'
+      +d.checks.map(c=>'<div style="display:flex;gap:8px;align-items:flex-start;padding:7px 10px;border-bottom:1px solid #f0f0f0;font-size:12px;">'
+        +'<span style="flex-shrink:0;margin-top:1px;">'+icon(c.status)+'</span>'
+        +'<div><strong>'+esc(c.title)+'</strong> - '+esc(c.detail)
+        +(c.fix?'<div style="color:var(--gray);font-size:11px;margin-top:2px;"><strong>Fix:</strong> '+esc(c.fix)+'</div>':'')
+        +'</div></div>').join('')
+      +'</div>'
+      +(d.overall==='ok'?'<div class="st ss" style="margin-top:5px;">'+ic('check')+' All checks passed - no hidden setup gaps found.</div>':''));
+  }catch(e){ ht(targetId,'<div class="st se">Network error: '+esc(e.message)+'</div>'); }
+  try{ renderIcons($(targetId)); }catch(_){}
+}
+async function runReadinessAudit(btn){
+  const ep=gvi('sMgr')||CFG.managerEndpoint||MGR_EP, tk=gvi('sTok')||CFG.accessToken||MGR_TK;
+  if(btn){btn.disabled=true;btn.textContent='Auditing…';}
+  await _runAuditInto(ep, tk, 'auditResults');
   if(btn){btn.disabled=false;btn.innerHTML=ic('check')+' Run readiness audit'; renderIcons(btn);}
+}
+// Onboarding: auto-run the audit on the "You're connected" screen so the user
+// sees straight away what still needs handling before the goods reconcile.
+async function obRunAudit(){
+  const ep=CFG.managerEndpoint||gvi('o4a'), tk=CFG.accessToken||gvi('o4b');
+  await _runAuditInto(ep, tk, 'obDoneAudit');
 }
 </script>
 </body>

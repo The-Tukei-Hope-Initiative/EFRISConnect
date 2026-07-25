@@ -1615,23 +1615,26 @@ function efrisFieldSpecs(P) {
   const DOC  = [P.salesInvoice, P.receipt];
   const BUYER = P.customer ? [P.salesInvoice, P.receipt, P.customer] : DOC;
   const ITEM = [P.inventoryItem, P.nonInventoryItem];
+  // fiscal: system-written result field - locked, excluded from copy/clone.
+  // show:   appears on the printed/saved document (Manager's DisplayOnView).
   const specs = [
-    { create: 'FDN',              match: ['fdn', 'fiscal document number'],            placement: DOC },
-    { create: 'Verification Code',match: ['verification code', 'antifake code'],       placement: DOC },
-    { create: 'QR Code',          match: ['qr code'],                                  placement: DOC, type: 3 }, // Type 3 = Manager's native QR Code field (renders a scannable code)
-    { create: 'Device Number',    match: ['device number'],                            placement: DOC },
-    { create: 'Issued Time',      match: ['issued time'],                              placement: DOC },
-    { create: 'Invoice ID',       match: ['invoice id'],                               placement: DOC },
-    { create: 'Status',           match: ['status'],                                   placement: DOC },
-    { create: 'Submission Date',  match: ['submission date'],                          placement: DOC },
+    { create: 'FDN',              match: ['fdn', 'fiscal document number'],            placement: DOC, fiscal: true, show: true },
+    { create: 'Verification Code',match: ['verification code', 'antifake code'],       placement: DOC, fiscal: true, show: true },
+    { create: 'QR Code',          match: ['qr code'],                                  placement: DOC, type: 3, fiscal: true, show: true }, // Type 3 = Manager's native QR Code field (renders a scannable code)
+    { create: 'Device Number',    match: ['device number'],                            placement: DOC, fiscal: true, show: true },
+    { create: 'Issued Time',      match: ['issued time'],                              placement: DOC, fiscal: true, show: true },
+    { create: 'Invoice ID',       match: ['invoice id'],                               placement: DOC, fiscal: true },
+    { create: 'Status',           match: ['status'],                                   placement: DOC, fiscal: true },
+    { create: 'Submission Date',  match: ['submission date'],                          placement: DOC, fiscal: true },
     // Buyer fields - let the user tag a document before submission so the right
-    // buyer type/TIN/payment mode flow into EFRIS (T109/T108).
+    // buyer type/TIN/payment mode flow into EFRIS (T109/T108). Never locked (the
+    // user fills these); buyer-identity fields print, Customer Type stays internal.
     { create: 'Customer Type',    match: ['customer type', 'buyer type'],              placement: BUYER },
-    { create: 'Buyer TIN',        match: ['buyer tin', 'customer tin'],                placement: BUYER },
-    { create: 'Payment Method',   match: ['payment method', 'payment mode'],           placement: DOC },
+    { create: 'Buyer TIN',        match: ['buyer tin', 'customer tin'],                placement: BUYER, show: true },
+    { create: 'Payment Method',   match: ['payment method', 'payment mode'],           placement: DOC, show: true },
     // Foreign-buyer fields (EFRIS requires these for non-Ugandan customers).
-    { create: 'Passport / ID No', match: ['passport / id no', 'passport', 'passport no', 'id no'], placement: BUYER },
-    { create: 'Nationality',      match: ['nationality', 'country'],                   placement: BUYER },
+    { create: 'Passport / ID No', match: ['passport / id no', 'passport', 'passport no', 'id no'], placement: BUYER, show: true },
+    { create: 'Nationality',      match: ['nationality', 'country'],                   placement: BUYER, show: true },
     { create: 'Commodity Code',   match: ['commodity code'],                           placement: ITEM },
     { create: 'Category Path',    match: ['category path', 'segment / class grouping'],placement: ITEM },
     { create: 'Price Currency',   match: ['price currency', 'sales currency', 'item currency'], placement: ITEM },
@@ -1785,9 +1788,9 @@ app.post('/api/manager/create-customer', async (req, res) => {
     // duplicate "EFRIS *" fields. Each concept maps to its existing field name.
     const specs = [
       { field: 'Customer Type',    aliases: ['customer type', 'buyer type'],                 val: customer.type },
-      { field: 'Buyer TIN',        aliases: ['buyer tin', 'customer tin', 'tin'],            val: customer.tin },
-      { field: 'Nationality',      aliases: ['nationality', 'country'],                      val: customer.nationality },
-      { field: 'Passport / ID No', aliases: ['passport / id no', 'passport / id', 'passport', 'id no'], val: customer.passport },
+      { field: 'Buyer TIN',        aliases: ['buyer tin', 'customer tin', 'tin'],            val: customer.tin, show: true },
+      { field: 'Nationality',      aliases: ['nationality', 'country'],                      val: customer.nationality, show: true },
+      { field: 'Passport / ID No', aliases: ['passport / id no', 'passport / id', 'passport', 'id no'], val: customer.passport, show: true },
     ];
     const list = await managerCall(ep, tk, 'GET', '/text-custom-fields', null);
     const existing = (list.data && list.data.textCustomFields) || [];
@@ -1818,7 +1821,7 @@ app.post('/api/manager/create-customer', async (req, res) => {
         } else {
           // Field doesn't exist at all - create it on documents + the customer form.
           try {
-            await managerCall(ep, tk, 'POST', '/text-custom-field-form', { Name: s.field, Placement: [MGR_PLACEMENTS.salesInvoice, MGR_PLACEMENTS.receipt, placement] });
+            await managerCall(ep, tk, 'POST', '/text-custom-field-form', Object.assign({ Name: s.field, Placement: [MGR_PLACEMENTS.salesInvoice, MGR_PLACEMENTS.receipt, placement] }, s.show ? { DisplayOnView: true } : {}));
             const l2 = await managerCall(ep, tk, 'GET', '/text-custom-fields', null);
             const nf = ((l2.data && l2.data.textCustomFields) || []).find(x => String(x.name || '').trim().toLowerCase() === s.field.toLowerCase());
             if (nf) fieldKey[s.field] = nf.key || nf.Key;
@@ -1920,14 +1923,23 @@ app.post('/api/manager/ensure-efris-fields', async (req, res) => {
       // Force the field Type explicitly (Manager: 0=single line, 1=paragraph,
       // 2=drop-down, 3=QR Code) so QR Code renders as a scannable code and the
       // rest stay single-line text - never inheriting a wrong Type from the template.
-      const full = Object.assign({}, template, { Name: s.create, Placement: s.placement, Type: (s.type !== undefined ? s.type : 0) });
+      // Also force Manager's display/lock flags (keys read from a real field form):
+      // fiscal result fields are locked and excluded from copy/clone so a cloned
+      // invoice never carries a stale FDN; `show` fields appear on the printed/saved
+      // document (DisplayOnView). These are forced, not inherited from the template.
+      const flags = {};
+      if (s.fiscal) { flags.LockedForManualEditing = true; flags.ExcludeFromCopyingOrCloning = true; }
+      if (s.show) flags.DisplayOnView = true;
+      const base = { Name: s.create, Placement: s.placement, Type: (s.type !== undefined ? s.type : 0) };
+      const full = Object.assign({}, template, flags, base);
       try {
         let r = await managerCall(ep, tk, 'POST', '/text-custom-field-form', full);
         // If the richer payload is rejected, retry with the minimal shape so the
-        // field is still created (richness is best-effort, never a blocker).
+        // field is still created (richness is best-effort, never a blocker). The
+        // learned flags are valid Manager keys, so they stay on the retry.
         if (!(r.status === 200 || r.status === 201) && Object.keys(template).length) {
           console.log(`   ⚠ rich create for "${s.create}" failed (HTTP ${r.status}) - retrying minimal`);
-          r = await managerCall(ep, tk, 'POST', '/text-custom-field-form', { Name: s.create, Placement: s.placement, Type: (s.type !== undefined ? s.type : 0) });
+          r = await managerCall(ep, tk, 'POST', '/text-custom-field-form', Object.assign({}, flags, base));
         }
         if (r.status === 200 || r.status === 201) { created.push(s.create); console.log(`   ✓ created custom field: ${s.create}`); }
         else { failed.push({ field: s.create, status: r.status, error: r._cfChallenge ? 'Blocked by Cloudflare\'s browser-challenge page (not a Manager error) - add a WAF/Bot Fight Mode exception for this path' : ((r.data && (r.data.error || JSON.stringify(r.data))) || (r._htmlSnippet ? `HTTP ${r.status} - ${r._htmlSnippet}` : ('HTTP ' + r.status))) }); }
@@ -2484,12 +2496,18 @@ app.post('/api/manager/readiness-audit', async (req, res) => {
     } else add('manager', 'Manager connection', 'fail', `Inventory list returned HTTP ${r.status}.${r._htmlSnippet ? ' Response: ' + r._htmlSnippet : ''}`, r._html ? 'Manager returned a non-JSON (HTML/proxy) page rather than a Manager-level error - this usually means a reverse proxy or firewall (e.g. Cloudflare) in front of Manager is blocking the request, not that Manager itself rejected it. Check that service\'s security/WAF logs for a blocked request to this path.' : 'Check the Manager endpoint URL and access token in Settings → System.');
   } catch (e) { add('manager', 'Manager connection', 'fail', e.message, 'Check the Manager endpoint URL and access token in Settings → System.'); }
 
-  // 2. Write-off template (needed before automated stock adjustments can work)
+  // 2. Write-off template - only relevant once inventory items exist AND the
+  // user adjusts stock quantities. A brand-new business has nothing to adjust,
+  // so don't nag them to hand-create a write-off (mirrors the unit-cost check).
   try {
-    const tpl = await findWriteOffLineTemplate(ep, tk);
-    if (tpl) add('writeoff', 'Stock adjustment format', 'ok', `Write-off line format learned (fields: ${tpl.itemField}/${tpl.qtyField}).`);
-    else add('writeoff', 'Stock adjustment format', 'warn', 'No manually created inventory write-off found to learn Manager\'s line format from.', 'Create ONE write-off manually in Manager (Inventory Write-offs → New Write-off, any item/qty). All automated adjustments copy its format.');
-  } catch (e) { add('writeoff', 'Stock adjustment format', 'warn', e.message, 'Enable the Inventory Write-offs tab in Manager (Customize), then create one write-off manually.'); }
+    if (!invItems.length) {
+      add('writeoff', 'Stock adjustment format', 'ok', 'No inventory items yet - stock adjustments are set up automatically the first time you adjust stock.');
+    } else {
+      const tpl = await findWriteOffLineTemplate(ep, tk);
+      if (tpl) add('writeoff', 'Stock adjustment format', 'ok', `Write-off line format learned (fields: ${tpl.itemField}/${tpl.qtyField}).`);
+      else add('writeoff', 'Stock adjustment format', 'warn', 'No manually created inventory write-off found to learn Manager\'s line format from.', 'Only needed if you adjust stock quantities: create ONE write-off manually in Manager (Inventory Write-offs → New Write-off, any item/qty) so automated adjustments can copy its format.');
+    }
+  } catch (e) { add('writeoff', 'Stock adjustment format', 'warn', e.message, 'Only needed if you adjust stock quantities: enable the Inventory Write-offs tab in Manager (Customize), then create one write-off manually.'); }
 
   // 3. Inventory Unit Cost coverage (write-offs/COGS value at ZERO without one)
   try {

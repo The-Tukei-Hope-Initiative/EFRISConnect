@@ -33,6 +33,7 @@ docs/
 !docs/
 docs/*
 !docs/self-hosting.md
+!docs/efris-compliance.md
 
 # Runtime/local data - never commit (may contain real business data or secrets)
 backend/data/offline_queue.json
