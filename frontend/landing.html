@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>EFRISConnect - URA EFRIS for Manager.io</title>
+<style>
+  :root{--g:#2e7d32;--gl:#43a047;--gd:#1b5e20;--gold:#f9a825;--gray:#546e7a;--bg:#f1f8e9;--bdr:#c8e6c9;--txt:#1a2e1a;--txtl:#4a6741;--line:#e3ead9;}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Segoe UI','Inter',system-ui,-apple-system,'Helvetica Neue',Roboto,Arial,sans-serif;font-weight:400;
+    -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;background:
+    radial-gradient(1200px 500px at 50% -160px, rgba(67,160,71,.10), transparent 60%), var(--bg);
+    color:var(--txt);line-height:1.6;display:flex;flex-direction:column;min-height:100vh;}
+  a{color:var(--gd);}
+  .hdr{background:linear-gradient(135deg,#14431f,#1b5e20 42%,#2e7d32);box-shadow:0 2px 14px rgba(20,46,20,.28);border-bottom:3px solid var(--gold);padding:14px 20px;display:flex;align-items:center;gap:12px;color:#fff;}
+  .hdr h1{font-size:17px;font-weight:600;letter-spacing:.2px;}
+  .hdr .sub{font-size:12px;color:rgba(255,255,255,.82);}
+  .wrap{max-width:900px;margin:0 auto;padding:40px 20px;flex:1;width:100%;}
+  .hero{text-align:center;margin-bottom:40px;}
+  .hero h2{font-size:26px;font-weight:600;color:var(--gd);margin-bottom:10px;letter-spacing:-.2px;}
+  .hero p{font-size:15px;font-weight:400;color:var(--txtl);max-width:640px;margin:0 auto 22px;}
+  .card h3{font-weight:600;}
+  .card p{font-weight:400;}
+  .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;}
+  .btn{display:inline-flex;align-items:center;gap:7px;padding:12px 22px;border-radius:9px;font-weight:600;font-size:14px;text-decoration:none;transition:transform .15s ease, box-shadow .15s ease;}
+  .btn.bg{background:linear-gradient(135deg,var(--gl),var(--g));color:#fff;box-shadow:0 6px 16px -6px rgba(46,125,50,.5);}
+  .btn.bo{background:#fff;color:var(--gd);border:1.5px solid var(--bdr);}
+  .btn:hover{transform:translateY(-1px);}
+  /* Even 4-across grid on desktop (matches the Data Bridge layout), collapsing to
+     2 then 1 column on narrower screens - so the cards never sit 3+1 lopsided. */
+  .features{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:40px 0;align-items:stretch;}
+  @media(max-width:820px){.features{grid-template-columns:repeat(2,1fr);}}
+  @media(max-width:480px){.features{grid-template-columns:1fr;}}
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:0 1px 2px rgba(20,46,20,.06);display:flex;flex-direction:column;}
+  .card h3{font-size:14px;color:var(--gd);margin-bottom:6px;}
+  .card p{font-size:13px;color:var(--gray);}
+  .install{background:#fff;border:1px solid var(--line);border-radius:12px;padding:24px;margin:40px 0;}
+  .install h3{color:var(--gd);font-size:16px;margin-bottom:10px;}
+  .install ol{margin:0 0 14px 20px;font-size:14px;color:var(--txt);}
+  .install ol li{margin-bottom:6px;}
+  .install code{background:var(--bg);border:1px solid var(--bdr);border-radius:6px;padding:8px 12px;display:block;font-size:13px;word-break:break-all;color:var(--gd);font-weight:600;margin:8px 0;}
+  .install .copy-hint{font-size:12px;color:var(--gray);}
+  .ftr{background:var(--gd);color:rgba(255,255,255,.85);padding:14px 20px;font-size:11px;text-align:center;line-height:1.8;margin-top:auto;}
+  .ftr a{color:var(--gold);text-decoration:none;}
+  .ftr .reg{color:rgba(255,255,255,.5);font-size:10px;}
+  .flag-svg{vertical-align:middle;}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <img class="flag-svg" src="/uganda-flag.svg" alt="Flag of Uganda" width="30" height="20" style="border-radius:2px;vertical-align:middle;object-fit:contain;box-shadow:0 0 0 .5px rgba(0,0,0,.15);"/>
+  <div>
+    <h1>EFRISConnect</h1>
+    <div class="sub">URA Electronic Fiscal Receipting &amp; Invoicing for Manager.io</div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="hero">
+    <h2>Fiscalise your Manager.io invoices and receipts with URA EFRIS</h2>
+    <p>A free, open-source extension that connects Manager.io accounting software directly to Uganda's Electronic Fiscal Receipting and Invoicing Solution (EFRIS) - no separate system, no manual re-entry.</p>
+    <div class="cta">
+      <a class="btn bg" href="/extension">Open the Extension</a>
+      <a class="btn bo" href="https://github.com/The-Tukei-Hope-Initiative/EFRISConnect" target="_blank">View on GitHub</a>
+    </div>
+  </div>
+
+  <div class="features">
+    <div class="card"><h3>Issue &amp; Submit Receipts</h3><p>Walk-in sales or existing Manager invoices, fiscalised to URA in one click - FDN, QR code and verification code included.</p></div>
+    <div class="card"><h3>Credit Notes &amp; Goods</h3><p>File credit notes against original invoices, register goods/services with the correct EFRIS commodity codes, and manage stock.</p></div>
+    <div class="card"><h3>Offline Mode</h3><p>Documents queue automatically when URA is unreachable and submit as soon as the connection returns - or use URA's own Offline Enabler for true offline fiscalisation.</p></div>
+    <div class="card"><h3>Multi-Business</h3><p>Switch between multiple businesses in the same Manager.io install, each with its own EFRIS credentials and settings.</p></div>
+  </div>
+
+  <div class="install">
+    <h3>Add this to Manager.io</h3>
+    <ol>
+      <li>In Manager.io, go to <strong>Settings &rarr; Custom Buttons/Extensions</strong>.</li>
+      <li>Paste this URL as the extension address:</li>
+    </ol>
+    <code id="extUrl">/extension</code>
+    <div class="copy-hint">Once added, the extension opens inside Manager for whichever business you're viewing.</div>
+  </div>
+</div>
+
+<div class="ftr">
+  <div>EFRISConnect - Free &amp; Open Source</div>
+  <div>A project of <a href="https://tukeihopeinitiative.org/" target="_blank">The Tukei Hope Initiative &nearr;</a> - Community Based Organisation, Entebbe, Uganda</div>
+  <div class="reg">Registration No. EMC/CBO/025 | Your Hope, Our Mission</div>
+</div>
+
+<script>
+  document.getElementById('extUrl').textContent = window.location.origin + '/extension';
+</script>
+</body>
+</html>
