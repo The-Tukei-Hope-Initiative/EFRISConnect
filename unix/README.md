@@ -11,7 +11,11 @@ always just run `./start.sh` from the repo root.
   systemd on Linux, a launchd LaunchAgent on macOS. Auto-starts on boot/login and
   restarts on failure.
 - **uninstall-service.sh** - remove that service.
+- **start-lan.sh** - start the relay for the shop network (LAN): binds to the
+  network, allows this computer's name, `name.local` and private IPv4 addresses,
+  and prints the till addresses. Makes no firewall changes (it prints a hint).
+  See "Shop network (LAN)" in `../docs/self-hosting.md`.
 
 Make them executable once if needed: `chmod +x unix/*.sh start.sh`.
 
-Requirements: Node.js 18+ and (for setup-https.sh) openssl.
+Requirements: Node.js 20+ and (for setup-https.sh) openssl.

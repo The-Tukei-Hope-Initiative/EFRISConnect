@@ -29,28 +29,44 @@ that bridges [Manager.io](https://www.manager.io/) and URA EFRIS. It runs on
   document numbers, EFRISConnect can also work with URA's separate Offline Mode
   Enabler (optional; see "Offline Enabler" in docs/self-hosting.md).
 
-## What is open source, what is hosted, what is paid
+## What is open source, and what is paid
 
 - **Open source (this repository):** the entire application - the relay
   (`backend/`), the UI (`frontend/`), and the data files. MIT licensed. You can
   read, run, modify, and redistribute all of it, for free, with no account and
   without contacting anyone.
-- **Optional hosted convenience:** The Tukei Hope Initiative may run a hosted
-  instance for businesses that prefer not to self-host. Using it is entirely
-  optional; the code behind it is exactly the code in this repository (see
-  "Which version is running" below). The hosted version does **not** bypass URA:
-  a business must still be registered and provisioned by URA (device, thumbprint,
-  digital keys) exactly as for self-hosting - the hosting only saves you running
-  the relay yourself, it does not remove any URA approval requirement.
 - **Optional paid services:** The Initiative offers optional paid training and
   setup. This is never required - everything needed to install and run
   EFRISConnect yourself is in this repository and documented below.
+
+EFRISConnect is a self-hosted application: you run it on your own machine or
+server. It does not bypass URA - a business must still be registered and
+provisioned by URA (device, thumbprint, digital keys) for both sandbox and
+production.
+
+---
+
+## Testing and going live
+
+EFRISConnect is under active testing. **If you are helping test (including URA
+VAT testers), use a test setup only:**
+
+- A **URA EFRIS sandbox** account, device, and digital keys - never production
+  credentials.
+- A **separate Manager.io test business**, not your live company file.
+- **Test/dummy data only** - do not fiscalise real sales or real customer data.
+
+Keep **Sandbox mode ON** in the app until you have verified everything end to
+end. **Going live is a separate URA step:** it needs its own production device,
+thumbprint registration, and digital keys, and URA must approve/activate you for
+live e-invoicing. Only switch to production credentials once URA has activated
+you and your testing is complete.
 
 ---
 
 ## Self-hosting (Windows, macOS, Linux)
 
-You need **Node.js 18+** and a **URA-provisioned EFRIS device**. No cloud
+You need **Node.js 20+** and a **URA-provisioned EFRIS device**. No cloud
 account, no payment, and no contact with The Tukei Hope Initiative.
 
 > **URA prerequisites (obtained from URA, not from EFRISConnect).**
@@ -69,7 +85,7 @@ account, no payment, and no contact with The Tukei Hope Initiative.
 > register your device or grant go-live approval - only URA does that.
 
 ### 1. Install Node.js
-Install Node.js 18 or newer from https://nodejs.org (LTS is fine). Verify:
+Install Node.js 20 or newer from https://nodejs.org (LTS is fine). Verify:
 ```
 node --version
 ```
@@ -127,14 +143,13 @@ Full step-by-step notes, including the macOS/Linux HTTPS steps, are in
 
 ---
 
-## Which version is running (verify the hosted instance)
+## Which version you are running
 
-The hosted instance runs a tagged release of this repository - the exact same
-code, deployed to a matching Git tag. The [`VERSION`](VERSION) file records the
-release the hosted service runs (e.g. `1.0.0`), and each release is published as a
-matching Git tag / GitHub Release here (e.g. `v1.0.0`). To verify, check out that
-tag and compare - what runs at efris.tukeihopeinitiative.org is the code at that
-tag, nothing added.
+Every release is tagged in this repository. The [`VERSION`](VERSION) file records
+the release (e.g. `1.0.5`), and each release is published as a matching Git tag /
+GitHub Release here (e.g. `v1.0.5`). The running app shows its version in the footer
+and at `GET /api/version`, so you can check out that tag and confirm you are running
+exactly the published code, nothing added.
 
 ## Security
 

@@ -8,8 +8,32 @@ const express = require('express');
 const cors    = require('cors');
 const path    = require('path');
 const fs      = require('fs');
+const logger  = require('./logger');
+const tillKit = require('./till-kit');   // shop network: what a till needs to trust this relay  // daily error/activity log for troubleshooting
+const consoleUi = require('./console-ui');  // timestamps, colours, status block, hotkeys
+const activity = require('./activity');     // console lines kept (masked) for Settings > Logs
+const logTools = require('./log-tools');    // log retention, date-range export, support bundle zip
+if (require.main === module) consoleUi.install(logger.LOG_DIR, { context: activityContext });
+else { activity.setDir(logger.LOG_DIR); activity.setContextGetter(activityContext); }
+logger.setContextGetter(activityContext);   // error-log entries name their business too
 const vault   = require('./vault');   // encrypted per-tenant credential store
-const logger  = require('./logger');  // daily error/activity log for troubleshooting
+const mailer  = require('./mailer');  // outgoing email: sign-in codes and security alerts (Settings > Email)
+// Mask the exact vault secrets in the activity log whenever a business is read.
+try { vault.setSecretSink(t => activity.noteSecrets([t.efrisPassword, t.efrisPassphrase, t.managerToken])); } catch (_) {}
+try { vault.warm(); } catch (_) {}     // unlock the vault key in the background, not on the first request
+// Once the vault is unlocked, read every business once so all saved secrets are
+// known to the activity masker before anything about them can be logged (not only
+// the businesses a request has touched). Retried every few seconds until unlocked.
+function learnVaultSecrets() {
+  if (!vault.isUnlocked()) return false;
+  try { for (const t of vault.listTenants()) { try { vault.getTenant(t.id); } catch (_) { return false; } } } catch (_) { return false; }
+  mailer.learn();   // the saved email (SMTP) password too
+  return true;
+}
+if (!learnVaultSecrets()) {
+  const _learnTimer = setInterval(() => { if (learnVaultSecrets()) clearInterval(_learnTimer); }, 5000);
+  _learnTimer.unref();
+}
 
 // ── Redact secrets before anything gets logged ──────────────────
 // Scans a request body for known-sensitive field names (wherever they are
@@ -20,6 +44,7 @@ const logger  = require('./logger');  // daily error/activity log for troublesho
 const SECRET_FIELD_NAMES = new Set(['efrispassword','accesstoken','token','apiaccesstoken','efriskeypassphrase','efriskeypassword','password','efriskeypem']);
 function collectSecrets(obj, acc, depth) {
   if (!obj || typeof obj !== 'object' || depth > 4) return acc;
+  if (!depth) for (const v of activity.secretsIn(obj)) acc.push(v);   // managerToken, aesKey, pwd, ...
   for (const k of Object.keys(obj)) {
     const v = obj[k];
     if (typeof v === 'string' && v && SECRET_FIELD_NAMES.has(k.toLowerCase())) acc.push(v);
@@ -49,8 +74,22 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const app  = express();
+app.disable('x-powered-by');   // do not announce the server software
+// A failing async route (a bad Manager URL, Manager closed mid-request) must answer
+// that request with an error, not reach the unhandledRejection handler above and
+// stop the relay with its queue timers. Route every handler's rejection to the
+// error middleware at the end of this file.
+for (const m of ['get', 'post', 'put', 'delete', 'patch']) {
+  const orig = app[m].bind(app);
+  app[m] = function (route, ...handlers) {
+    if (!handlers.length) return orig(route);   // app.get('setting')
+    return orig(route, ...handlers.map(h => (typeof h === 'function' && h.length < 4)
+      ? function (req, res, next) { try { const r = h(req, res, next); if (r && typeof r.catch === 'function') r.catch(next); } catch (e) { next(e); } }
+      : h));
+  };
+}
 const PORT = process.env.PORT || 3000;
-const HTTPS_PORT = 5443;
+const HTTPS_PORT = parseInt(process.env.HTTPS_PORT, 10) || 5443;   // override for a second copy (tests, scans)
 // Which interface to bind. Default 127.0.0.1 (loopback ONLY): the common case is a
 // single-machine install where Manager, the relay, and the
 // browser are all local - binding loopback avoids the Windows Firewall prompt and
@@ -65,9 +104,115 @@ const BIND_HOST = process.env.BIND_HOST || '127.0.0.1';
 // when there is no cert yet 3000 still serves the full app so first-run isn't broken.
 let httpsUp = false;
 
-app.set('trust proxy', true);
-app.use(cors({ origin:'*', methods:['GET','POST','PUT','DELETE','OPTIONS'], allowedHeaders:['Content-Type','Authorization','X-API-KEY','X-Manager-Token','X-Manager-Endpoint'] }));
+// Only trust X-Forwarded-For from a reverse proxy on this machine (e.g. a local
+// tunnel). Trusting every hop lets any caller fake its IP past the rate limiter.
+// A proxy on another host can be named with TRUST_PROXY (Express syntax).
+app.set('trust proxy', process.env.TRUST_PROXY || 'loopback');
+
+// Which browser origins may call the relay and frame the extension. Manager
+// Desktop and the relay itself run on loopback, so loopback origins (any port)
+// are always allowed. Add others (e.g. a cloud Manager) with ALLOWED_ORIGINS,
+// comma separated: ALLOWED_ORIGINS=https://manager.example.com
+const LOOPBACK_HOST = /^(localhost|127\.\d+\.\d+\.\d+|\[::1\]|::1)$/i;
+const EXTRA_HOSTS = String(process.env.ALLOWED_HOSTS || '').split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+// Shop network (LAN) mode (LAN_MODE=1, set by the launcher): tills open Manager
+// Server Edition in a browser at http(s)://<server name or IP>:<Manager port>, so
+// those origins may frame the extension and talk to the relay. The names are the
+// ALLOWED_HOSTS the launcher built (hostname, hostname.local, private IPv4s); the
+// ports are MANAGER_PORTS (default 5000, Manager Server's default). MANAGER_ORIGINS
+// adds any other Manager origin (comma separated), in or out of LAN mode.
+const LAN_MODE = /^(1|true|yes|on)$/i.test(String(process.env.LAN_MODE || ''));
+const bracketHost = h => (h.includes(':') ? '[' + h + ']' : h);
+const remoteHost = h => !!h && !LOOPBACK_HOST.test(h) && h !== '0.0.0.0';
+function lanManagerOrigins(hosts, ports) {
+  const out = [];
+  for (const h of (hosts || []).filter(remoteHost)) for (const p of ports || []) for (const proto of ['http', 'https']) out.push(proto + '://' + bracketHost(h) + ':' + p);
+  return out;
+}
+function managerPorts(v) { return String(v || '5000').split(',').map(p => p.trim()).filter(p => /^\d{1,5}$/.test(p) && +p > 0 && +p < 65536); }
+// The relay addresses tills use in LAN mode (first = the PC name: the Manager button URL).
+function lanRelayUrls(hosts, httpsPort) {
+  return (hosts || []).filter(remoteHost).map(h => 'https://' + bracketHost(h) + ':' + httpsPort + '/extension');
+}
+const MANAGER_PORTS = managerPorts(process.env.MANAGER_PORTS);
+// LAN mode: the relay also serves Manager Server over HTTPS (manager-proxy.js) on
+// MANAGER_HTTPS_PORT, default Manager's port + 1 (5001). MANAGER_HTTPS_PORT=0 turns it off.
+const MANAGER_HTTPS_PORT = (() => {
+  if (!LAN_MODE || !MANAGER_PORTS.length) return 0;
+  const v = String(process.env.MANAGER_HTTPS_PORT || '').trim();
+  if (v === '0') return 0;
+  const n = parseInt(v, 10);
+  return (n > 0 && n < 65536) ? n : (+MANAGER_PORTS[0] + 1);
+})();
+const EXTRA_ORIGINS = [...new Set(String(process.env.ALLOWED_ORIGINS || '').split(',')
+  .concat(String(process.env.MANAGER_ORIGINS || '').split(','))
+  .map(o => o.trim().replace(/\/+$/, '')).filter(Boolean)
+  .concat(LAN_MODE ? lanManagerOrigins(EXTRA_HOSTS, MANAGER_HTTPS_PORT ? MANAGER_PORTS.concat(String(MANAGER_HTTPS_PORT)) : MANAGER_PORTS) : []))];
+const LAN_URLS = LAN_MODE ? lanRelayUrls(EXTRA_HOSTS, HTTPS_PORT) : [];
+function isAllowedOrigin(origin) {
+  if (!origin) return false;
+  try {
+    const u = new URL(origin);
+    if ((u.protocol === 'http:' || u.protocol === 'https:') && LOOPBACK_HOST.test(u.hostname)) return true;
+  } catch (_) { return false; }
+  return EXTRA_ORIGINS.includes(String(origin).replace(/\/+$/, ''));
+}
+// No [::1] entries: browsers reject them in frame-ancestors.
+const FRAME_ANCESTORS = ["'self'", 'http://localhost:*', 'https://localhost:*', 'http://127.0.0.1:*', 'https://127.0.0.1:*'].concat(EXTRA_ORIGINS).join(' ');
+
+// Host-header allowlist: stops DNS-rebinding pages from reaching the relay under
+// their own hostname. Enforced when bound to loopback (the default) or when
+// ALLOWED_HOSTS is set; a network/container bind without ALLOWED_HOSTS skips it.
+const BIND_IS_LOOPBACK = LOOPBACK_HOST.test(BIND_HOST);
+const ENFORCE_HOST = BIND_IS_LOOPBACK || EXTRA_HOSTS.length > 0;
+if (!ENFORCE_HOST) console.log('Note: BIND_HOST=' + BIND_HOST + ' without ALLOWED_HOSTS - Host header check is off. Set ALLOWED_HOSTS=<your hostname>.');
+app.use((req, res, next) => {
+  if (!ENFORCE_HOST) return next();
+  const h = String(req.headers.host || '').toLowerCase().replace(/:\d+$/, '');
+  if (LOOPBACK_HOST.test(h) || EXTRA_HOSTS.includes(h)) return next();
+  res.status(421).type('text/plain').send('Host not allowed');
+});
+
+app.use(cors({
+  origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
+  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','X-API-KEY','X-Manager-Token','X-Manager-Endpoint','X-Tenant-Id','X-Fx-Key'],
+}));
+// Only Manager (loopback, or ALLOWED_ORIGINS) and the relay itself may frame our pages.
+app.use((req, res, next) => {
+  // Everything the pages use comes from the relay itself (scripts, styles, the PDF
+  // library) or is inline / data: (QR codes, logos). 'unsafe-inline' stays because
+  // the extension uses inline scripts and handlers.
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'", "script-src 'self' 'unsafe-inline'", "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:", "font-src 'self' data:", "connect-src 'self'", "frame-src 'self' blob:",
+    "worker-src 'self' blob:", "object-src 'none'", "base-uri 'self'", "form-action 'self'",
+    'frame-ancestors ' + FRAME_ANCESTORS,
+  ].join('; '));
+  // HSTS covers every port of a host name, so on a shop PC it would force the browser
+  // onto https for Manager Server (http://PCNAME:5000) too. Send it only behind a
+  // proxy with a real domain (TRUST_PROXY), never on a local or shop-network name; max-age=0 clears an earlier one.
+  if (req.secure) res.setHeader('Strict-Transport-Security', process.env.TRUST_PROXY ? 'max-age=31536000' : 'max-age=0');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');   // page URLs can carry the Manager token
+  next();
+});
 app.use(express.json({ limit: '5mb' }));   // cap request bodies to guard against oversized-payload DoS
+// Learn the secrets a request carries (body fields named like a password, token or
+// key, and the credential headers) before any route can log them, so the activity
+// log masks their exact values wherever they show up.
+app.use((req, res, next) => {
+  try {
+    activity.noteBody(req.body);
+    activity.noteBody(req.query);
+    const h = req.headers || {};
+    const hv = [h['x-manager-token'], h['x-api-key'], h['x-fx-key']];
+    const m = /^\s*\S+\s+(\S{6,})\s*$/.exec(String(h.authorization || ''));
+    if (m) hv.push(m[1]);
+    activity.noteSecrets(hv.filter(v => typeof v === 'string'));
+  } catch (_) {}
+  next();
+});
 
 // Published release version, so a user can see which version is running and match
 // it against the public repo's tag. Read from the VERSION file, fall back to
@@ -97,14 +242,248 @@ app.use((req, res, next) => {
   next();
 });
 
-// ── Internal API key - protects all /api/* routes from outside callers ──
-// Set INTERNAL_API_KEY env var for a stable key; otherwise a random key is
-// generated at startup (injected into the served HTML so the SPA can use it).
-const API_KEY = process.env.INTERNAL_API_KEY || crypto.randomBytes(32).toString('hex');
+// ── Sign-in, roles and business isolation ──
+// Every /api request is made by a principal: a signed-in user (Authorization:
+// Bearer <session token>, see auth.js) or, only when INTERNAL_API_KEY is set in
+// the environment, the "service" principal (X-API-KEY header, for automation:
+// tests, scanners, scripts). The pages never carry a key.
+const auth = require('./auth');
+const { AsyncLocalStorage } = require('async_hooks');
+// The principal of the request being handled, so deep helpers (the submission
+// log writer) can record who did what without every route passing it down.
+const reqCtx = new AsyncLocalStorage();
+const SERVICE_KEY = process.env.INTERNAL_API_KEY || '';
+const SERVICE_KEY_BUF = Buffer.from(SERVICE_KEY);
+activity.noteSecrets(SERVICE_KEY);
+// Business and person behind the console line being printed (activity log).
+function activityContext() {
+  const s = reqCtx.getStore();
+  if (!s) return null;
+  const u = s.user;
+  return { tenantId: s.tenantId || '', user: u ? (u.displayName || u.name || u.id || '') : '' };
+}
+function serviceKeyOk(v) {
+  if (!SERVICE_KEY) return false;
+  const b = Buffer.from(String(v || ''));
+  return b.length === SERVICE_KEY_BUF.length && crypto.timingSafeEqual(b, SERVICE_KEY_BUF);
+}
+const SERVICE_PRINCIPAL = Object.freeze({ id: 'service', name: 'service', displayName: 'Service', service: true, owner: true, roles: {} });
+
+// A request made on the relay's own computer: loopback socket, loopback Host, and
+// not forwarded by a proxy on this machine (a local tunnel or reverse proxy makes
+// remote requests arrive on loopback; they carry X-Forwarded-For). Tests simulate
+// another computer by sending X-Forwarded-For.
+function isLocalRequest(req) {
+  const ra = String((req.socket && req.socket.remoteAddress) || '');
+  const sockLocal = ra === '::1' || /^(::ffff:)?127\./.test(ra);
+  const host = String(req.headers.host || '').toLowerCase().replace(/:\d+$/, '');
+  const hostLocal = LOOPBACK_HOST.test(host);
+  const proxied = !!(req.headers['x-forwarded-for'] || req.headers.forwarded || req.headers['x-real-ip'] || req.headers['cf-connecting-ip']);
+  return sockLocal && hostLocal && !proxied;
+}
+
+// Businesses (vault tenants) a principal may use. Owners and the service: all.
+function tenantIdsFor(user) {
+  let all = [];
+  try { all = vault.listTenants().map(t => t.id); } catch (_) {}
+  if (!user) return [];
+  if (user.owner || user.service) return all;
+  return Object.keys(user.roles || {});
+}
+// Owners and the service may also name a business not saved yet (the extension
+// sends its id while the owner is still filling in its settings); nothing is
+// stored for such an id, so there is nothing to reach.
+function canUseTenant(user, tid) {
+  if (!user || !tid) return false;
+  if (user.owner || user.service) return true;
+  return !!(user.roles && user.roles[tid]);
+}
+
+// ── Route permissions ──
+// One line per /api route: [method, path below /api, permission]. 'public' needs
+// no sign-in; '' needs any signed-in user (the route checks scope itself); other
+// values are permissions from auth.js ROLE_PERMS. A route missing here is
+// ADMIN ONLY (deny by default): a new route stays locked until it is listed.
+const ROUTE_PERMS = [
+  // No sign-in
+  ['GET', '/health', 'public'], ['GET', '/version', 'public'],
+  ['GET', '/auth/status', 'public'], ['POST', '/auth/setup', 'public'], ['POST', '/auth/login', 'public'], ['POST', '/auth/recover', 'public'],
+  ['POST', '/auth/email-code', 'public'],   // answers the same whether or not the account exists
+  // Any signed-in user; the route itself limits what each one can do
+  ['POST', '/auth/logout', ''], ['POST', '/auth/change-password', ''], ['POST', '/client-log', ''],
+  ['GET', '/auth/users', ''], ['POST', '/auth/users', ''], ['POST', '/auth/users/:id', ''], ['POST', '/auth/users/:id/email-code', ''],
+  ['POST', '/auth/me', ''],
+  ['GET', '/tenant', ''], ['POST', '/tenant', ''], ['DELETE', '/tenant/:id', ''],
+  ['GET', '/tenant/:id/profile', ''],   // any role in that business (checked in the route)
+  // Cashier: view documents, rates, units
+  ['GET', '/manager/invoice', 'view'], ['GET', '/manager/find-doc', 'view'], ['GET', '/manager/invoices', 'view'],
+  ['GET', '/receipt-snapshot', 'view'], ['GET', '/connectivity', 'view'], ['GET', '/fx-rates', 'view'], ['GET', '/fx-rate', 'view'],
+  ['POST', '/efris/exchange-rate', 'view'], ['POST', '/efris/my-details', 'view'], ['GET', '/units', 'view'], ['GET', '/units/sync-status', 'view'],
+  // Cashier: fiscalise and record a sale (the receipt wizard also takes the next
+  // number from a series, logs Manager-only receipts and sets the day's FX rate)
+  ['POST', '/efris/submit-invoice', 'sell'], ['POST', '/efris/preview-invoice', 'sell'], ['POST', '/manager/create-receipt', 'sell'],
+  ['POST', '/efris/save-to-manager', 'sell'], ['POST', '/receipt-snapshot', 'sell'], ['POST', '/manager-only-log', 'sell'],
+  ['GET', '/print-count', 'sell'], ['POST', '/print-count', 'sell'],
+  ['POST', '/manager/set-exchange-rate', 'sell'], ['GET', '/manager/bank-accounts', 'sell'],
+  ['POST', '/receipt-number/next', 'sell'],
+  // Goods > My Items, shared by every computer: everyone reads, admins change it.
+  ['GET', '/goods-catalog', 'goods-read'], ['PUT', '/goods-catalog', 'admin'],
+  ['GET', '/number-series', 'sell'], ['POST', '/number-series/:id/next', 'sell'], ['POST', '/number-series/:id/preview', 'sell'],
+  // Cashier: customers
+  ['POST', '/manager/customers', 'customers'], ['POST', '/manager/customer-detail', 'customers'],
+  ['POST', '/manager/create-customer', 'customers'], ['POST', '/efris/verify-tin', 'customers'],
+  // Cashier: read goods, units and the commodity tree
+  ['POST', '/efris/search-goods', 'goods-read'], ['GET', '/goods/manager-items', 'goods-read'], ['GET', '/goods/manager-item-detail', 'goods-read'],
+  ['GET', '/manager/items-list', 'goods-read'], ['POST', '/efris/measure-units', 'goods-read'],
+  ['GET', '/segments', 'goods-read'], ['GET', '/segments/:segCode/families', 'goods-read'], ['GET', '/segments/:segCode/families/:famCode/classes', 'goods-read'],
+  ['GET', '/segments/:segCode/families/:famCode/classes/:clsCode/commodities', 'goods-read'],
+  ['GET', '/commodity/search', 'goods-read'], ['GET', '/commodity/:code', 'goods-read'], ['POST', '/efris/commodity-tax', 'goods-read'],
+  // Cashier: offline queue (see it, Try now, link the Manager document)
+  ['GET', '/offline-queue', 'queue'], ['POST', '/offline-queue/:id/link', 'queue'], ['POST', '/offline-queue/retry-now', 'queue'], ['POST', '/offline-queue/flush', 'queue'],
+  // Cashier: own submission-log entries (accountants and admins see all)
+  ['GET', '/submission-log', 'log-own'], ['GET', '/submission-log/by-fdn/:fdn', 'log-own'],
+  // Accountant: credit and debit notes
+  ['POST', '/efris/credit-note', 'credit'], ['POST', '/efris/credit-notes/status', 'credit'], ['POST', '/efris/credit-notes/void', 'credit'],
+  ['POST', '/efris/credit-notes/cancel', 'credit'], ['POST', '/efris/debit-note', 'credit'], ['POST', '/manager/create-credit-note', 'credit'],
+  // Accountant: reports and reconcile
+  ['POST', '/efris/invoices-report', 'reports'], ['GET', '/z-report', 'reports'],
+  ['POST', '/reconcile/documents', 'reconcile'], ['POST', '/reconcile/stock', 'reconcile'],
+  // Accountant: stock (T131/T132 and the Manager inventory mirror)
+  ['POST', '/efris/stock-in', 'stock'], ['POST', '/efris/stock-adjust', 'stock'], ['POST', '/manager/inventory-adjust', 'stock'],
+  ['GET', '/manager/accounts', 'stock'], ['GET', '/manager/divisions', 'stock'],
+  // Accountant: number series set-up
+  ['POST', '/number-series', 'series'], ['PUT', '/number-series/:id', 'series'], ['DELETE', '/number-series/:id', 'series'],
+  // Accountant: the whole submission log and queue housekeeping
+  ['POST', '/submission-log/import', 'log-all'], ['POST', '/submission-log/:id/link', 'log-all'], ['DELETE', '/submission-log/:id', 'log-all'],
+  ['DELETE', '/offline-queue/:id', 'log-all'],
+  // Admin: the relay's activity log (Settings > Logs). Listed explicitly; the route
+  // further limits a non-owner admin to the businesses they administer.
+  ['GET', '/admin/activity', 'admin'], ['GET', '/admin/activity/export', 'admin'], ['GET', '/admin/support-bundle', 'admin'],
+  // Owner only: the relay's outgoing email server (Settings > Email). 'owner' is not
+  // a role permission: an owner or the service passes, every other user (even a
+  // business admin) is refused, because the mail account serves the whole relay.
+  ['GET', '/admin/email', 'owner'], ['POST', '/admin/email', 'owner'], ['POST', '/admin/email/test', 'owner'],
+  // Owner only: single-user mode (no sign-in on the relay's own computer).
+  ['GET', '/admin/single-user', 'owner'], ['POST', '/admin/single-user', 'owner'],
+  // Everything else (tenant credentials, users, goods registration T130, custom
+  // fields, theme install, Enabler test, manager/detect, rotate-key, logs, debug
+  // routes, unit sync, currencies) is admin only.
+].map(([method, p, perm]) => ({ method, path: p, perm, re: new RegExp('^' + p.replace(/:[A-Za-z]+/g, '[^/]+') + '/?$') }));
+function routePerm(method, p) {
+  const m = method === 'HEAD' ? 'GET' : method;
+  const hit = ROUTE_PERMS.find(r => r.method === m && r.re.test(p));
+  return hit ? hit.perm : '*';
+}
+
+function denyAuth(res) { return res.status(401).json({ success: false, error: 'Sign in required', auth: true }); }
 app.use('/api', (req, res, next) => {
-  if (req.path === '/health') return next(); // health check must stay public
-  if (req.headers['x-api-key'] !== API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
+  // Who is calling
+  let user = null;
+  if (req.headers['x-api-key'] && serviceKeyOk(req.headers['x-api-key'])) user = SERVICE_PRINCIPAL;
+  else {
+    const m = /^Bearer\s+([A-Za-z0-9_-]{20,100})\s*$/i.exec(String(req.headers.authorization || ''));
+    if (m) {
+      const s = auth.sessionFromToken(m[1]);
+      // A single-user (automatic) session only counts on the relay's own computer,
+      // and only while single-user mode is on.
+      if (s && !(s.session && s.session.localAuto && !(isLocalRequest(req) && singleUserOn()))) { user = s.user; req.sessionHash = s.hash; req.sessionToken = m[1]; req.localAuto = !!(s.session && s.session.localAuto); }
+    }
+  }
+  req.auth = user;
+  const perm = routePerm(req.method, req.path);
+  if (perm === 'public') return reqCtx.run({ user }, next);
+  if (!user) return denyAuth(res);
+  // Which business: X-Tenant-Id must be one the user holds a role in. The tenant
+  // routes name their business in the body or path and check it themselves.
+  const tid = String(req.headers['x-tenant-id'] || '').trim();
+  const tenantRoute = /^\/tenant(\/|$)/.test(req.path);
+  if (tid && !tenantRoute && !canUseTenant(user, tid)) return res.status(403).json({ success: false, error: 'You do not have access to this business' });
+  req.tenantId = tid && !tenantRoute ? tid : '';
+  // Owner-only routes: no role grants them, whatever the business.
+  if (perm === 'owner' && !(user.owner || user.service)) return res.status(403).json({ success: false, error: 'Only an owner can do this', permission: 'owner' });
+  // What they may do there (no business named: what they may do in any of theirs)
+  if (perm !== '' && perm !== 'owner') {
+    const perms = auth.permissionsFor(user, req.tenantId || undefined);
+    if (!auth.can(perms, perm)) return res.status(403).json({ success: false, error: 'Your role cannot do this', permission: perm === '*' ? 'admin' : perm });
+  }
+  reqCtx.run({ user, tenantId: req.tenantId }, next);
+});
+function currentUser() { const s = reqCtx.getStore(); return (s && s.user) || null; }
+// Who to record on a log entry.
+function actor(req) {
+  const u = (req && req.auth) || currentUser();
+  if (!u) return {};
+  return { userId: u.id, userName: u.displayName || u.name };
+}
+
+// ── Vault placeholders ──
+// The browser keeps no secrets: where it would send the EFRIS password, private
+// key, key passphrase or Manager token it sends VAULT_PLACEHOLDER plus an
+// X-Tenant-Id header. Swap each placeholder for the decrypted vault value here,
+// before any route sees the request, so the routes themselves are unchanged.
+// Only the business checked above is ever filled.
+const VAULT_PLACEHOLDER = '__vault__';
+const VAULT_FIELD = {
+  efrispassword: 'efrisPassword', password: 'efrisPassword',
+  efriskeypem: 'efrisPrivateKeyPem',
+  efriskeypassphrase: 'efrisPassphrase', efriskeypassword: 'efrisPassphrase',
+  accesstoken: 'managerToken', apiaccesstoken: 'managerToken', token: 'managerToken', tk: 'managerToken',
+};
+// Returns how many placeholders were filled with a real (non-empty) vault value.
+function fillFromVault(obj, tenant, depth) {
+  if (!obj || typeof obj !== 'object' || depth > 5) return 0;
+  let n = 0;
+  for (const k of Object.keys(obj)) {
+    const v = obj[k];
+    if (v === VAULT_PLACEHOLDER) { const f = VAULT_FIELD[k.toLowerCase()]; obj[k] = (f && tenant && tenant[f]) || ''; if (obj[k]) n++; }
+    else if (v && typeof v === 'object') n += fillFromVault(v, tenant, depth + 1);
+  }
+  return n;
+}
+// Field names that say where a Manager call goes (body, nested config, query).
+const MGR_EP_FIELD = /^(managerendpoint|mgrendpoint|managerurl|ep)$/i;
+// Sets every Manager-endpoint field in obj to ep. Returns how many it found.
+function forceEndpoint(obj, ep, depth) {
+  if (!obj || typeof obj !== 'object' || depth > 5) return 0;
+  let n = 0;
+  for (const k of Object.keys(obj)) {
+    const v = obj[k];
+    if (MGR_EP_FIELD.test(k) && (typeof v === 'string' || v == null)) { if (v) n++; obj[k] = ep; }
+    else if (v && typeof v === 'object') n += forceEndpoint(v, ep, depth + 1);
+  }
+  return n;
+}
+app.use('/api', (req, res, next) => {
+  if (/^\/auth(\/|$)/.test(req.path)) return next();   // passwords there are the user's own
+  if (/^\/admin\/email(\/|$)/.test(req.path)) return next();   // the email password is the relay's, not a business's
+  if (/^\/tenant(\/|$)/.test(req.path)) return next();   // saving a business never needs saved secrets filled in (a profile must keep its placeholders)
+  const raw = JSON.stringify(req.body || {}) + JSON.stringify(req.query || {}) + (req.headers['x-manager-token'] || '');
+  if (!raw.includes(VAULT_PLACEHOLDER)) return next();
+  const tid = req.tenantId || '';
+  if (!tid) return res.status(400).json({ success: false, error: 'Select a business first (saved credentials belong to a business).' });
+  let tenant = null;
+  // While the vault key is still unlocking in the background, answer "try again
+  // shortly" rather than filling the request with blank secrets.
+  try { tenant = vault.getTenant(tid); }
+  catch (e) { if (e.code === 'VAULT_LOCKED') return res.status(503).json({ success: false, error: e.message, vaultLocked: true }); throw e; }
+  if (!tenant) console.log('   ⚠ Request used vault placeholders but tenant "' + tid + '" is not in the vault');
+  let filled = fillFromVault(req.body, tenant, 0) + fillFromVault(req.query, tenant, 0);
+  const hdrTok = req.headers['x-manager-token'] === VAULT_PLACEHOLDER;
+  if (hdrTok) { req.headers['x-manager-token'] = (tenant && tenant.managerToken) || ''; if (req.headers['x-manager-token']) filled++; }
+  // The filled-in values are masked in the logs from here on.
+  activity.noteBody(req.body); activity.noteBody(req.query); activity.noteSecrets(req.headers['x-manager-token'] || '');
+  if (filled) {
+    // A saved secret only ever goes to this business's own Manager: whatever
+    // endpoint the caller named is replaced by the one saved with the business.
+    // Without a saved endpoint the request is refused rather than sent anywhere
+    // the caller chose.
+    const ep = String((tenant && tenant.managerEndpoint) || '').trim();
+    const named = forceEndpoint(req.body, ep, 0) + forceEndpoint(req.query, ep, 0) + (req.headers['x-manager-endpoint'] ? 1 : 0);
+    const mgrTokenUsed = hdrTok || /"(accesstoken|apiaccesstoken|token|tk)":"__vault__"/i.test(raw);
+    if (!ep && (named || mgrTokenUsed)) return res.status(400).json({ success: false, error: 'Save the Manager endpoint for this business in Settings first: saved credentials are only sent to the Manager saved with the business.' });
+    if (ep) req.headers['x-manager-endpoint'] = ep;
+    req.vaultFilled = true;
+    req.vaultEndpoint = ep;
   }
   next();
 });
@@ -124,6 +503,352 @@ function rateLimit(maxPerMin) {
     next();
   };
 }
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, hits] of _rateMap) if (!hits.some(t => now - t < 60000)) _rateMap.delete(ip);
+}, 5 * 60000).unref();
+
+// ══════════════════════════════════════════════════════════════
+//  Sign-in routes (/api/auth/*)
+// ══════════════════════════════════════════════════════════════
+// Permission names a role grants, for the extension to show or hide controls.
+// Admins get '*' plus every name, so a check for any one name succeeds.
+const ALL_PERM_NAMES = ['admin'].concat(auth.ROLE_PERMS.accountant);
+function permList(user, tid) {
+  const p = auth.permissionsFor(user, tid);
+  return p.has('*') ? ['*'].concat(ALL_PERM_NAMES) : [...p];
+}
+function tenantMetaMap() { const m = {}; try { for (const t of vault.listTenants()) m[t.id] = t; } catch (_) {} return m; }
+// The businesses a user may use, with their role in each.
+function tenantsOf(user) {
+  const metas = tenantMetaMap();
+  const ids = new Set(tenantIdsFor(user));
+  return [...ids].map(id => {
+    const t = metas[id] || {};
+    return { id, businessName: t.businessName || '', tradeName: t.tradeName || '', tin: t.tin || '', mode: t.mode || 'sandbox', role: auth.roleIn(user, id) };
+  });
+}
+// Businesses where the user is an administrator (owners: all of them).
+function adminTenantIds(user) { return tenantIdsFor(user).filter(id => auth.roleIn(user, id) === 'admin'); }
+function shortUser(u) { return u ? { id: u.id, name: u.name, displayName: u.displayName || u.name, email: u.email || '', owner: !!u.owner } : null; }
+
+// ── Security alerts (email) ──
+// Where a request came from, for the alert text.
+function reqWhere(req) {
+  const local = isLocalRequest(req);
+  const ip = String((req && (req.ip || (req.socket && req.socket.remoteAddress))) || '').replace(/^::ffff:/, '');
+  return { local, ip };
+}
+function bizNames(ids) {
+  const m = tenantMetaMap();
+  return ids.map(id => { const t = m[id] || {}; return t.tradeName || t.businessName || id; }).join(', ');
+}
+function actorText(req) {
+  const u = req && req.auth;
+  if (!u) return '';
+  if (u.service) return 'An automated service (API key)';
+  return '"' + u.name + '"' + (u.displayName && u.displayName !== u.name ? ' (' + u.displayName + ')' : '');
+}
+function roleText(roles) {
+  const m = tenantMetaMap();
+  return Object.entries(roles || {}).map(([t, r]) => (auth.ROLES.includes(r) ? r[0].toUpperCase() + r.slice(1) : r) + ' at ' + ((m[t] && (m[t].tradeName || m[t].businessName)) || t)).join(', ');
+}
+// Queue a security alert to the owners with an email and to the affected user.
+// Never throws and never waits: a failed email does not affect the request.
+function securityAlert(event, req, ctx) {
+  try {
+    const biz = req && req.tenantId ? bizNames([req.tenantId]) : '';
+    return mailer.alert(event, Object.assign({ owners: auth.listOwners(), business: biz }, reqWhere(req), ctx || {}));
+  } catch (_) { return []; }
+}
+
+app.get('/api/auth/status', (req, res) => {
+  let user = req.auth;
+  const local = isLocalRequest(req);
+  // Single-user mode: on the relay's own computer, nobody signed in yet means the
+  // owner is signed in automatically (a normal session, marked local-auto).
+  let auto = null;
+  if (!user && local && singleUserOn() && auth.hasUsers()) {
+    const o = singleUserOwner();
+    if (o) {
+      const s = auth.createSession(o.id, false, { localAuto: true });
+      user = auth.getUser(o.id);
+      auto = { autoToken: s.token, autoExpiresAt: s.expiresAt };
+      console.log('   Sign-in: single-user mode opened EFRIS Connect as "' + o.name + '" on this computer');
+    }
+  }
+  const tenants = user ? tenantsOf(user) : [];
+  const permissions = {};
+  for (const t of tenants) permissions[t.id] = permList(user, t.id);
+  res.json(Object.assign({ success: true, setupNeeded: !auth.hasUsers(), local, emailRecovery: mailer.isConfigured(), user: shortUser(user), tenants, permissions,
+    singleUser: local && singleUserOn(), localAuto: !!(auto || req.localAuto) }, auto || {}));
+});
+
+// Create the owner account. Only while no account exists. On the relay's own
+// computer no code is needed; from anywhere else the setup code shown in the
+// relay console (and saved in the data folder) is required.
+app.post('/api/auth/setup', rateLimit(10), (req, res) => {
+  const b = req.body || {};
+  if (auth.hasUsers()) return res.status(409).json({ success: false, error: 'The owner account already exists. Sign in instead.' });
+  if (!isLocalRequest(req) && !auth.checkSetupCode(b.setupCode)) {
+    return res.status(403).json({ success: false, error: 'The setup code is wrong or has expired. It is shown in the EFRIS Connect window on the server.', setupCodeRequired: true });
+  }
+  let out;
+  try { out = auth.createOwner({ name: b.name, displayName: b.displayName, password: b.password }); }
+  catch (e) { return res.status(e.status || 500).json({ success: false, error: e.expose ? e.message : 'Could not create the account' }); }
+  const s = auth.createSession(out.user.id, !!b.remember);
+  console.log('   Sign-in: owner account "' + out.user.name + '" created' + (isLocalRequest(req) ? ' on this computer' : ' with the setup code'));
+  securityAlert('owner-created', req, { user: out.user });
+  res.json({ success: true, token: s.token, expiresAt: s.expiresAt, recoveryCode: out.recoveryCode, user: shortUser(out.user) });
+});
+
+app.post('/api/auth/login', rateLimit(10), (req, res) => {
+  const b = req.body || {};
+  if (!auth.hasUsers()) return res.json({ success: false, error: 'No account exists yet. Create the owner account first.', setupNeeded: true });
+  const r = auth.login(b.name, b.password, !!b.remember);
+  if (!r.success) {
+    if (r.justLocked) securityAlert('locked', req, { user: r.justLocked });
+    const { justLocked, ...out } = r;
+    return res.json(out);
+  }
+  res.json({ success: true, token: r.token, expiresAt: r.expiresAt, user: shortUser(r.user) });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  if (req.sessionToken) auth.logout(req.sessionToken);
+  res.json({ success: true });
+});
+
+// Forgotten password: the user's recovery code, or (owner, on the relay's own
+// computer only) a reset code written by reset-owner.js.
+app.post('/api/auth/recover', rateLimit(10), (req, res) => {
+  const b = req.body || {};
+  const r = auth.recover(b.name, b.code, b.newPassword, { allowReset: isLocalRequest(req) });
+  if (!r.success) return res.json(r);
+  securityAlert(r.method === 'reset' ? 'reset-owner-code' : r.method === 'email' ? 'reset-email-code' : 'reset-recovery', req, { user: r.user });
+  res.json({ success: true, token: r.token, expiresAt: r.expiresAt, recoveryCode: r.recoveryCode, user: shortUser(r.user) });
+});
+
+// Forgot password > Email me a code. The answer is the same whether or not the
+// name exists, has an email address or has hit the hourly limit, so it cannot be
+// used to find accounts. The code is emailed in the background.
+const EMAIL_CODE_SENT = 'If that sign-in name has an email address, a code is on its way. It works once and is valid for 30 minutes. Check your inbox (and the spam folder), then type the code below.';
+app.post('/api/auth/email-code', rateLimit(5), (req, res) => {
+  const b = req.body || {};
+  const name = typeof b.name === 'string' ? b.name.trim() : '';
+  if (!name) return res.json({ success: false, error: 'Enter your sign-in name first.' });
+  if (!mailer.isConfigured()) return res.json({ success: true, message: EMAIL_CODE_SENT });
+  try {
+    const r = auth.issueEmailCode({ name });
+    if (r.code) mailer.sendCode(r.user, r.code, reqWhere(req));
+    else if (r.limited) console.log('   ⚠ Sign-in: no password code emailed for "' + name.slice(0, 64) + '": ' + auth.EMAIL_CODE_MAX_PER_HOUR + ' already sent in the last hour');
+  } catch (e) { console.log('   ⚠ Sign-in: password code not sent: ' + e.message); }
+  res.json({ success: true, message: EMAIL_CODE_SENT });
+});
+
+// My account: the signed-in user's own email address (needs the current password).
+app.post('/api/auth/me', (req, res) => {
+  if (!req.auth || req.auth.service) return res.status(400).json({ success: false, error: 'Sign in as a user to change your account.' });
+  const b = req.body || {};
+  if (b.email === undefined) return res.status(400).json({ success: false, error: 'Nothing to change.' });
+  const r = auth.setOwnEmail(req.auth.id, b.currentPassword, b.email);
+  if (!r.success) return res.json(r);
+  if (r.changed) securityAlert('email-changed', req, { user: r.user, alsoTo: r.previous });
+  res.json({ success: true, user: shortUser(r.user) });
+});
+
+app.post('/api/auth/change-password', (req, res) => {
+  if (!req.auth || req.auth.service) return res.status(400).json({ success: false, error: 'Sign in as a user to change a password.' });
+  const b = req.body || {};
+  const r = auth.changeOwnPassword(req.auth.id, b.currentPassword, b.newPassword, req.sessionHash);
+  if (r.success) securityAlert('password-changed', req, { user: auth.publicUser(auth.getUser(req.auth.id)) });
+  res.json(r);
+});
+
+// ── User administration ──
+// An administrator manages the users of the businesses they administer, and only
+// the roles in those businesses. Owners manage everyone.
+function userAdminScope(req, res) {
+  const user = req.auth;
+  if (user.owner || user.service) return { all: true, tenants: new Set(tenantIdsFor(user)) };
+  const t = new Set(adminTenantIds(user));
+  if (!t.size) { res.status(403).json({ success: false, error: 'Your role cannot do this', permission: 'admin' }); return null; }
+  return { all: false, tenants: t };
+}
+function viewUserFor(scope, u) {
+  if (scope.all) return u;
+  const roles = {};
+  for (const [t, r] of Object.entries(u.roles || {})) if (scope.tenants.has(t)) roles[t] = r;
+  return { ...u, roles };
+}
+const inScope = (scope, u) => scope.all || (!u.owner && Object.keys(u.roles || {}).some(t => scope.tenants.has(t)));
+// The user's roles are all in businesses this admin runs (so disabling or resetting
+// them cannot lock someone out of a business the admin has no say in).
+const whollyInScope = (scope, u) => scope.all || (!u.owner && Object.keys(u.roles || {}).every(t => scope.tenants.has(t)));
+
+app.get('/api/auth/users', (req, res) => {
+  const scope = userAdminScope(req, res); if (!scope) return;
+  res.json({ success: true, users: auth.listUsers().filter(u => inScope(scope, u)).map(u => viewUserFor(scope, u)) });
+});
+
+app.post('/api/auth/users', (req, res) => {
+  const scope = userAdminScope(req, res); if (!scope) return;
+  const b = req.body || {};
+  const roles = (b.roles && typeof b.roles === 'object') ? b.roles : {};
+  for (const t of Object.keys(roles)) if (!scope.all && !scope.tenants.has(t)) return res.status(403).json({ success: false, error: 'You do not have access to this business' });
+  if (!scope.all && !Object.keys(roles).length) return res.status(400).json({ success: false, error: 'Give the user a role in at least one business.' });
+  if (b.owner && !(req.auth.owner || req.auth.service)) return res.status(403).json({ success: false, error: 'Only an owner can make another owner.' });
+  try {
+    const u = auth.addUser({ name: b.name, displayName: b.displayName, password: b.password, roles, owner: !!b.owner, email: b.email });
+    console.log('   Sign-in: user "' + u.name + '" added by ' + (req.auth.name || 'service'));
+    securityAlert(u.owner ? 'owner-created' : 'user-added', req, { user: u, actor: actorText(req), detail: u.owner ? '' : roleText(u.roles) });
+    res.json({ success: true, user: viewUserFor(scope, u) });
+  } catch (e) { res.status(e.status || 500).json({ success: false, error: e.expose ? e.message : 'Could not add the user' }); }
+});
+
+app.post('/api/auth/users/:id', (req, res) => {
+  const scope = userAdminScope(req, res); if (!scope) return;
+  const b = req.body || {};
+  const target = auth.listUsers().find(u => u.id === req.params.id);
+  if (!target || !inScope(scope, target)) return res.status(404).json({ success: false, error: 'User not found.' });
+  const fields = {};
+  if (b.displayName !== undefined) fields.displayName = b.displayName;
+  if (b.roles !== undefined) {
+    const want = (b.roles && typeof b.roles === 'object') ? b.roles : {};
+    for (const t of Object.keys(want)) if (!scope.all && !scope.tenants.has(t)) return res.status(403).json({ success: false, error: 'You do not have access to this business' });
+    // Roles in businesses the caller does not run are kept as they are.
+    const keep = {};
+    for (const [t, r] of Object.entries(target.roles || {})) if (!scope.tenants.has(t)) keep[t] = r;
+    fields.roles = { ...keep, ...want };
+  }
+  // The email address can reset the password, so it needs the same reach as a password reset.
+  if (b.disabled !== undefined || (b.password !== undefined && b.password !== '') || b.email !== undefined) {
+    if (!whollyInScope(scope, target)) return res.status(403).json({ success: false, error: 'This user also works for a business you do not administer. Ask an owner.' });
+    if (b.disabled !== undefined) fields.disabled = !!b.disabled;
+    if (b.password !== undefined && b.password !== '') fields.password = b.password;
+    if (b.email !== undefined) fields.email = b.email;
+  }
+  if (b.owner !== undefined) {
+    if (!(req.auth.owner || req.auth.service)) return res.status(403).json({ success: false, error: 'Only an owner can grant or remove owner rights.' });
+    fields.owner = !!b.owner;
+  }
+  if (target.id === (req.auth && req.auth.id) && fields.disabled) return res.status(400).json({ success: false, error: 'You cannot disable your own account.' });
+  try {
+    const u = auth.updateUser(target.id, fields);
+    const actor = actorText(req);
+    if (fields.password) securityAlert('password-reset-admin', req, { user: u, actor });
+    if (!target.disabled && u.disabled) securityAlert('user-disabled', req, { user: u, actor });
+    const newAdmin = Object.keys(u.roles || {}).filter(t => u.roles[t] === 'admin' && (target.roles || {})[t] !== 'admin');
+    if (newAdmin.length) securityAlert('role-admin', req, { user: u, actor, detail: bizNames(newAdmin) });
+    if (!target.owner && u.owner) securityAlert('owner-created', req, { user: u, actor });
+    if ((target.email || '') !== (u.email || '')) securityAlert('email-changed', req, { user: u, actor, alsoTo: target.email });
+    res.json({ success: true, user: viewUserFor(scope, u) });
+  } catch (e) { res.status(e.status || 500).json({ success: false, error: e.expose ? e.message : 'Could not update the user' }); }
+});
+
+// Reset password > Email a code to the user: the user sets their own new password
+// with the emailed code (Forgot password). Same reach as a password reset.
+app.post('/api/auth/users/:id/email-code', (req, res) => {
+  const scope = userAdminScope(req, res); if (!scope) return;
+  const target = auth.listUsers().find(u => u.id === req.params.id);
+  if (!target || !inScope(scope, target)) return res.status(404).json({ success: false, error: 'User not found.' });
+  if (!whollyInScope(scope, target)) return res.status(403).json({ success: false, error: 'This user also works for a business you do not administer. Ask an owner.' });
+  if (!mailer.isConfigured()) return res.status(400).json({ success: false, error: 'Email is not set up. An owner can set it up in Settings > Email.' });
+  if (!target.email) return res.status(400).json({ success: false, error: 'This user has no email address. Add one first, or set a new password by hand.' });
+  if (target.disabled) return res.status(400).json({ success: false, error: 'This user is disabled. Enable the account first.' });
+  const r = auth.issueEmailCode({ id: target.id });
+  if (!r.code) return res.status(r.limited ? 429 : 400).json({ success: false, error: r.error });
+  mailer.sendCode(r.user, r.code, Object.assign(reqWhere(req), { byAdmin: actorText(req) }));
+  console.log('   Sign-in: ' + actorText(req) + ' asked for a password code to be emailed to "' + target.name + '"');
+  res.json({ success: true, message: 'A code is being emailed to ' + (target.displayName || target.name) + '. It works once and is valid for 30 minutes. They type it under "Forgot password?" with a new password.' });
+});
+
+// ── Settings > Email (owner only, see ROUTE_PERMS) ──
+function emailView(req) {
+  const owners = auth.listOwners().filter(o => !o.disabled);
+  const me = req.auth && !req.auth.service ? auth.getUser(req.auth.id) : null;
+  return { success: true, settings: mailer.getSettings(), configured: mailer.isConfigured(),
+    ownerHasEmail: !!(me && me.email), myEmail: (me && me.email) || '', ownersWithEmail: owners.filter(o => o.email).length };
+}
+app.get('/api/admin/email', (req, res) => res.json(emailView(req)));
+app.post('/api/admin/email', (req, res) => {
+  let r;
+  try { r = mailer.saveSettings(req.body || {}); }
+  catch (e) { return res.status(500).json({ success: false, error: 'The email settings could not be saved: ' + e.message }); }
+  if (r.error) return res.status(400).json({ success: false, error: r.error });
+  console.log('   Email: settings ' + (r.settings.host ? 'saved (' + r.settings.host + ':' + r.settings.port + ')' : 'cleared, email is off') + ' by ' + actorText(req));
+  res.json(emailView(req));
+});
+// Sends a test message now and reports the mail server's own error on failure.
+app.post('/api/admin/email/test', async (req, res) => {
+  const b = req.body || {};
+  const me = req.auth && !req.auth.service ? auth.getUser(req.auth.id) : null;
+  const to = String(b.to || (me && me.email) || '').trim();
+  if (!mailer.isConfigured()) return res.status(400).json({ success: false, error: 'Save the email settings first.' });
+  if (!mailer.validEmail(to)) return res.status(400).json({ success: false, error: 'Enter the email address to send the test to.' });
+  const r = await mailer.send(mailer.testMessage(to));
+  console.log(r.success ? '   Email: test email sent by ' + actorText(req) : '   ⚠ Email: test email failed: ' + r.error);
+  res.json(r.success ? { success: true, message: 'Test email sent. Check the inbox (and the spam folder).' } : { success: false, error: r.error });
+});
+
+// ── Single-user mode (Settings > Users, owner only) ──
+// For Manager Desktop on one PC: EFRIS Connect opens without sign-in on the
+// computer that runs it. Requests from any other computer still sign in. It is
+// refused while the relay can be reached from other computers (LAN mode or a
+// non-loopback bind) and turned off at start if that has changed since.
+function singleUserBlockReason() {
+  if (LAN_MODE) return 'shop network (LAN) mode is on';
+  if (!BIND_IS_LOOPBACK) return 'EFRIS Connect is reachable from other computers (BIND_HOST=' + BIND_HOST + ')';
+  return '';
+}
+function singleUserRec() { try { return vault.getRelay('singleUser', []) || {}; } catch (_) { return {}; } }
+function singleUserOn() { return !singleUserBlockReason() && !!singleUserRec().enabled; }
+// The owner it signs in as: the one who turned it on, else the first active owner.
+function singleUserOwner() {
+  const owners = auth.listOwners().filter(o => !o.disabled);
+  const id = singleUserRec().ownerId;
+  return owners.find(o => o.id === id) || owners[0] || null;
+}
+function singleUserView() {
+  const r = singleUserRec(); const o = singleUserOwner(); const blocked = singleUserBlockReason();
+  return { success: true, enabled: !!r.enabled && !blocked, allowed: !blocked, blockedReason: blocked, lanMode: LAN_MODE,
+    owner: o ? (o.displayName || o.name) : '', changedAt: r.changedAt || '', changedBy: r.changedBy || '',
+    autoDisabledAt: r.autoDisabledAt || '', autoDisabledReason: r.autoDisabledReason || '' };
+}
+app.get('/api/admin/single-user', (req, res) => res.json(singleUserView()));
+app.post('/api/admin/single-user', (req, res) => {
+  const b = req.body || {};
+  if (typeof b.enabled !== 'boolean') return res.status(400).json({ success: false, error: 'Say whether single-user mode is on or off.' });
+  const blocked = singleUserBlockReason();
+  if (b.enabled && blocked) return res.status(409).json(Object.assign(singleUserView(), { success: false, error: 'Single-user mode cannot be turned on while ' + blocked + ': people on other computers would still sign in, but it is only meant for one PC. Leave it off when tills or other computers use EFRIS Connect.' }));
+  const was = !!singleUserRec().enabled;
+  const me = req.auth && !req.auth.service ? auth.getUser(req.auth.id) : null;
+  try {
+    vault.putRelay('singleUser', { enabled: b.enabled, ownerId: b.enabled ? (me && me.owner ? me.id : (singleUserOwner() || {}).id || '') : (singleUserRec().ownerId || ''),
+      changedAt: new Date().toISOString(), changedBy: actorText(req), autoDisabledAt: '', autoDisabledReason: '' }, []);
+  } catch (e) { return res.status(500).json({ success: false, error: 'The setting could not be saved: ' + e.message }); }
+  if (!b.enabled) auth.revokeLocalAutoSessions();
+  if (was !== b.enabled) {
+    const o = singleUserOwner();
+    console.log('   Security: single-user mode turned ' + (b.enabled ? 'ON' : 'OFF') + ' by ' + actorText(req) + (b.enabled ? ': EFRIS Connect opens without sign-in as "' + (o ? o.name : '?') + '" on this computer; other computers still sign in' : ': everyone signs in again'));
+    securityAlert(b.enabled ? 'single-user-on' : 'single-user-off', req, { user: o, actor: actorText(req) });
+  }
+  res.json(singleUserView());
+});
+// At start: a relay that is now reachable from other computers turns the mode off.
+(function singleUserStartCheck() {
+  const r = singleUserRec(); const blocked = singleUserBlockReason();
+  if (!r.enabled || !blocked) return;
+  try {
+    vault.putRelay('singleUser', { enabled: false, autoDisabledAt: new Date().toISOString(), autoDisabledReason: blocked }, []);
+    auth.revokeLocalAutoSessions();
+    console.log('   ⚠ Single-user mode was turned OFF because ' + blocked + '. Everyone signs in, also on this computer.');
+    mailer.alert('single-user-off', { owners: auth.listOwners(), user: singleUserOwner(), detail: 'turned off at start because ' + blocked, computer: 'the computer that runs EFRIS Connect (at start)' });
+  } catch (e) { console.log('   ⚠ Single-user mode could not be turned off: ' + e.message); }
+})();
+
+// Expired sessions are dropped once an hour.
+setInterval(() => { try { auth.purgeSessions(); } catch (_) {} }, 3600000).unref();
 
 // Load frontend HTML at startup - used as /extension and SPA
 let EXTENSION_HTML = '';
@@ -134,14 +859,16 @@ try {
   console.warn('Could not load frontend/index.html:', e.message);
 }
 
-const DATA_DIR = process.env.DATA_DIR_OVERRIDE || path.join(__dirname, 'data');
+// Runtime files (vault, logs, certs, submission log, queue) live in DATA_DIR;
+// the commodity tree and bundled unit lists ship with the code in SHIPPED_DIR.
+const { DATA_DIR, SHIPPED_DIR } = require('./paths');
 let TREE = null;
 let UNITS = null;
 
 function getTree() {
   if (!TREE) {
     console.log('Loading goods_tree.json...');
-    TREE = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'goods_tree.json'), 'utf8'));
+    TREE = JSON.parse(fs.readFileSync(path.join(SHIPPED_DIR, 'goods_tree.json'), 'utf8'));
     console.log('Loaded: ' + Object.keys(TREE).length + ' segments');
   }
   return TREE;
@@ -152,8 +879,8 @@ function getTree() {
 // disk so it also works offline. Falls back to the bundled static list.
 function getUnits() {
   if (!UNITS) {
-    for (const f of ['uom_synced.json', 'uom.json', 'units.json']) {
-      try { const u = JSON.parse(fs.readFileSync(path.join(DATA_DIR, f), 'utf8')); if (Array.isArray(u) && u.length) { UNITS = u; break; } } catch(e) {}
+    for (const [dir, f] of [[DATA_DIR, 'uom_synced.json'], [SHIPPED_DIR, 'uom.json'], [SHIPPED_DIR, 'units.json']]) {
+      try { const u = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); if (Array.isArray(u) && u.length) { UNITS = u; break; } } catch(e) {}
     }
     if (!UNITS) UNITS = [];
   }
@@ -166,6 +893,23 @@ function unitsSyncMeta() {
     const arr = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'uom_synced.json'), 'utf8'));
     return { synced: true, count: Array.isArray(arr) ? arr.length : 0, at: st.mtime.toISOString() };
   } catch(e) { return { synced: false }; }
+}
+
+// ── URA EFRIS addresses ───────────────────────────────────────
+// Every place that talks to URA takes its address from here. EFRIS_URL_OVERRIDE
+// is a TEST HOOK ONLY: when set (the automated tests point it at a local fake
+// URA), it replaces the URA getInformation URL for both sandbox and production,
+// and its origin replaces the URA host used by the reachability pings. Unset
+// (normal use) it has no effect.
+function uraUrl(mode) {
+  if (process.env.EFRIS_URL_OVERRIDE) return process.env.EFRIS_URL_OVERRIDE;
+  return mode === 'production'
+    ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
+    : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+}
+function uraHost(mode) {
+  if (process.env.EFRIS_URL_OVERRIDE) return new URL(process.env.EFRIS_URL_OVERRIDE).origin + '/';
+  return mode === 'production' ? 'https://efrisws.ura.go.ug/' : 'https://efristest.ura.go.ug/';
 }
 
 // ── HTTPS call to EFRIS ───────────────────────────────────────
@@ -184,6 +928,10 @@ function efrisCall(baseUrl, payload) {
     // library by protocol, else we TLS-handshake a plaintext server and get
     // "EPROTO … wrong version number".
     const lib = parsed.protocol === 'http:' ? http : https;
+    // Did the request reach the server? A timeout after connecting means EFRIS may
+    // have processed it (outcome unknown, flagged afterSend); a timeout before that
+    // is a plain network failure.
+    let connected = false;
     const req = lib.request(opts, res => {
       let data = '';
       res.on('data', c => data += c);
@@ -193,7 +941,8 @@ function efrisCall(baseUrl, payload) {
       });
     });
     req.on('error', (e) => { logger.error('EFRIS network call failed', { url: baseUrl, message: e.message }); reject(e); });
-    req.on('timeout', () => { req.destroy(); logger.error('EFRIS network call timed out', { url: baseUrl }); reject(new Error('EFRIS timed out after 30s')); });
+    req.on('socket', s => { if (!s.connecting) connected = true; else s.once('connect', () => { connected = true; }); });
+    req.on('timeout', () => { req.destroy(); logger.error('EFRIS network call timed out', { url: baseUrl }); const e = new Error('EFRIS timed out after 30s'); e.afterSend = connected; reject(e); });
     req.write(bodyStr); req.end();
   });
 }
@@ -213,6 +962,7 @@ function _managerCallOnce(endpoint, token, method, docPath, body, _redirectsLeft
     const fullUrl = base + cleanPath;
     let parsed;
     try { parsed = new URL(fullUrl); } catch(e) { return reject(new Error('Bad Manager URL: ' + fullUrl)); }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return reject(new Error('Manager URL must start with http:// or https://'));
     const isHttps = parsed.protocol === 'https:';
     const lib = isHttps ? https : http;
     const bodyStr = body ? JSON.stringify(body) : null;
@@ -231,13 +981,23 @@ function _managerCallOnce(endpoint, token, method, docPath, body, _redirectsLeft
     // Optional shared secret so an upstream WAF rule can distinguish this
     // backend's traffic from generic internet scanning and skip its bot check
     // only for requests carrying it. Unset by default - additive, never required.
-    if (process.env.CLOUDFLARE_SKIP_SECRET) opts.headers['X-Backend-Secret'] = process.env.CLOUDFLARE_SKIP_SECRET;
+    // Sent over https only, so the secret never crosses the network in clear text.
+    if (process.env.CLOUDFLARE_SKIP_SECRET && isHttps) opts.headers['X-Backend-Secret'] = process.env.CLOUDFLARE_SKIP_SECRET;
     if (extraHeaders) Object.assign(opts.headers, extraHeaders);
     if (bodyStr) opts.headers['Content-Length'] = Buffer.byteLength(bodyStr);
     const req = lib.request(opts, res => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && _redirectsLeft > 0) {
         res.resume(); // discard body, we're not using this response
-        const nextUrl = new URL(res.headers.location, parsed).toString();
+        const next = new URL(res.headers.location, parsed);
+        // The Manager token travels with every hop, so only follow a redirect to
+        // the same origin (scheme, host and port), or the same host's http -> https
+        // upgrade. Anything else is an error and the token is not sent there.
+        const sameOrigin = next.origin === parsed.origin;
+        const upgrade = !isHttps && next.protocol === 'https:' && next.hostname === parsed.hostname;
+        if (!sameOrigin && !upgrade) {
+          return reject(new Error('Manager redirected to ' + next.protocol + '//' + next.host + ' - not followed so your Manager token is not sent there. If that is your Manager, use it as the endpoint.'));
+        }
+        const nextUrl = next.toString();
         console.log(`   Manager redirect ${res.statusCode}: ${fullUrl} → ${nextUrl}`);
         return resolve(_managerCallOnce(nextUrl, token, method, '', body, _redirectsLeft - 1));
       }
@@ -259,9 +1019,9 @@ function _managerCallOnce(endpoint, token, method, docPath, body, _redirectsLeft
             const isCfChallenge = /just a moment|cf-browser-verification|cf-chl-|checking your browser|enable javascript and cookies/i.test(data);
             return resolve({ status: res.statusCode, data: null, _html: true, _htmlSnippet: textSnippet, _cfChallenge: isCfChallenge });
           }
-          try { resolve({ status: res.statusCode, data: JSON.parse(data) }); }
-          catch(e) { resolve({ status: res.statusCode, data }); }
-        } else { resolve({ status: res.statusCode, data: null }); }
+          try { resolve({ status: res.statusCode, data: JSON.parse(data), headers: res.headers }); }
+          catch(e) { resolve({ status: res.statusCode, data, headers: res.headers }); }
+        } else { resolve({ status: res.statusCode, data: null, headers: res.headers }); }
       });
     });
     req.on('error', (e) => { logger.error('Manager.io network call failed', { url: fullUrl, message: e.message }); reject(e); });
@@ -300,7 +1060,7 @@ async function managerCall(endpoint, token, method, docPath, body, _redirectsLef
 function normEp(ep) {
   ep = (ep || '').trim().replace(/\/+$/, '');
   // api4 is a different protocol - don't silently rewrite it; surface the issue
-  if (ep.endsWith('/api4')) throw new Error('Manager API v4 endpoints (/api4) are not yet supported. Please use your /api2 endpoint URL instead.');
+  if (ep.endsWith('/api4')) throw Object.assign(new Error('Manager API v4 endpoints (/api4) are not yet supported. Please use your /api2 endpoint URL instead.'), { status: 400, expose: true });
   else if (ep.endsWith('/api')) ep = ep + '2';
   else if (!ep.endsWith('/api2')) ep = ep + '/api2';
   return ep;
@@ -309,8 +1069,10 @@ function normEp(ep) {
 function bareKey(k) { return String(k || '').split('?')[0].replace(/\/+$/, '').split('/').pop(); }
 
 function mgrCreds(req) {
-  const ep = req.headers['x-manager-endpoint'] || req.query.ep || '';
-  const tk = req.headers['x-manager-token'] || req.query.tk || '';
+  // A request filled from the vault always goes to the business's saved endpoint.
+  const ep = (req.vaultFilled ? req.vaultEndpoint : '') || req.headers['x-manager-endpoint'] || req.query.ep || '';
+  // The token is accepted only as a header: URLs end up in logs and history.
+  const tk = req.headers['x-manager-token'] || '';
   return { ep: normEp(ep), tk };
 }
 
@@ -328,22 +1090,22 @@ async function mgrTextCustomFields(ep, tk) {
 const _taxCodeCache = {};
 async function mgrTaxCodeGuid(ep, tk, vatType) {
   const cacheKey = ep + '_taxcodes';
-  if (!_taxCodeCache[cacheKey]) {
-    try {
-      const r = await managerCall(ep, tk, 'GET', '/tax-codes');
-      _taxCodeCache[cacheKey] = (r.data && r.data.taxCodes) || [];
-    } catch(e) { _taxCodeCache[cacheKey] = []; }
-  }
-  const codes = _taxCodeCache[cacheKey];
-  // Match by VAT type: Standard=18%, Zero=0%, Exempt
-  const query = vatType === 'Exempt' ? 'exempt'
-    : vatType === 'Zero' ? ['zero', '0%', 'zero rated', 'zero-rated']
-    : ['18%', 'standard', 'vat']; // Standard
-  const q = Array.isArray(query) ? query : [query];
-  const match = codes.find(c => {
-    const nm = (c.name || c.Name || '').toLowerCase();
-    return q.some(term => nm.includes(term));
+  const load = async () => {
+    try { const r = await managerCall(ep, tk, 'GET', '/tax-codes'); _taxCodeCache[cacheKey] = (r.data && r.data.taxCodes) || []; }
+    catch (e) { _taxCodeCache[cacheKey] = []; }
+  };
+  // Match by the EFRIS tax designation. Standard must not pick "Deemed VAT 18%".
+  const t = String(vatType || 'Standard').toLowerCase();
+  const pick = () => (_taxCodeCache[cacheKey] || []).find(c => {
+    const nm = String(c.name || c.Name || '').toLowerCase();
+    if (/exempt/.test(t)) return /exempt/.test(nm);
+    if (/zero/.test(t)) return /zero/.test(nm);
+    if (/deemed/.test(t)) return /deemed/.test(nm);
+    return /18|standard|vat/.test(nm) && !/deemed|zero|exempt/.test(nm);
   });
+  if (!_taxCodeCache[cacheKey]) await load();
+  let match = pick();
+  if (!match) { await load(); match = pick(); }   // tax codes may have been created since
   return match ? (match.key || match.Key) : null;
 }
 
@@ -360,10 +1122,21 @@ async function normalizeInvoice(ep, tk, key) {
     const rcptR = await managerCall(ep, tk, 'GET', '/receipt-form/' + key);
     if (rcptR.status === 200 && rcptR.data && !rcptR.data.error) {
       form = rcptR.data; docType = 'receipt'; formBase = '/receipt-form'; listBase = '/receipts'; listProp = 'receipts';
+      // A receipt that only pays a sales invoice is a payment, not a sale: the invoice
+      // is the fiscal document. Fiscalising the payment too would report the sale twice.
+      const ls = Array.isArray(form.Lines) ? form.Lines : [];
+      if (ls.length && ls.every(l => l && l.AccountsReceivableSalesInvoice && !l.Item)) {
+        throw Object.assign(new Error('This receipt is a payment against a sales invoice. The invoice is the fiscal document (submit the invoice to EFRIS, if not done yet); payments are not submitted to URA.'), { status: 400, expose: true, notASale: true });
+      }
       console.log(`   Loaded Manager RECEIPT ${key} - fields: ${Object.keys(form).join(', ')}`);
     }
   }
   if (!form) return { _error: 'Manager returned HTTP ' + formR.status + ' (not found as invoice or receipt)', _status: formR.status };
+  if (docType === 'invoice') console.log(`   Loaded Manager SALES INVOICE ${key} - fields: ${Object.keys(form).join(', ')}`);
+  // "Amounts are tax inclusive" (Manager omits the flag when it is unticked).
+  const inclKey = Object.keys(form).find(k => /include|inclusive/i.test(k) && /tax|amount/i.test(k));
+  const taxInclusive = inclKey ? !!form[inclKey] : false;
+  console.log(`   Amounts are tax inclusive: ${taxInclusive ? 'yes' : 'no'}${inclKey ? ' (' + inclKey + ')' : ''}`);
   let disp = {};
   try {
     const l = (await managerCall(ep, tk, 'GET', listBase + '/' + key)).data;
@@ -390,7 +1163,7 @@ async function normalizeInvoice(ep, tk, key) {
         if (c.Name || c.name) custName = c.Name || c.name;
         // Pull the customer's stored TIN from its own custom fields (so B2B/B2G loads it).
         const cstr = (c.CustomFields2 && c.CustomFields2.Strings) || {};
-        const tinKey = cf.byName['Buyer TIN'] || cf.byName['Customer TIN'] || cf.byName['TIN'];
+        const tinKey = cf.byName['Buyer TIN'] || cf.byName['Customer TIN'];
         if (!custTIN && tinKey && cstr[tinKey]) custTIN = cstr[tinKey];
         if (!custTIN && (c.TIN || c.Tin)) custTIN = c.TIN || c.Tin;
       }
@@ -418,9 +1191,20 @@ async function normalizeInvoice(ep, tk, key) {
       try { const tc = (await managerCall(ep, tk, 'GET', '/tax-code-form/' + l.TaxCode)).data; if (tc) { rate = (tc.Rates && tc.Rates[0]) || 0; taxName = tc.Name || ''; } } catch (e) {}
     }
     const qty = parseFloat(l.Qty || l.Quantity || 1) || 1;
-    const price = parseFloat(l.SalesUnitPrice || l.UnitPrice || l.Amount || 0) || 0;
-    const lineTotal = qty * price, taxAmount = lineTotal * (rate / 100);
-    lines.push({ ItemName: itemName, ItemCode: code, Qty: qty, UnitPrice: price, LineTotal: lineTotal,
+    let price = parseFloat(l.SalesUnitPrice || l.UnitPrice || l.Amount || 0) || 0;
+    // EFRIS (and the extension) work in tax-INCLUSIVE prices. Manager's default is
+    // tax-exclusive ("Amounts are tax inclusive" unticked: AmountsIncludeTax absent),
+    // where VAT is added on top, so convert to the inclusive unit price.
+    if (rate && !taxInclusive) price = Math.round(price * (1 + rate / 100) * 100) / 100;
+    // Manager line discount (exact amount or percentage), in the same inclusive money
+    // as the price. buildT109 sends it to URA as a discount line (discountFlag 0).
+    let discount = 0;
+    const dAmt = parseFloat(l.DiscountAmount || 0) || 0, dPct = parseFloat(l.DiscountPercentage || 0) || 0;
+    if (dAmt > 0) discount = (rate && !taxInclusive) ? dAmt * (1 + rate / 100) : dAmt;
+    else if (dPct > 0) discount = qty * price * dPct / 100;
+    discount = Math.round(Math.min(discount, qty * price) * 100) / 100;
+    const lineTotal = qty * price - discount, taxAmount = rate ? lineTotal * rate / (100 + rate) : 0;
+    lines.push({ ItemName: itemName, ItemCode: code, Qty: qty, UnitPrice: price, LineTotal: lineTotal, Discount: discount,
       TaxAmount: taxAmount, TaxRate: rate, TaxName: taxName, Unit: unit,
       EFRISCategoryId: '', EFRISCategoryName: '' });
   }
@@ -437,7 +1221,8 @@ async function normalizeInvoice(ep, tk, key) {
     CustomerName: custName, CustomerTIN: custTIN || '', Currency: currency,
     ExchangeRate: form.ExchangeRate || 1, Total: total,
     AmountExcludingTax: total - totalTax, TaxAmount: totalTax,
-    Notes: form.Description || '', Lines: lines, CustomFields: cfVals, Key: key
+    Notes: form.Description || '', Lines: lines, CustomFields: cfVals, Key: key,
+    AmountsIncludeTax: taxInclusive, HasTaxCodes: (form.Lines || []).some(l => !!l.TaxCode)
   };
 }
 
@@ -468,9 +1253,19 @@ const EFRIS_PRIVATE_KEY_PATHS = (!_pemContentFromEnv && !_derKeyFromEnv && proce
   // (all gitignored) and it's picked up with zero config. Cloud uses the B64 secret.
   : [
       path.join(__dirname, 'keys', 'efris_private.pem'),
+      path.join(DATA_DIR, 'private_key.pem'),
       path.join(__dirname, 'data', 'private_key.pem'),
       '/app/keys/efris_private.pem',
     ];
+
+// A key path from Settings must be a local .pem/.key file. UNC paths
+// (\\host\share) are refused: opening one makes Windows send its credentials
+// to that host.
+function safeKeyPath(p) {
+  const s = String(p || '').trim();
+  if (!s || /^(\\\\|\/\/)/.test(s)) return false;
+  return /\.(pem|key)$/i.test(s);
+}
 
 function loadPem(p) {
   if (_pemContentFromEnv) return _pemContentFromEnv;
@@ -504,7 +1299,8 @@ function resolveAesKey(passwordDes, keyOverride) {
   if (keyOverride && (keyOverride.pem || keyOverride.path)) {
     let pem = keyOverride.pem || null;
     if (!pem && keyOverride.path) {
-      try { pem = fs.readFileSync(keyOverride.path, 'utf8'); } catch (e) { tried.push('config-key path not found: ' + keyOverride.path); }
+      if (!safeKeyPath(keyOverride.path)) tried.push('config-key path refused (must be a local .pem or .key file, not a network path)');
+      else { try { pem = fs.readFileSync(keyOverride.path, 'utf8'); } catch (e) { tried.push('config-key path not found: ' + keyOverride.path); } }
     }
     if (pem) {
       if (pem.includes('\\n')) pem = pem.replace(/\\n/g, '\n');
@@ -553,7 +1349,13 @@ function resolveAesKey(passwordDes, keyOverride) {
 function aesAlgo(keyBytes) {
   return keyBytes.length === 32 ? 'aes-256-ecb' : keyBytes.length === 24 ? 'aes-192-ecb' : 'aes-128-ecb';
 }
+// The Offline Enabler (TCS) talks plain base64 JSON to local clients: it has no
+// T104 key exchange and does the encryption with URA itself. A session on the
+// Enabler carries this empty key, and the AES helpers below then just base64.
+const PLAIN_KEY = Buffer.alloc(0);
+const isPlainKey = k => !k || k.length === 0;
 function aesEncryptB64(plain, keyBytes) {
+  if (isPlainKey(keyBytes)) return Buffer.from(plain, 'utf8').toString('base64');
   // Encrypt to a Buffer and base64-encode the WHOLE ciphertext once. Encoding
   // update() and final() separately and concatenating the two base64 strings
   // corrupts the output whenever update() emits a non-multiple-of-3 byte count
@@ -564,6 +1366,7 @@ function aesEncryptB64(plain, keyBytes) {
   return buf.toString('base64');
 }
 function aesDecryptStr(b64, keyBytes) {
+  if (isPlainKey(keyBytes)) { const b = Buffer.from(b64, 'base64'); return (b[0] === 0x1f && b[1] === 0x8b) ? zlib.gunzipSync(b, { finishFlush: zlib.constants.Z_SYNC_FLUSH }).toString('utf8') : b.toString('utf8'); }
   const d = crypto.createDecipheriv(aesAlgo(keyBytes), keyBytes, null);
   return d.update(b64, 'base64', 'utf8') + d.final('utf8');
 }
@@ -575,6 +1378,7 @@ function aesDecryptMaybeGzip(b64, keyBytes) {
   const rawBuf = Buffer.from(b64, 'base64');
   const isGzip = b => b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b;
   if (isGzip(rawBuf)) return zlib.gunzipSync(rawBuf).toString('utf8');
+  if (isPlainKey(keyBytes)) return rawBuf.toString('utf8');
   const d = crypto.createDecipheriv(aesAlgo(keyBytes), keyBytes, null);
   const buf = Buffer.concat([d.update(rawBuf), d.final()]);
   if (isGzip(buf)) return zlib.gunzipSync(buf).toString('utf8');
@@ -586,6 +1390,7 @@ function signSha1(content, privatePem) {
 
 function efrisEnvEnc(code, payloadObj, tin, deviceNo, aesKeyBytes, privatePem) {
   const json = typeof payloadObj === 'string' ? payloadObj : JSON.stringify(payloadObj);
+  if (isPlainKey(aesKeyBytes)) return efrisEnv(code, json, tin, deviceNo);   // Offline Enabler: plain
   const contentB64 = aesEncryptB64(json, aesKeyBytes);
   const signature = signSha1(contentB64, privatePem);
   const env = efrisEnv(code, '', tin, deviceNo);
@@ -595,6 +1400,16 @@ function efrisEnvEnc(code, payloadObj, tin, deviceNo, aesKeyBytes, privatePem) {
   return env;
 }
 
+// Today in East Africa Time (UTC+3), whatever the server's own time zone.
+function eatToday() { return new Date(Date.now() + 3 * 3600000).toISOString().slice(0, 10); }
+// Uganda time (EAT, UTC+3) for a timestamp, whatever the server's time zone:
+// { date: 'yyyy-MM-dd', time: 'HH:mm:ss', year: 'yyyy', month: 'MM' }.
+function eatParts(ms) {
+  const s = new Date((ms == null ? Date.now() : ms) + 3 * 3600000).toISOString();
+  return { date: s.slice(0, 10), time: s.slice(11, 19), year: s.slice(0, 4), month: s.slice(5, 7) };
+}
+function eatStamp(ms) { const p = eatParts(ms); return p.date + ' ' + p.time; }
+
 function efrisEnv(code, content, tin, deviceNo) {
   const cs = typeof content === 'string' ? content : JSON.stringify(content);
   return {
@@ -602,7 +1417,9 @@ function efrisEnv(code, content, tin, deviceNo) {
     globalInfo: {
       appId:'AP04', version:'1.1.20191201', dataExchangeId: Date.now().toString(),
       interfaceCode: code, requestCode:'TP',
-      requestTime: new Date().toISOString().replace('T',' ').slice(0,19),
+      // East Africa Time (UTC+3). URA's online server tolerated UTC, but the Offline
+      // Enabler rejects a requestTime more than 10 minutes off its clock (rc 28).
+      requestTime: new Date(Date.now() + 3 * 3600000).toISOString().replace('T',' ').slice(0,19),
       responseCode:'TA', userName: tin, deviceMAC:'B47720524540',
       deviceNo, tin, brn:'', taxpayerID:'1',
       longitude:'32.6290', latitude:'0.3476', agentType:'0',
@@ -615,8 +1432,19 @@ function efrisEnv(code, content, tin, deviceNo) {
 // ── Session cache ─────────────────────────────────────────────
 const sessions = {};
 
+// A cached session holds the AES key, so it is keyed on everything that produced
+// it: TIN, device, endpoint (sandbox / production / Enabler) and a fingerprint of
+// the private key used. A caller with only a TIN and device number cannot reuse
+// someone else's session.
+function sessionKey(tin, deviceNo, efrisBaseUrl, keyOverride) {
+  const kh = keyOverride
+    ? crypto.createHash('sha256').update(String(keyOverride.pem || '') + '\0' + String(keyOverride.path || '') + '\0' + String(keyOverride.passphrase || '')).digest('hex').slice(0, 16)
+    : 'server-key';
+  return tin + '_' + deviceNo + '|' + String(efrisBaseUrl || '') + '|' + kh;
+}
+
 async function getSession(tin, deviceNo, password, efrisBaseUrl, keyOverride) {
-  const key = tin + '_' + deviceNo;
+  const key = sessionKey(tin, deviceNo, efrisBaseUrl, keyOverride);
   const now = Date.now();
   if (sessions[key] && (now - sessions[key].ts) < 1800000) {
     console.log('   Reusing cached session');
@@ -627,6 +1455,16 @@ async function getSession(tin, deviceNo, password, efrisBaseUrl, keyOverride) {
   const rmOf = r => r && r.data && r.data.returnStateInfo ? r.data.returnStateInfo.returnMessage : '';
   console.log('   New session for TIN: ' + tin);
   const t101 = await efrisCall(efrisBaseUrl, efrisEnv('T101', '', tin, deviceNo));
+  // URA's gateway sometimes answers HTTP 200 with an HTML "Server Unreachable" page
+  // while EFRIS itself is down: treat that as URA unreachable (network), so sales
+  // are queued offline and sent later instead of failing.
+  {
+    const raw = typeof t101.data === 'string' ? t101.data : '';
+    if (t101.status === 200 && /^\s*<(?:!doctype|html)/i.test(raw) && !/^https?:\/\/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(efrisBaseUrl || '')) {
+      const t = (raw.match(/<title>([^<]{1,80})<\/title>/i) || [])[1] || 'an HTML page';
+      throw new Error('URA EFRIS network unreachable: the URA server answered with "' + t.trim() + '" instead of EFRIS. URA is down; sales are kept offline until it is back.');
+    }
+  }
   if (t101.status !== 200) {
     const bodyStr = (typeof t101.data === 'string' ? t101.data : JSON.stringify(t101.data) || '');
     const isHtml = /^\s*<(?:!doctype|html)/i.test(bodyStr) || /HTTP Status \d+/.test(bodyStr);
@@ -645,11 +1483,22 @@ async function getSession(tin, deviceNo, password, efrisBaseUrl, keyOverride) {
     err.endpointFailure = true;   // reachable-but-wrong: let fallback try the next target
     throw err;
   }
-  const t104 = await efrisCall(efrisBaseUrl, efrisEnv('T104', '', tin, deviceNo));
   let symKeyEnc = null, aesKey = null, privatePem = null;
-  try { const c = JSON.parse(Buffer.from(t104.data.data.content, 'base64').toString()); symKeyEnc = c.passowrdDes || c.passwordDes; } catch(e) {}
   let _aesErr = null;
-  try { if (symKeyEnc) { const r = resolveAesKey(symKeyEnc, keyOverride); aesKey = r.key; privatePem = r.pem; } } catch(e) { _aesErr = e.message; console.log('   AES key error: ' + e.message); }
+  const viaEnabler = /^https?:\/\/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(efrisBaseUrl || '');
+  if (viaEnabler) {
+    aesKey = PLAIN_KEY;   // the Enabler has no T104 (rc 998) and expects plain JSON
+  } else {
+    // T104 now and then comes back without a key (URA side); ask once more before giving up.
+    let t104 = null;
+    for (let attempt = 0; attempt < 2 && !symKeyEnc; attempt++) {
+      if (attempt) await new Promise(r => setTimeout(r, 1500));
+      t104 = await efrisCall(efrisBaseUrl, efrisEnv('T104', '', tin, deviceNo));
+      try { const c = JSON.parse(Buffer.from(t104.data.data.content, 'base64').toString()); symKeyEnc = c.passowrdDes || c.passwordDes; } catch(e) {}
+    }
+    if (!symKeyEnc) _aesErr = 'URA did not send a session key (T104' + (rcOf(t104) ? ' rc ' + rcOf(t104) + ' ' + rmOf(t104) : ', HTTP ' + (t104 && t104.status)) + '). URA may be busy; try again in a minute.';
+    try { if (symKeyEnc) { const r = resolveAesKey(symKeyEnc, keyOverride); aesKey = r.key; privatePem = r.pem; } } catch(e) { _aesErr = e.message; console.log('   AES key error: ' + e.message); }
+  }
   const t103 = await efrisCall(efrisBaseUrl, efrisEnv('T103', '', tin, deviceNo));
   if (rcOf(t103) && rcOf(t103) !== '00') {
     const code = rcOf(t103), rm = rmOf(t103);
@@ -663,9 +1512,52 @@ async function getSession(tin, deviceNo, password, efrisBaseUrl, keyOverride) {
     throw new Error('EFRIS login (T103) failed (' + code + '): ' + rm + hint);
   }
   if (!aesKey) throw new Error('No AES key - ' + (_aesErr || 'private key not found or could not decrypt the EFRIS session key.'));
-  const session = { symKeyEnc, aesKey, privatePem, ts: now };
+  // T103 (login) also returns the taxpayer record and its registered tax types -
+  // the only place VAT registration appears (T119 carries no VAT field). Keep it.
+  let login = null;
+  try {
+    const c = t103.data && t103.data.data && t103.data.data.content;
+    if (c) { const raw = efrisDecodeJson(c, aesKey); if (raw) login = JSON.parse(raw); }
+  } catch (_) {}
+  try {
+    if (login) {
+      const tt = login.taxType || (login.taxpayer && login.taxpayer.taxType) || [];
+      const names = Array.isArray(tt) ? tt.map(t => t && (t.taxTypeName || t.name || t.taxTypeCode || JSON.stringify(t))).join(', ') : JSON.stringify(tt).slice(0, 200);
+      console.log('   [T103 login] fields: ' + Object.keys(login).join(', ') + (names ? ' | tax types: ' + names : ''));
+    } else console.log('   [T103 login] no readable content');
+  } catch (_) {}
+  const session = { symKeyEnc, aesKey, privatePem, login, ts: now, _args: [tin, deviceNo, password, efrisBaseUrl, keyOverride] };
   sessions[key] = session;
   return session;
+}
+
+// Discard the cached session so the next getSession() re-runs T101/T104/T103 and
+// obtains a FRESH AES key. This is the recovery for rc:15 "Data decryption error":
+// EFRIS returns rc:15 when the AES key it issued has rotated on its side but our
+// 30-minute cache is still serving the old one. The write interfaces (T130/T109/
+// T131) all used to "retry" rc:15 with the SAME cached key, which can never work -
+// the key must be renewed first. Callers should invalidate, re-fetch the session,
+// then retry once with the new key. The failed request never reached processing
+// (it failed at the decryption stage), so retrying carries no duplicate-write risk.
+function invalidateSession(tin, deviceNo) {
+  const prefix = tin + '_' + deviceNo + '|';
+  for (const k of Object.keys(sessions)) if (k.startsWith(prefix)) delete sessions[k];
+}
+
+// An encrypted EFRIS call that recovers from rc:15 ("Data decryption error": URA
+// replaced the session key, e.g. the device logged in elsewhere). It renews the
+// session, copies the fresh key INTO the caller's session object (so the caller's
+// later calls use it too) and retries once. A request rejected at decryption was
+// never processed, so the retry cannot create a duplicate.
+async function efrisSecure(eu, code, payload, tin, deviceNo, session) {
+  let r = await efrisCall(eu, efrisEnvEnc(code, payload, tin, deviceNo, session.aesKey, session.privatePem));
+  const rc = r && r.data && r.data.returnStateInfo ? r.data.returnStateInfo.returnCode : null;
+  if (rc !== '15' || !session._args) return r;
+  console.log('   ' + code + ' rc 15 (stale session key) - renewing session and retrying once');
+  invalidateSession(tin, deviceNo);
+  const fresh = await getSession(...session._args);
+  Object.assign(session, fresh);
+  return efrisCall(eu, efrisEnvEnc(code, payload, tin, deviceNo, session.aesKey, session.privatePem));
 }
 
 // Build a per-request key override from a config/body object (Settings fields).
@@ -717,11 +1609,15 @@ function efrisDecodeJson(b64, keyBytes) {
 }
 
 const _dictCache = {};
+// The last dictionary that decoded, per TIN, so a bad response (e.g. a stale session
+// key) does not leave goods registration without the currency codes.
+const dictFile = tin => path.join(DATA_DIR, 'efris_dictionary_' + String(tin).replace(/[^0-9A-Za-z]/g, '') + '.json');
+function savedDictionary(tin) { try { return JSON.parse(fs.readFileSync(dictFile(tin), 'utf8')); } catch (_) { return null; } }
 async function getEfrisDictionary(tin, deviceNo, session, eu) {
   const key = tin + '_' + deviceNo;
   if (_dictCache[key]) return _dictCache[key];
   try {
-    const t115 = await efrisCall(eu, efrisEnvEnc('T115', {}, tin, deviceNo, session.aesKey, session.privatePem));
+    const t115 = await efrisSecure(eu, 'T115', {}, tin, deviceNo, session);
     const rc = t115.data && t115.data.returnStateInfo ? t115.data.returnStateInfo.returnCode : null;
     const rm = t115.data && t115.data.returnStateInfo ? t115.data.returnStateInfo.returnMessage : '';
     console.log(`   T115 outer rc: ${rc} - ${rm}`);
@@ -736,12 +1632,15 @@ async function getEfrisDictionary(tin, deviceNo, session, eu) {
           const dict = JSON.parse(raw);
           console.log(`   T115 dictionary loaded - top-level keys: ${Object.keys(dict).join(', ')}`);
           _dictCache[key] = dict;
+          try { writeFileAtomic(dictFile(tin), JSON.stringify(dict)); } catch (_) {}
           return dict;
         }
         console.log(`   (T115 content could not be decoded to JSON by any method)`);
       }
     }
   } catch(e) { console.log(`   (T115 dictionary fetch failed: ${e.message})`); }
+  const saved = savedDictionary(tin);
+  if (saved) { console.log('   Using the last saved EFRIS dictionary for this TIN'); return saved; }
   return null;
 }
 
@@ -749,7 +1648,7 @@ async function getEfrisDictionary(tin, deviceNo, session, eu) {
 async function resolveEfrisCurrency(isoCode, tin, deviceNo, session, eu) {
   const iso = (isoCode || 'UGX').trim().toUpperCase();
   const dict = await getEfrisDictionary(tin, deviceNo, session, eu);
-  if (!dict) return iso; // fallback to ISO if dictionary unavailable
+  if (!dict) return iso === 'UGX' ? '101' : iso; // no dictionary: UGX is EFRIS currency 101
   // Log currency-like sections so the exact format is visible in server logs.
   for (const [section, val] of Object.entries(dict)) {
     if (Array.isArray(val) && /rate|curr/i.test(section)) {
@@ -844,7 +1743,7 @@ async function getRegisteredGoodsMap(tin, deviceNo, session, eu) {
     let pageNo = 1;
     for (let guard = 0; guard < 25; guard++) {
       const payload = { goodsCode: '', goodsName: '', commodityCategoryCode: '', pageNo: String(pageNo), pageSize: '99' };
-      const r = await efrisCall(eu, efrisEnvEnc('T127', payload, tin, deviceNo, session.aesKey, session.privatePem));
+      const r = await efrisSecure(eu, 'T127', payload, tin, deviceNo, session);
       const rc = r.data?.returnStateInfo?.returnCode;
       if (rc !== '00' && rc !== '45') break;
       let items = [];
@@ -864,6 +1763,11 @@ async function getRegisteredGoodsMap(tin, deviceNo, session, eu) {
           commodityCategoryName: String(it.commodityCategoryName || '').trim(),
           unitPrice: it.unitPrice != null ? String(it.unitPrice) : '',
           goodsName: String(it.goodsName || it.name || '').trim(),
+          // Tax fields, so a credit note re-uses the SAME tax rate as the original
+          // invoice (URA 1443 rejects a mismatch).
+          taxRate: it.taxRate != null ? String(it.taxRate) : '',
+          isExempt: it.isExempt != null ? String(it.isExempt) : '',
+          isZeroRate: it.isZeroRate != null ? String(it.isZeroRate) : '',
         };
       }
       if (items.length < 99) break;
@@ -898,7 +1802,26 @@ function annotateLinesWithRegisteredGoods(invoice, goodsMap) {
     if (g.measureUnit && !l.EFRISUnitOfMeasure) l.EFRISUnitOfMeasure = g.measureUnit;
     if (g.commodityCategoryId && !l.EFRISCommodityCode) l.EFRISCommodityCode = g.commodityCategoryId;
     if (g.commodityCategoryName && !l.EFRISCommodityName) l.EFRISCommodityName = g.commodityCategoryName;
+    // Tax category from the registered good, so buildT109/T108 emits the SAME tax
+    // rate the good was registered (and originally invoiced) with. Only set it when
+    // the line carries none, so an explicit caller choice is never overridden.
+    if (!l.TaxName && !l.TaxCode) {
+      const tn = taxNameFromRegisteredGood(g);
+      if (tn) l.TaxName = tn;
+    }
   }
+}
+// Map a registered good's tax fields to a TaxName that buildT109 classifies.
+function taxNameFromRegisteredGood(g) {
+  const truthy = v => /^(1|101|yes|true|y)$/i.test(String(v == null ? '' : v).trim());
+  if (truthy(g.isZeroRate)) return 'Zero Rated';
+  if (truthy(g.isExempt))   return 'Exempt';
+  const tr = String(g.taxRate == null ? '' : g.taxRate).trim();
+  if (tr === '-' ) return 'Exempt';
+  const n = parseFloat(tr);
+  if (n > 0) return 'Standard VAT 18%';
+  if (n === 0) return 'Zero Rated';
+  return '';
 }
 
 // Resolve a line's EFRIS unit-of-measure code. Priority:
@@ -921,15 +1844,48 @@ function resolveLineUom(l, cfg) {
   return 'PCE';
 }
 
+// The discount on a line, in the same (VAT-inclusive) money as UnitPrice. The
+// extension sends _discount; a Manager document carries Discount. When LineTotal is
+// below qty x unitPrice, the difference is the discount actually applied (this also
+// covers a discount entered on a VAT-exclusive price). 0 = no discount.
+function lineDiscount(l, qty, unitPrice) {
+  const given = parseFloat(l._discount != null ? l._discount : (l.Discount != null ? l.Discount : l.DiscountAmount)) || 0;
+  if (!(given > 0)) return 0;
+  const full = qty * unitPrice;
+  const lt = parseFloat(l.LineTotal);
+  let d = (isFinite(lt) && lt >= 0 && lt < full - 0.005) ? full - lt : given;
+  d = Math.round(Math.min(d, full) * 100) / 100;
+  return d > 0 ? d : 0;
+}
+
+// buyerType for a government buyer. URA's API doc v1.1 (2020) listed "0: B2B or
+// B2G"; the EFRIS v23 field list used by current integrators defines 3 = B2G
+// (paybillug ura-efris-php-sdk CustomTypes::buyerType: 0 B2B, 1 B2C, 2 Foreigner,
+// 3 B2G; Ernestbent URA-EFRIS sends "B2G": "3"). No T115 dictionary dump with a
+// buyerType list was available to confirm it. A business whose EFRIS build
+// rejects 3 can set config b2gBuyerType '0' to go back to the old value.
+const BUYER_TYPE_B2G = '3';
+function b2gBuyerType(cfg) {
+  const o = String((cfg && cfg.b2gBuyerType) || '').trim();
+  return (o === '0' || o === '3') ? o : BUYER_TYPE_B2G;
+}
+
 function buildT109(invoice, cfg) {
   const vat = !!cfg.vatRegistered;
   const isRefund = !!(invoice.IsRefund || invoice.isRefund);
+  // Debit note: a T109 of invoiceType 4 pointing at the ORIGINAL invoice's EFRIS id.
+  const debitOf = invoice._debitOf && invoice._debitOf.oriInvoiceId ? invoice._debitOf : null;
   const r2 = n => (Math.round((parseFloat(n) || 0) * 100) / 100).toFixed(2);
   const lines = invoice.Lines || [];
-  const goodsDetails = lines.map((l, i) => {
+  const goodsDetails = [];
+  lines.forEach((l, i) => {
     const qty = parseFloat(l.Qty || 1) || 1;
     const unitPrice = parseFloat(l.UnitPrice || 0) || 0;
-    const total = parseFloat(l.LineTotal || (unitPrice * qty)) || 0;
+    // A discounted line goes to URA as the item at its FULL amount (discountFlag 1)
+    // followed by a discount line (discountFlag 0) carrying the negative discount,
+    // so unitPrice x qty == total on the item line. See lineDiscount().
+    const discount = lineDiscount(l, qty, unitPrice);
+    const total = discount > 0 ? qty * unitPrice : (parseFloat(l.LineTotal || (unitPrice * qty)) || 0);
     const taxName = String(l.TaxName || l.TaxCode || invoice.TaxName || '').toLowerCase();
     const lineTax = parseFloat(l.TaxAmount || 0) || 0;
     let taxRate, tax, vatFlag, catCode;
@@ -939,10 +1895,11 @@ function buildT109(invoice, cfg) {
     // and exciseCurrency ('1' = ad valorem). Values come from the item config so we
     // never guess a rate.
     const isExcise = /excise/.test(taxName) || l.ExciseFlag === '1' || !!(l.ExciseRate || l.ExciseTax);
-    if (vat && /deemed/.test(taxName)) { taxRate = '0.18'; tax = r2(total - total / 1.18); vatFlag = '1'; catCode = '04'; }  // D - Deemed 18%
+    const vat18 = amt => r2(amt - amt / 1.18);   // VAT inside a VAT-inclusive 18% amount
+    if (vat && /deemed/.test(taxName)) { taxRate = '0.18'; tax = vat18(total); vatFlag = '1'; catCode = '04'; }  // D - Deemed 18%
     else if (vat && /exempt/.test(taxName)) { taxRate = '-'; tax = '0'; vatFlag = '1'; catCode = '03'; }
     else if (vat && /zero/.test(taxName)) { taxRate = '0'; tax = '0'; vatFlag = '1'; catCode = '02'; }
-    else if (vat && lineTax > 0) { taxRate = '0.18'; tax = r2(total - total / 1.18); vatFlag = '1'; catCode = '01'; }
+    else if (vat && (/standard/.test(taxName) || lineTax > 0)) { taxRate = '0.18'; tax = vat18(total); vatFlag = '1'; catCode = '01'; }
     else if (vat) { taxRate = '-'; tax = '0'; vatFlag = '1'; catCode = '03'; }
     // Non-VAT-registered taxpayer: issues e-receipts (invoiceKind=2).
     // Per EFRIS developer docs taxRule field: OOS = Out of Scope (correct for
@@ -962,8 +1919,8 @@ function buildT109(invoice, cfg) {
       itemCode: String(l.ItemCode || l.Code || ('ITEM' + (i + 1))).slice(0, 50),
       qty: String(qty), unitOfMeasure: resolveLineUom(l, cfg),
       unitPrice: r2(unitPrice), total: r2(total), taxRate, taxRule, tax: String(tax),
-      discountTotal: '', discountTaxRate: '', orderNumber: String(i),
-      discountFlag: '2', deemedFlag: (catCode === '04' ? '1' : '2'), exciseFlag: (isExcise ? '1' : '2'),
+      discountTotal: discount > 0 ? r2(-discount) : '', discountTaxRate: discount > 0 ? taxRate : '', orderNumber: '',
+      discountFlag: discount > 0 ? '1' : '2', deemedFlag: (catCode === '04' ? '1' : '2'), exciseFlag: (isExcise ? '1' : '2'),
       categoryId: '', categoryName: '',
       goodsCategoryId: l.EFRISCommodityCode || cfg.defaultCommodityCode || '',
       goodsCategoryName: l.EFRISCommodityName || cfg.defaultCommodityName || '',
@@ -994,21 +1951,50 @@ function buildT109(invoice, cfg) {
       g.vatProjectId     = String(l.VatProjectId || '').slice(0, 18);
       g.vatProjectName   = String(l.VatProjectName || '').slice(0, 100);
     }
-    return g;
+    goodsDetails.push(g);
+    if (discount > 0) {
+      // The discount line: same item and code, no qty/unitPrice, total = -discount.
+      // Its tax is the difference between the tax on the discounted amount and the
+      // tax on the full amount, so the pair carries exactly the VAT on what was paid.
+      const after = total - discount;
+      const dTax = taxRate === '0.18' ? r2(parseFloat(vat18(after)) - parseFloat(tax)) : '0';
+      goodsDetails.push({
+        // URA 1178: the discount line's item is the item name plus " (Discount)", or
+        // plus " (deemed) (Discount)" on a deemed line.
+        ...g, item: String(g.item || '') + (g.deemedFlag === '1' ? ' (deemed)' : '') + ' (Discount)',
+        qty: '', unitPrice: '', total: r2(-discount), tax: String(dTax),
+        discountTotal: '', discountTaxRate: taxRate, discountFlag: '0',
+        ...(g.exciseTax !== undefined ? { exciseTax: '0' } : {}),
+      });
+    }
   });
+  // orderNumber is the position in goodsDetails (discount lines included).
+  goodsDetails.forEach((g, i) => { g.orderNumber = String(i); });
   const gross = goodsDetails.reduce((s, g) => s + parseFloat(g.total), 0);
   const taxAmount = goodsDetails.reduce((s, g) => s + (parseFloat(g.tax) || 0), 0);
   const net = gross - taxAmount;
-  const anyVat = goodsDetails.some(g => g.taxRate === '0.18');
-  const catCode = goodsDetails[0] ? goodsDetails[0]._catCode : (anyVat ? '01' : '03');
+  // One taxDetails row per tax category (a sale mixing standard-rated and exempt
+  // lines must report each category's own net/tax/gross).
+  const taxGroups = [];
+  for (const g of goodsDetails) {
+    let t = taxGroups.find(x => x.catCode === g._catCode);
+    if (!t) taxGroups.push(t = { catCode: g._catCode, taxRate: g.taxRate, gross: 0, tax: 0 });
+    t.gross += parseFloat(g.total) || 0; t.tax += parseFloat(g.tax) || 0;
+  }
   goodsDetails.forEach(g => delete g._catCode);
-  const now = new Date();
-  const d = invoice.IssueDate ? new Date(invoice.IssueDate) : now;
-  const p = n => String(n).padStart(2, '0');
-  const issuedDate = p(d.getDate()) + '/' + p(d.getMonth()+1) + '/' + d.getFullYear() + ' ' + p(now.getHours()) + ':' + p(now.getMinutes()) + ':' + p(now.getSeconds());
+  // URA's documented format (yyyy-MM-dd HH:mm:ss). URA online also took dd/MM/yyyy,
+  // but the Offline Enabler validates it itself and rejects anything else (rc 1130).
+  // Always Uganda time, whatever the server's time zone. A sale queued offline
+  // carries _saleAt (when it was made) and is dated then, not when it was sent.
+  const saleMs = invoice._saleAt ? Date.parse(invoice._saleAt) : NaN;
+  const at = eatParts(isNaN(saleMs) ? Date.now() : saleMs);
+  const issueRaw = String(invoice.IssueDate || '');
+  const issueDay = /^\d{4}-\d{2}-\d{2}/.test(issueRaw) ? issueRaw.slice(0, 10)
+    : (issueRaw && !isNaN(Date.parse(issueRaw))) ? eatParts(Date.parse(issueRaw)).date : at.date;
+  const issuedDate = issueDay + ' ' + at.time;
 
   // ── Buyer details - supports B2C, B2B, B2G, Foreign ──────────────────────
-  // buyerType: '0'=Taxpayer(B2B/B2G with TIN), '1'=Citizen(B2C), '2'=Foreigner
+  // buyerType: '0'=B2B (taxpayer with TIN), '1'=B2C, '2'=Foreigner, '3'=B2G (see BUYER_TYPE_B2G)
   const custType = String(invoice.CustomerType || 'b2c').toLowerCase();
   const hasTin = !!(invoice.CustomerTIN && String(invoice.CustomerTIN).trim());
   let buyerType, buyerTin, buyerPassportNum, buyerCitizenship, buyerLegalName, buyerBusinessName, buyerAddress;
@@ -1017,7 +2003,7 @@ function buildT109(invoice, cfg) {
     buyerCitizenship = ''; buyerLegalName = invoice.CustomerName || '';
     buyerBusinessName = invoice.CustomerName || ''; buyerAddress = invoice.CustomerAddress || '';
   } else if (custType === 'b2g') {
-    buyerType = '0'; buyerTin = String(invoice.CustomerTIN || ''); buyerPassportNum = '';
+    buyerType = b2gBuyerType(cfg); buyerTin = String(invoice.CustomerTIN || ''); buyerPassportNum = '';
     buyerCitizenship = ''; buyerLegalName = invoice.CustomerName || 'Government Entity';
     buyerBusinessName = invoice.CustomerDept || invoice.CustomerName || 'Government';
     buyerAddress = invoice.CustomerAddress || '';
@@ -1039,15 +2025,15 @@ function buildT109(invoice, cfg) {
   // Non-VAT e-receipts (invoiceKind=2): no tax categories apply - omit taxDetails
   // entirely. The taxRule='OOS' on each goodsDetails line carries the designation.
   const taxDetails = vat
-    ? [{ taxCategoryCode: catCode, netAmount: r2(net), taxRate: (goodsDetails[0] ? goodsDetails[0].taxRate : (anyVat ? '0.18' : '0')), taxAmount: r2(taxAmount), grossAmount: r2(gross) }]
+    ? taxGroups.map(t => ({ taxCategoryCode: t.catCode, netAmount: r2(t.gross - t.tax), taxRate: t.taxRate, taxAmount: r2(t.tax), grossAmount: r2(t.gross) }))
     : [];
   return {
     sellerDetails: { tin: cfg.tin, ninBrn: cfg.brn || '', legalName: cfg.businessName || cfg.tradeName || '', businessName: cfg.tradeName || cfg.businessName || '', address: cfg.businessAddress || 'Uganda', mobilePhone: cfg.phone || '', linePhone: '', emailAddress: cfg.email || '', placeOfBusiness: cfg.businessAddress || 'Uganda', referenceNo: (isRefund ? 'CN-' : '') + (invoice.Reference || '') },
-    basicInformation: { invoiceNo: '', antifakeCode: '', deviceNo: cfg.deviceNo, issuedDate, operator: invoice.Operator || cfg.issuedBy || cfg.operator || cfg.businessName || cfg.tradeName || 'system', currency: invoice.Currency || 'UGX', oriInvoiceId: invoice.OriginalFDN || '', invoiceType: '1', invoiceKind: vat ? '1' : '2', dataSource: '103', invoiceIndustryCode: '101', isBatch: '0', isRefund: isRefund ? '1' : '0' },
+    basicInformation: { invoiceNo: '', antifakeCode: '', deviceNo: cfg.deviceNo, issuedDate, operator: invoice.Operator || cfg.issuedBy || cfg.operator || 'Cashier', currency: invoice.Currency || 'UGX', oriInvoiceId: debitOf ? String(debitOf.oriInvoiceId) : (invoice.OriginalFDN || ''), invoiceType: debitOf ? '4' : '1', invoiceKind: vat ? '1' : '2', dataSource: '103', invoiceIndustryCode: '101', isBatch: '0', isRefund: isRefund && !debitOf ? '1' : '0' },
     buyerDetails: { buyerTin, buyerNinBrn: '', buyerPassportNum, buyerLegalName, buyerBusinessName, buyerAddress, buyerEmail: invoice.CustomerEmail || '', buyerMobilePhone: invoice.CustomerPhone || '', buyerLinePhone: '', buyerPlaceOfBusi: invoice.CustomerDept || '', buyerType, buyerCitizenship, buyerSector: '', buyerReferenceNo: '' },
     goodsDetails,
     taxDetails,
-    summary: { netAmount: r2(net), taxAmount: r2(taxAmount), grossAmount: r2(gross), itemCount: String(goodsDetails.length), modeCode: '1', remarks: (isRefund && invoice.CreditNoteReason ? invoice.CreditNoteReason + (invoice.Notes ? '. ' + invoice.Notes : '') : invoice.Notes || ''), qrCode: '' },
+    summary: { netAmount: r2(net), taxAmount: r2(taxAmount), grossAmount: r2(gross), itemCount: String(goodsDetails.filter(g => g.discountFlag !== '0').length) /* URA 1304: goods lines minus discount lines */, modeCode: '1', remarks: (isRefund && invoice.CreditNoteReason ? invoice.CreditNoteReason + (invoice.Notes ? '. ' + invoice.Notes : '') : invoice.Notes || ''), qrCode: '' },
     payWay: (invoice.PayWays && invoice.PayWays.length)
       ? invoice.PayWays.map((pw, i) => ({ paymentMode: String(pw.mode || '101'), paymentAmount: r2(pw.amount || 0), orderNumber: String(i + 1) }))
       : [{ paymentMode: String(invoice.PaymentMode || '101'), paymentAmount: r2(gross), orderNumber: '1' }],
@@ -1071,12 +2057,19 @@ function buildT108(invoice, cfg, opts) {
   const base = buildT109({ ...invoice, IsRefund: true }, cfg);
   const neg = s => { const n = parseFloat(s) || 0; return (n === 0 ? 0 : -Math.abs(n)).toFixed(2); };
   const negQty = q => { const n = parseFloat(q) || 0; return String(n === 0 ? 0 : -Math.abs(n)); };
-  const goodsDetails = base.goodsDetails.map(g => ({
-    ...g,
-    qty: negQty(g.qty),
-    total: neg(g.total),
-    tax: String(neg(g.tax)),
-  }));
+  // A discounted item and its discount line keep their relationship with the signs
+  // reversed: the item line is negative and the discount line (and the item's
+  // discountTotal) positive, so each pair still nets to the discounted amount.
+  const flip = s => { const n = parseFloat(s) || 0; return (n === 0 ? 0 : -n).toFixed(2); };
+  const goodsDetails = base.goodsDetails.map(g => String(g.discountFlag) === '0'
+    ? { ...g, total: flip(g.total), tax: String(flip(g.tax)) }
+    : {
+      ...g,
+      qty: negQty(g.qty),
+      total: neg(g.total),
+      tax: String(neg(g.tax)),
+      ...(String(g.discountFlag) === '1' ? { discountTotal: flip(g.discountTotal) } : {}),
+    });
   const taxDetails = (base.taxDetails || []).map(t => ({
     ...t,
     netAmount: neg(t.netAmount),
@@ -1091,9 +2084,7 @@ function buildT108(invoice, cfg, opts) {
     remarks: o.remarks || base.summary.remarks || '',
   };
   const payWay = (base.payWay || []).map(p => ({ ...p, paymentAmount: neg(p.paymentAmount) }));
-  const now = new Date();
-  const p = n => String(n).padStart(2, '0');
-  const applicationTime = `${now.getFullYear()}-${p(now.getMonth()+1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`;
+  const applicationTime = eatStamp();   // Uganda time, whatever the server's zone
   return {
     oriInvoiceId: String(o.oriInvoiceId || ''),
     oriInvoiceNo: String(o.oriInvoiceNo || ''),
@@ -1120,6 +2111,7 @@ function buildT108(invoice, cfg, opts) {
 //  GOODS TREE ROUTES (existing)
 // ══════════════════════════════════════════════════════════════
 
+const RELAY_STARTED_AT = new Date().toISOString();   // lets open pages notice a restart
 app.get('/api/health', (req, res) => {
   const b64 = process.env.EFRIS_PRIVATE_KEY_B64 || '';
   const raw = process.env.EFRIS_PRIVATE_KEY || '';
@@ -1143,7 +2135,10 @@ app.get('/api/health', (req, res) => {
       catch(e) { keyParseError = path.basename(p) + ': ' + e.message; }
     }
   }
-  res.json({
+  // Public callers only learn that the relay is up and whether a key loads;
+  // the format and error details need an admin (or the service key).
+  if (!auth.can(auth.permissionsFor(req.auth), '*')) return res.json({ status: 'ok', startedAt: RELAY_STARTED_AT, key: { key_parse_ok: keyOk } });
+  res.json({ startedAt: RELAY_STARTED_AT,
     status: 'ok',
     uptime: process.uptime(),
     key: {
@@ -1157,14 +2152,254 @@ app.get('/api/health', (req, res) => {
 });
 
 // ── Daily error/activity logs - for the team or support to troubleshoot ──
-// Same /api/* auth as everything else (X-API-KEY), so this isn't public.
+// The raw day files hold every business's entries, so only owners and the
+// service principal may read them (business admins use the scoped activity
+// view, export and support bundle). The output is masked line by line, also
+// for files written before the logger masked its entries.
+function ownerOnly(req, res) {
+  const u = req.auth;
+  if (u && (u.owner || u.service)) return true;
+  res.status(403).json({ success: false, error: 'Only an owner can read the raw relay logs', permission: 'owner' });
+  return false;
+}
 app.get('/api/admin/logs', (req, res) => {
+  if (!ownerOnly(req, res)) return;
   res.json({ days: logger.listDays() });
 });
 app.get('/api/admin/logs/:day', (req, res) => {
+  if (!ownerOnly(req, res)) return;
   const content = logger.readDay(req.params.day);
   if (content === null) return res.status(404).json({ error: 'No log for that day' });
-  res.type('text/plain').send(content);
+  const m = s => activity.mask(s);
+  const out = content.split('\n').map(l => {
+    if (!l.trim()) return l;
+    let e = null; try { e = JSON.parse(l); } catch (_) {}
+    return e && typeof e === 'object' ? JSON.stringify(maskDeep(e, m, 0)) : m(l);
+  }).join('\n');
+  res.setHeader('Cache-Control', 'no-store');
+  res.type('text/plain').send(out);
+});
+
+// ── Activity log (Settings > Logs): the relay console's lines, masked ──
+// GET /api/admin/activity?day=&level=all|warn|error&tenant=<id>|system|all&q=&debug=0|1&after=<seq>&limit=
+// Owners and the service see every line; any other admin sees only lines tagged
+// with a business they administer (untagged "system" lines are for owners).
+const ACTIVITY_LIMIT_MAX = 2000;
+// Which lines a caller may see, for the activity routes. Returns { status, error }
+// or { all, mine, keep(entry) } where keep applies the business filter.
+function activityScope(user, tenant) {
+  const all = !!(user && (user.owner || user.service));
+  const mine = new Set(all ? [] : Object.keys((user && user.roles) || {}).filter(t => user.roles[t] === 'admin'));
+  if (!all && tenant !== 'all' && tenant !== 'system' && !mine.has(tenant)) return { status: 403, error: 'You do not administer this business' };
+  const keep = e => {
+    if (all) return !(tenant === 'system' ? e.tenantId : (tenant !== 'all' && e.tenantId !== tenant));
+    if (!e.tenantId || !mine.has(e.tenantId)) return false;
+    return !(tenant === 'system' || (tenant !== 'all' && e.tenantId !== tenant));
+  };
+  return { all, mine, tenant, keep };
+}
+// level / debug / text filters shared by the activity routes. Returns { error } or { test(entry) }.
+function activityFilters(q) {
+  const str = v => (typeof v === 'string' ? v : '');
+  const level = str(q.level) || 'all';
+  if (!['all', 'warn', 'error'].includes(level)) return { error: 'level must be all, warn or error' };
+  const debug = str(q.debug) === '1';
+  const needle = str(q.q).trim().toLowerCase().slice(0, 200);
+  return { test: e => {
+    if (!debug && e.debug) return false;
+    if (level === 'error' && e.level !== 'error') return false;
+    if (level === 'warn' && e.level === 'info') return false;
+    if (needle && (String(e.text) + ' ' + (e.user || '')).toLowerCase().indexOf(needle) < 0) return false;
+    return true;
+  } };
+}
+app.get('/api/admin/activity', (req, res) => {
+  const user = req.auth;
+  const q = req.query || {};
+  const str = v => (typeof v === 'string' ? v : '');
+  const day = str(q.day).trim();
+  if (day && !activity.validDay(day)) return res.status(400).json({ success: false, error: 'day must be a date like 2026-10-09' });
+  const f = activityFilters(q);
+  if (f.error) return res.status(400).json({ success: false, error: f.error });
+  const scope = activityScope(user, str(q.tenant) || 'all');
+  if (scope.error) return res.status(scope.status).json({ success: false, error: scope.error });
+  let after = null;
+  if (str(q.after) !== '') { after = Number(q.after); if (!Number.isFinite(after)) return res.status(400).json({ success: false, error: 'after must be a number' }); }
+  let limit = parseInt(str(q.limit), 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 500;
+  limit = Math.min(limit, ACTIVITY_LIMIT_MAX);
+  const today = activity.eatDay();
+  const src = activity.entries({ day: day || today, after: (!day || day === today) ? after : null });
+  const out = src.filter(e => scope.keep(e) && f.test(e));
+  // A non-owner admin does not see other businesses' TINs, as in the export.
+  const hideTins = otherTinHider(scope);
+  const entries = out.slice(-limit).map(e => (scope.all ? e : { ...e, text: hideTins(e.text) }));
+  const lastSeq = src.length ? src[src.length - 1].seq : (after != null ? after : activity.lastSeq());
+  res.json({ success: true, day: day || today, today, entries, lastSeq, truncated: out.length > entries.length, days: activity.listDays() });
+});
+
+// ── Activity export and support bundle (Settings > Logs > Export) ──
+// Same scoping and masking as /api/admin/activity, over a range of Uganda days.
+const EXPORT_MAX_DAYS = 92;
+const EXPORT_MAX_LINES = 200000;
+const LOG_OK = /FDN:|fiscalised|✅|✔|Created |recorded |unlocked|running at|Theme updated/;
+function logLevelLabel(e) { return e.level === 'error' ? 'Error' : e.level === 'warn' ? 'Warning' : LOG_OK.test(e.text) ? 'OK' : 'Info'; }
+function logBizName(id, metas) { if (!id) return 'System'; const t = metas[id]; return (t && (t.tradeName || t.businessName)) || id; }
+function eatDayTime(iso) { const t = Date.parse(iso); const d = new Date((isNaN(t) ? 0 : t) + 3 * 3600000).toISOString(); return { date: d.slice(0, 10), time: d.slice(11, 19) }; }
+// Masks a text for anything leaving the relay: the activity rules (including the
+// exact vault secrets), plus for a non-owner admin the TINs of businesses they do
+// not administer.
+// The TINs of businesses a non-owner admin does not administer, hidden from them.
+function otherTinHider(scope) {
+  const hide = [];
+  if (!scope.all) { try { for (const t of vault.listTenants()) if (!scope.mine.has(t.id) && t.tin && String(t.tin).length >= 6) hide.push(String(t.tin)); } catch (_) {} }
+  return s => { let out = String(s); for (const v of hide) if (out.indexOf(v) >= 0) out = out.split(v).join('***'); return out; };
+}
+function exportMasker(scope) {
+  // Read every business once so its exact secret values are known to the masker.
+  try { for (const t of vault.listTenants()) { try { vault.getTenant(t.id); } catch (_) {} } } catch (_) {}
+  const hideTins = otherTinHider(scope);
+  return s => hideTins(activity.mask(s));
+}
+function csvSafe(s) { return /^[=+\-@\t\r]/.test(s) ? "'" + s : s; }
+function exportLine(e, kind, metas, m) {
+  const t = eatDayTime(e.time), lv = logLevelLabel(e), biz = logBizName(e.tenantId, metas), user = e.user || '';
+  // CSV cells are quoted, and a cell a spreadsheet would read as a formula (=, +,
+  // -, @, tab, CR) gets a leading apostrophe so it opens as text.
+  if (kind === 'csv') { const q = v => '"' + csvSafe(m(String(v))).replace(/"/g, '""') + '"'; return [t.date, t.time, lv, biz, user, e.debug ? 'yes' : 'no', e.text].map(q).join(','); }
+  return m(t.date + ' ' + t.time + '  ' + (lv + '       ').slice(0, 7) + '  [' + biz + ']' + (user ? ' ' + user : '') + '  ' + e.text);
+}
+function exportRange(req, res) {
+  const q = req.query || {};
+  const str = v => (typeof v === 'string' ? v.trim() : '');
+  const r = logTools.dayRange(str(q.from), str(q.to), EXPORT_MAX_DAYS);
+  if (r.error) { res.status(400).json({ success: false, error: r.error }); return null; }
+  return r;
+}
+const queryTenant = q => (typeof q.tenant === 'string' && q.tenant) || 'all';
+// GET /api/admin/activity/export?from=&to=&level=&tenant=&q=&debug=&format=txt|csv
+app.get('/api/admin/activity/export', (req, res) => {
+  const q = req.query || {};
+  const range = exportRange(req, res); if (!range) return;
+  const format = typeof q.format === 'string' && q.format ? q.format : 'txt';
+  if (format !== 'txt' && format !== 'csv') return res.status(400).json({ success: false, error: 'format must be txt or csv' });
+  const f = activityFilters(q);
+  if (f.error) return res.status(400).json({ success: false, error: f.error });
+  const scope = activityScope(req.auth, queryTenant(q));
+  if (scope.error) return res.status(scope.status).json({ success: false, error: scope.error });
+  const metas = tenantMetaMap(), m = exportMasker(scope);
+  const from = range.days[0], to = range.days[range.days.length - 1];
+  res.setHeader('Content-Type', format === 'csv' ? 'text/csv; charset=utf-8' : 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="EFRISConnect-log-' + from + '_to_' + to + '.' + format + '"');
+  res.setHeader('Cache-Control', 'no-store');
+  res.write(format === 'csv' ? '﻿Date,Time,Level,Business,User,Technical,Text\r\n' : 'EFRISConnect activity log, ' + from + ' to ' + to + ' (Uganda time). Passwords, tokens and keys are removed.\r\n');
+  let n = 0, stopped = false;
+  for (const day of range.days) {
+    const lines = [];
+    for (const e of activity.entries({ day })) {
+      if (!scope.keep(e) || !f.test(e)) continue;
+      if (n >= EXPORT_MAX_LINES) { stopped = true; break; }
+      lines.push(exportLine(e, format, metas, m)); n++;
+    }
+    if (lines.length) res.write(lines.join('\r\n') + '\r\n');
+    if (stopped) break;
+  }
+  if (stopped) res.write(format === 'csv' ? ',,,,,,"Stopped at ' + EXPORT_MAX_LINES + ' lines: choose fewer days or add a filter"\r\n' : 'Stopped at ' + EXPORT_MAX_LINES + ' lines: choose fewer days or add a filter.\r\n');
+  else if (!n && format === 'txt') res.write('No lines match these filters in this period.\r\n');
+  res.end();
+});
+
+// Masks every string in a logger entry; values under secret-looking keys go entirely.
+const SECRET_KEY_RE = /pass(word|phrase|wd|code)?|pwd|secret|token|api[_-]?key|aes[_-]?key|access[_-]?key|authorization|pem|private[_-]?key|cookie|credential/i;
+function maskDeep(v, m, depth) {
+  if (typeof v === 'string') return m(v);
+  if (!v || typeof v !== 'object' || depth > 6) return v;
+  if (Array.isArray(v)) return v.map(x => maskDeep(x, m, depth + 1));
+  const out = {};
+  for (const k of Object.keys(v)) out[k] = SECRET_KEY_RE.test(k) ? '***' : maskDeep(v[k], m, depth + 1);
+  return out;
+}
+// system-info.txt: versions and state only. No secrets, no names, no settings
+// beyond the ones listed here.
+function systemInfo(scope, range) {
+  const os = require('os');
+  const metas = tenantMetaMap();
+  const ids = Object.keys(metas).filter(id => scope.all || scope.mine.has(id));
+  const conn = (_connCache && _connCache.data) || {};
+  const iso = ms => new Date(ms).toISOString();
+  const reach = v => (v === true ? 'reachable' : v === false ? 'unreachable' : 'not checked yet');
+  let queue = []; try { queue = loadQueue(); } catch (_) {}
+  let users = []; try { users = auth.listUsers(); } catch (_) {}
+  const userCount = scope.all ? users.length : users.filter(u => Object.keys(u.roles || {}).some(t => scope.mine.has(t))).length;
+  const up = Math.floor(process.uptime());
+  const L = [
+    'EFRISConnect support bundle',
+    'Made: ' + new Date().toISOString() + ' (UTC)',
+    'Period: ' + range.days[0] + ' to ' + range.days[range.days.length - 1] + ' (Uganda time)',
+    'Made by: ' + (scope.all ? 'an owner (all businesses)' : 'an admin (their businesses only)'),
+    '',
+    'EFRISConnect version: ' + APP_VERSION,
+    'Operating system: ' + os.type() + ' ' + os.release() + ' (' + process.platform + ', ' + process.arch + ')',
+    'Node.js: ' + process.version,
+    'Relay running for: ' + Math.floor(up / 86400) + 'd ' + Math.floor(up % 86400 / 3600) + 'h ' + Math.floor(up % 3600 / 60) + 'm',
+    'Vault: ' + (vault.isUnlocked() ? 'unlocked' : 'locked'),
+    'URA: ' + reach(_retry.online !== null ? _retry.online : conn.ura) + (_retry.lastAt ? ', last queue attempt ' + iso(_retry.lastAt) : '') + (_connCache && _connCache.ts ? ', last connection check ' + iso(_connCache.ts) : ''),
+    'Offline Enabler last status: ' + (conn.enabler === true ? 'answering' : conn.enabler === false ? 'not answering' : 'not checked'),
+    'Users: ' + userCount,
+    'Data folder: ' + DATA_DIR,
+    'Log retention: ' + logTools.retentionDays() + ' days',
+    '',
+    'Businesses (' + ids.length + '):',
+  ];
+  for (const id of ids) {
+    const t = metas[id] || {};
+    const pend = queue.filter(e => e.tenantId === id && e.status === 'pending').length;
+    const failed = queue.filter(e => e.tenantId === id && e.status === 'failed').length;
+    L.push('  ' + logBizName(id, metas) + ' [' + id + ']: ' + (t.mode === 'production' ? 'production' : 'sandbox')
+      + ', Offline Enabler configured: ' + (t.hasEnabler ? 'yes' : 'no') + ', offline queue: ' + pend + ' pending, ' + failed + ' failed');
+  }
+  return L.join('\r\n') + '\r\n';
+}
+// GET /api/admin/support-bundle?from=&to=&tenant=  -> EFRISConnect-support-<from>_to_<to>.zip
+app.get('/api/admin/support-bundle', (req, res) => {
+  const q = req.query || {};
+  const range = exportRange(req, res); if (!range) return;
+  const scope = activityScope(req.auth, queryTenant(q));
+  if (scope.error) return res.status(scope.status).json({ success: false, error: scope.error });
+  const metas = tenantMetaMap(), m = exportMasker(scope);
+  const files = [];
+  let n = 0;
+  for (const day of range.days) {
+    const lines = [];
+    for (const e of activity.entries({ day })) {
+      if (!scope.keep(e)) continue;
+      if (n >= EXPORT_MAX_LINES) break;
+      lines.push(exportLine(e, 'txt', metas, m)); n++;
+    }
+    if (lines.length) files.push({ name: 'activity-' + day + '.txt', data: lines.join('\r\n') + '\r\n' });
+  }
+  // The structured error log (logger.js day files): owners see every entry, other
+  // admins only entries tagged with a business they administer.
+  for (const day of range.days) {
+    const raw = logger.readDay(day);
+    if (!raw) continue;
+    const out = [];
+    for (const l of raw.split('\n')) {
+      if (!l.trim()) continue;
+      let e = null; try { e = JSON.parse(l); } catch (_) {}
+      if (!e || typeof e !== 'object' || Array.isArray(e)) { if (scope.all && scope.tenant === 'all') out.push(m(l)); continue; }
+      if (!scope.keep({ tenantId: typeof e.tenantId === 'string' ? e.tenantId : '' })) continue;
+      out.push(m(JSON.stringify(maskDeep(e, m, 0))));
+    }
+    if (out.length) files.push({ name: 'errors-' + day + '.jsonl', data: out.join('\n') + '\n' });
+  }
+  files.push({ name: 'system-info.txt', data: m(systemInfo(scope, range)) });
+  const from = range.days[0], to = range.days[range.days.length - 1];
+  const body = logTools.zip(files);
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', 'attachment; filename="EFRISConnect-support-' + from + '_to_' + to + '.zip"');
+  res.setHeader('Cache-Control', 'no-store');
+  res.end(body);
 });
 
 // ── Client-side error reports - what the frontend saw + what the user was
@@ -1179,11 +2414,14 @@ app.post('/api/client-log', (req, res) => {
 
   const b = req.body || {};
   const trunc = (s, n) => (typeof s === 'string' ? s.slice(0, n) : s);
-  logger.error('client: ' + trunc(redactSecrets(String(b.message || 'unknown error'), req), 500), {
+  // Page URLs and messages can carry the Manager token (?apiAccessToken=, tk=) or
+  // an API key: drop the URL's query/hash and mask any such value left anywhere.
+  const scrub = s => String(s == null ? '' : s).replace(/\b(apiAccessToken|accessToken|tk|key)=[^&\s#'"]*/gi, '$1=[redacted]');
+  logger.error('client: ' + trunc(scrub(redactSecrets(String(b.message || 'unknown error'), req)), 500), {
     tab: trunc(b.tab, 40),
-    breadcrumbs: Array.isArray(b.breadcrumbs) ? b.breadcrumbs.slice(-8).map(x => trunc(String(x), 60)) : undefined,
-    stack: trunc(redactSecrets(String(b.stack || ''), req), 1500),
-    url: trunc(b.url, 200),
+    breadcrumbs: Array.isArray(b.breadcrumbs) ? b.breadcrumbs.slice(-8).map(x => trunc(scrub(x), 60)) : undefined,
+    stack: trunc(scrub(redactSecrets(String(b.stack || ''), req)), 1500),
+    url: b.url ? trunc(scrub(String(b.url).split(/[?#]/)[0]), 200) : undefined,
   });
   res.status(204).end();
 });
@@ -1253,16 +2491,14 @@ app.post('/api/efris/sync-units', async (req, res) => {
   const { tin, deviceNo, efrisPassword, mode } = req.body || {};
   if (!tin || !deviceNo || !efrisPassword) return res.json({ success: false, error: 'Missing EFRIS credentials' });
   try {
-    const eu = mode === 'production'
-      ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
-      : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+    const eu = uraUrl(mode);
     const session = await getSession(tin, deviceNo, efrisPassword, eu, keyOverrideFrom(req.body));
     const efrisUnits = await getEfrisMeasureUnits(tin, deviceNo, session, eu);
     if (!efrisUnits.length) return res.json({ success: false, error: 'EFRIS returned no measure units (T115 dictionary unavailable or empty). Kept the existing list.' });
 
     // Merge: start from static bundled units, then let EFRIS overwrite by code.
     let staticUnits = [];
-    try { staticUnits = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'uom.json'), 'utf8')); } catch(_) {}
+    try { staticUnits = JSON.parse(fs.readFileSync(path.join(SHIPPED_DIR, 'uom.json'), 'utf8')); } catch(_) {}
     const byCode = new Map();
     for (const u of staticUnits) { const c = String(u.code || '').toUpperCase(); if (c) byCode.set(c, { code: u.code, name: u.name || u.desc || '' }); }
     let added = 0, updated = 0;
@@ -1330,6 +2566,167 @@ app.get('/api/commodity/:code', (req, res) => {
     }
     res.status(404).json({ error: 'Commodity not found' });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ══════════════════════════════════════════════════════════════
+//  URA tax rule for a commodity code (T124, T146 fallback)
+// ══════════════════════════════════════════════════════════════
+// URA keeps, per commodity category, whether sales are standard-rated, zero-rated
+// or exempt (with the dates each rule applies), and whether the category is
+// excisable. T124 is the paged commodity-category query (pageNo/pageSize, and on
+// current builds an optional commodityCategoryCode filter). Builds that ignore the
+// filter return the first page of the whole list instead, so a reply without the
+// asked code falls back to T146 (category by code and issue date). Results are
+// cached for 24 h per environment; the rules change rarely.
+const COMMODITY_TAX_TTL = 24 * 3600000;
+const _commodityTax = new Map();   // mode|code -> { ts, rec }
+let _commodityShapeLogged = false;
+
+// URA's yes/no fields are '101' (yes) / '102' (no); accept the usual spellings too.
+function uraYes(v) {
+  const s = String(v == null ? '' : v).trim().toLowerCase();
+  return s === '101' || s === '1' || s === 'y' || s === 'yes' || s === 'true';
+}
+// URA dates: dd/MM/yyyy (with or without a time) or yyyy-MM-dd. Returns ms or null.
+function uraDateMs(v) {
+  const s = String(v || '').trim();
+  let m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(s);
+  if (m) return Date.UTC(+m[3], +m[2] - 1, +m[1]);
+  m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3]);
+  return null;
+}
+// A rule flagged on URA applies today unless its dates say otherwise.
+function ruleActive(start, end, now) {
+  const a = uraDateMs(start), b = uraDateMs(end);
+  if (a != null && now < a) return false;
+  if (b != null && now > b + 86400000 - 1) return false;
+  return true;
+}
+function commodityNameFromTree(code) {
+  try {
+    const target = String(code).padStart(8, '0');
+    for (const seg of Object.values(getTree())) for (const fam of Object.values(seg.f || {})) for (const cls of Object.values(fam.c || {})) {
+      if (cls.d && cls.d[target]) { const c = cls.d[target]; return typeof c === 'string' ? c : c.n; }
+    }
+  } catch (_) {}
+  return '';
+}
+// One URA commodity-category record -> the VAT rule EFRISConnect works with.
+function commodityTaxRule(rec, now) {
+  now = now || Date.now();
+  const r = rec || {};
+  const rateNum = parseFloat(r.rate);
+  const ratePct = isNaN(rateNum) ? null : Math.round((rateNum <= 1 ? rateNum * 100 : rateNum) * 100) / 100;
+  const exempt = uraYes(r.isExempt) && ruleActive(r.exemptRateStartDate, r.exemptRateEndDate, now);
+  const zero = !exempt && uraYes(r.isZeroRate) && ruleActive(r.zeroRateStartDate, r.zeroRateEndDate, now);
+  const deemedKey = Object.keys(r).find(k => /deemed/i.test(k) && !/date/i.test(k));
+  const deemed = !exempt && !zero && !!deemedKey && uraYes(r[deemedKey]);
+  const exciseKey = Object.keys(r).find(k => /^(is)?excis(able|e)?(flag)?$/i.test(k));
+  const excisable = !!exciseKey && uraYes(r[exciseKey]);
+  let rule, label;
+  if (exempt) { rule = 'exempt'; label = 'Exempt'; }
+  else if (zero) { rule = 'zero'; label = 'Zero-rated 0%'; }
+  else if (deemed) { rule = 'deemed'; label = 'Deemed VAT ' + (ratePct || 18) + '%'; }
+  else if (ratePct != null && ratePct > 0) { rule = 'standard'; label = 'Standard ' + ratePct + '%'; }
+  else if (ratePct === 0) { rule = 'zero'; label = 'Zero-rated 0%'; }
+  else { rule = 'unknown'; label = 'Unknown'; }
+  return {
+    code: String(r.commodityCategoryCode || ''), name: String(r.commodityCategoryName || ''),
+    rule, label: label + (excisable ? ' + excise' : ''), rate: ratePct, excisable,
+    isZeroRate: uraYes(r.isZeroRate), zeroRateStartDate: r.zeroRateStartDate || '', zeroRateEndDate: r.zeroRateEndDate || '',
+    isExempt: uraYes(r.isExempt), exemptRateStartDate: r.exemptRateStartDate || '', exemptRateEndDate: r.exemptRateEndDate || '',
+    isLeafNode: r.isLeafNode === undefined ? null : uraYes(r.isLeafNode),
+    serviceMark: r.serviceMark === undefined ? null : uraYes(r.serviceMark),
+  };
+}
+// Every object in a decoded reply that looks like a commodity-category record.
+function commodityRecords(parsed) {
+  const out = [];
+  const walk = (v, d) => {
+    if (!v || typeof v !== 'object' || d > 4) return;
+    if (Array.isArray(v)) { v.forEach(x => walk(x, d + 1)); return; }
+    if (v.commodityCategoryCode !== undefined) { out.push(v); return; }
+    for (const k of Object.keys(v)) if (k !== 'page') walk(v[k], d + 1);
+  };
+  walk(parsed, 0);
+  return out;
+}
+async function commodityQuery(eu, iface, payload, cfg, session) {
+  const r = await efrisSecure(eu, iface, payload, cfg.tin, cfg.deviceNo, session);
+  const rc = r && r.data && r.data.returnStateInfo ? r.data.returnStateInfo.returnCode : null;
+  const rm = r && r.data && r.data.returnStateInfo ? r.data.returnStateInfo.returnMessage : '';
+  let parsed = null;
+  const c = r && r.data && r.data.data && r.data.data.content;
+  if (c) { try { const raw = efrisDecodeJson(c, session.aesKey); if (raw) parsed = JSON.parse(raw); } catch (_) {} }
+  if (parsed && !_commodityShapeLogged) {
+    _commodityShapeLogged = true;
+    const recs = commodityRecords(parsed);
+    console.log('   [debug] ' + iface + ' reply shape: top-level ' + Object.keys(parsed).join(', ') + (recs[0] ? ' | record fields: ' + Object.keys(recs[0]).join(', ') : ' | no records'));
+  }
+  return { rc, rm, parsed };
+}
+// Looks up the URA tax rule of each code. cfg: { tin, deviceNo, efrisPassword,
+// mode, efrisKeyPem/efrisKeyPath/efrisKeyPassphrase }. Never throws for one bad
+// code: that code comes back with an error.
+async function lookupCommodityTax(codes, cfg) {
+  const mode = cfg.mode === 'production' ? 'production' : 'sandbox';
+  const eu = uraUrl(mode);
+  const list = [...new Set((codes || []).map(c => String(c || '').trim()).filter(c => /^\d{1,10}$/.test(c)))].slice(0, 50);
+  const out = {};
+  const todo = [];
+  const now = Date.now();
+  for (const code of list) {
+    const hit = _commodityTax.get(mode + '|' + code);
+    if (hit && now - hit.ts < COMMODITY_TAX_TTL) out[code] = Object.assign({}, hit.rec, { cached: true });
+    else todo.push(code);
+  }
+  if (!todo.length) return out;
+  const session = await getSession(cfg.tin, cfg.deviceNo, cfg.efrisPassword, eu, keyOverrideFrom(cfg));
+  if (!session.aesKey) throw new Error('No AES key');
+  const pad = c => String(c).padStart(8, '0');
+  const issueDate = new Date(Date.now() + 3 * 3600000).toISOString().replace('T', ' ').slice(0, 19);
+  for (const code of todo) {
+    try {
+      let rec = null, source = '', err = '';
+      const q1 = await commodityQuery(eu, 'T124', { commodityCategoryCode: code, pageNo: '1', pageSize: '10' }, cfg, session);
+      if (q1.rc === '00' || q1.rc === null) rec = commodityRecords(q1.parsed).find(x => pad(x.commodityCategoryCode) === pad(code)) || null;
+      if (rec) source = 'T124';
+      else {
+        if (q1.rc && q1.rc !== '00') err = 'T124 ' + q1.rc + ' ' + q1.rm;
+        const q2 = await commodityQuery(eu, 'T146', { categoryCode: code, type: '1', issueDate }, cfg, session);
+        if (q2.rc === '00') rec = commodityRecords(q2.parsed).find(x => pad(x.commodityCategoryCode) === pad(code)) || commodityRecords(q2.parsed)[0] || null;
+        if (rec) source = 'T146';
+        else if (q2.rc && q2.rc !== '00') err = (err ? err + '; ' : '') + 'T146 ' + q2.rc + ' ' + q2.rm;
+      }
+      if (!rec) { out[code] = { code, name: commodityNameFromTree(code), rule: 'unknown', label: 'Not found at URA', error: err || 'URA returned no record for this code' }; continue; }
+      const v = commodityTaxRule(rec, now);
+      v.code = code;
+      if (!v.name) v.name = commodityNameFromTree(code);
+      v.source = source;
+      _commodityTax.set(mode + '|' + code, { ts: now, rec: v });
+      out[code] = v;
+    } catch (e) {
+      out[code] = { code, name: commodityNameFromTree(code), rule: 'unknown', label: 'Lookup failed', error: e.message };
+    }
+  }
+  return out;
+}
+
+app.post('/api/efris/commodity-tax', async (req, res) => {
+  const b = req.body || {};
+  const cfg = b.config || b;
+  const codes = Array.isArray(b.codes) ? b.codes : (b.code ? [b.code] : []);
+  if (!codes.length) return res.status(400).json({ success: false, error: 'codes required' });
+  if (!cfg.tin || !cfg.deviceNo) return res.status(400).json({ success: false, error: 'EFRIS credentials required (config.tin, config.deviceNo)' });
+  try {
+    const results = await lookupCommodityTax(codes, cfg);
+    res.json({ success: true, results });
+  } catch (e) {
+    const safe = redactSecrets(String(e.message || e), req);
+    logger.error('commodity-tax failed', { message: safe });
+    res.json({ success: false, error: safe });
+  }
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -1428,7 +2825,7 @@ app.post('/api/goods/sync-to-manager', async (req, res) => {
       if (item.vat) {
         try {
           const taxGuid = await mgrTaxCodeGuid(ep, accessToken, item.vat);
-          if (taxGuid) { form.TaxCode = taxGuid; console.log(`   Tax code GUID → ${taxGuid} (${item.vat})`); }
+          if (taxGuid) { form.TaxCode = taxGuid; form.HasDefaultTaxCode = true; form.DefaultTaxCode = taxGuid; console.log(`   Tax code GUID → ${taxGuid} (${item.vat})`); }
           else { console.log(`   ⚠ No matching tax code found for VAT type: ${item.vat}`); }
         } catch(_) {}
       }
@@ -1482,7 +2879,7 @@ app.post('/api/goods/sync-to-manager', async (req, res) => {
       }
       // Tax code for create
       if (item.vat) {
-        try { const tg = await mgrTaxCodeGuid(ep, accessToken, item.vat); if (tg) payload.TaxCode = tg; } catch(_) {}
+        try { const tg = await mgrTaxCodeGuid(ep, accessToken, item.vat); if (tg) { payload.TaxCode = tg; payload.HasDefaultTaxCode = true; payload.DefaultTaxCode = tg; } } catch(_) {}
       }
       if (item.whenSold) { payload.SaleItemAccount = item.whenSold; payload.WhenSold = item.whenSold; }
       if (item.whenPurchased) { payload.PurchaseItemAccount = item.whenPurchased; payload.WhenPurchased = item.whenPurchased; }
@@ -1511,8 +2908,25 @@ app.post('/api/goods/sync-to-manager', async (req, res) => {
       console.log(`   Manager POST: HTTP ${r.status} → key: ${existingKey||'unknown'}`);
       const ok = r.status >= 200 && r.status < 400;
       const written = Object.keys(cfStrings).length;
+      // Seed the Manager opening balance from the good's current EFRIS stock, when
+      // an import supplied one (inventory items only - services carry no stock).
+      // Create-only path, so a re-sync never re-applies it. Best-effort.
+      let openingStock = null;
+      if (ok && !isService && existingKey && parseFloat(item.openingStock) > 0) {
+        try {
+          const qty = parseFloat(item.openingStock);
+          const cost = parseFloat(item.price) || 0;
+          const sb = { InventoryItem: existingKey, HasQtyToOnHand: true, QtyOnHandLines: [{ QtyOnHand: qty }], AverageCost: cost };
+          const sbr = await managerCall(ep, accessToken, 'POST', '/inventory-item-starting-balance-form', sb);
+          console.log(`   opening-stock POST: HTTP ${sbr.status} item=${existingKey} qty=${qty}`);
+          if (sbr.status >= 200 && sbr.status < 400) {
+            openingStock = qty;
+            if (cost > 0) { try { await recordInventoryUnitCost(ep, accessToken, existingKey, cost, eatToday()); } catch(_) {} }
+          }
+        } catch (e) { console.log(`   opening-stock skipped: ${e.message}`); }
+      }
       return res.json(ok
-        ? { success: true, action, managerId: existingKey || null, comCodeWritten: !!(comCodeFieldKey && item.comCode), fieldsWritten: written }
+        ? { success: true, action, managerId: existingKey || null, comCodeWritten: !!(comCodeFieldKey && item.comCode), fieldsWritten: written, openingStock }
         : { success: false, error: `Manager returned HTTP ${r.status}: ${JSON.stringify(r.data||'').slice(0,200)}` });
     }
   } catch(e) {
@@ -1552,16 +2966,20 @@ app.get('/api/goods/manager-items', async (req, res) => {
   }
 });
 
+const _acctPath = {};
 app.get('/api/manager/accounts', async (req, res) => {
   const { ep, tk } = mgrCreds(req);
   if (!ep || !tk) return res.status(400).json({ success: false, error: 'ep and tk required' });
   // Try several common Manager account-list endpoints. Manager API2 uses kebab-case
   // plural paths (cf. /inventory-items). Different editions expose different names.
-  const paths = ['/profit-and-loss-statement-accounts', '/profit-and-loss-accounts', '/income-statement-accounts', '/balance-sheet-accounts', '/accounts', '/chart-of-accounts'];
+  // The one that answers is remembered per Manager, so later calls go straight to it.
+  let paths = ['/chart-of-accounts', '/profit-and-loss-statement-accounts', '/profit-and-loss-accounts', '/income-statement-accounts', '/balance-sheet-accounts', '/accounts'];
+  if (_acctPath[ep]) paths = [_acctPath[ep], ...paths.filter(p => p !== _acctPath[ep])];
   for (const path of paths) {
     try {
       const r = await managerCall(ep, tk, 'GET', path, null);
-      console.log(`   accounts probe ${path} → HTTP ${r.status}`);
+      if (r.status === 200) _acctPath[ep] = path;
+      else if (!_acctPath[ep]) console.log(`   accounts probe ${path} → HTTP ${r.status}`);
       if (r.status === 200 && r.data) {
         // Find the array inside the response object (Manager wraps lists under a key)
         const arr = Array.isArray(r.data)
@@ -1599,9 +3017,11 @@ app.get('/api/manager/bank-accounts', async (req, res) => {
 const MGR_PLACEMENTS = {
   salesInvoice:   'ad12b60b-23bf-4421-94df-8be79cef533e',
   receipt:        '7662b887-c8d8-486e-98fd-f9dbcd41c6dc',
+  creditNote:     '245e5943-0092-409d-96ae-e2ee10eac75b',   // Credit Note (read from a field placed there by hand)
   inventoryItem:  '0dbdbf8a-d80c-48e6-b453-bb7862445b7c',
   nonInventoryItem:'7affe9ee-731f-4936-8acf-15cae7bcacee',
   customer:       'ec37c11e-2b67-49c6-8a58-6eccb7dd75ee',
+  business:       '38cf4712-6e95-4ce1-b53a-bff03edad273',   // Business Details (shown on that page in Manager)
 };
 // Each EFRIS field: the name to create, every name that counts as "already
 // present" (so we never duplicate), and which placement group it belongs to.
@@ -1613,19 +3033,22 @@ function efrisFieldSpecs(P) {
   // happens on customer creation (see create-customer), not as separate fields here.
   const CUST_FIELD = P.customer ? [P.customer] : [];
   const DOC  = [P.salesInvoice, P.receipt];
+  // Fiscal results also go on credit notes, so an approved credit note shows its FDN.
+  const FISC = P.creditNote ? DOC.concat(P.creditNote) : DOC;
   const BUYER = P.customer ? [P.salesInvoice, P.receipt, P.customer] : DOC;
   const ITEM = [P.inventoryItem, P.nonInventoryItem];
   // fiscal: system-written result field - locked, excluded from copy/clone.
   // show:   appears on the printed/saved document (Manager's DisplayOnView).
   const specs = [
-    { create: 'FDN',              match: ['fdn', 'fiscal document number'],            placement: DOC, fiscal: true, show: true },
-    { create: 'Verification Code',match: ['verification code', 'antifake code'],       placement: DOC, fiscal: true, show: true },
-    { create: 'QR Code',          match: ['qr code'],                                  placement: DOC, type: 3, fiscal: true, show: true }, // Type 3 = Manager's native QR Code field (renders a scannable code)
-    { create: 'Device Number',    match: ['device number'],                            placement: DOC, fiscal: true, show: true },
-    { create: 'Issued Time',      match: ['issued time'],                              placement: DOC, fiscal: true, show: true },
+    { create: 'FDN',              match: ['fdn', 'fiscal document number'],            placement: FISC, fiscal: true, show: true },
+    { create: 'Verification Code',match: ['verification code', 'antifake code'],       placement: FISC, fiscal: true, show: true },
+    { create: 'QR Code',          match: ['qr code'],                                  placement: FISC, type: 3, fiscal: true, show: true }, // Type 3 = Manager's native QR Code field (renders a scannable code)
+    { create: 'Device Number',    match: ['device number'],                            placement: FISC, fiscal: true, show: true },
+    { create: 'Issued Time',      match: ['issued time'],                              placement: FISC, fiscal: true, show: true },
     { create: 'Invoice ID',       match: ['invoice id'],                               placement: DOC, fiscal: true },
-    { create: 'Status',           match: ['status'],                                   placement: DOC, fiscal: true },
-    { create: 'Submission Date',  match: ['submission date'],                          placement: DOC, fiscal: true },
+    { create: 'Status',           match: ['status'],                                   placement: FISC, fiscal: true },
+    { create: 'Submission Date',  match: ['submission date'],                          placement: FISC, fiscal: true },
+    { create: 'Issued By',        match: ['issued by', 'served by', 'operator'],       placement: FISC, show: true },
     // Buyer fields - let the user tag a document before submission so the right
     // buyer type/TIN/payment mode flow into EFRIS (T109/T108). Never locked (the
     // user fills these); buyer-identity fields print, Customer Type stays internal.
@@ -1639,6 +3062,29 @@ function efrisFieldSpecs(P) {
     { create: 'Category Path',    match: ['category path', 'segment / class grouping'],placement: ITEM },
     { create: 'Price Currency',   match: ['price currency', 'sales currency', 'item currency'], placement: ITEM },
   ];
+  // Business Details fields (seller identity and how customers pay). Only when the
+  // Business Details placement is known: Manager does not publish its ID, so it is
+  // learned from a "Trading As" field the user creates there (see ensure-efris-fields).
+  // The customer-field linking matches only "Buyer TIN" / "Customer TIN", so this
+  // TIN stays on Business Details.
+  if (P.business) {
+    const BIZ = [P.business];
+    specs.push(
+      { create: 'Trading As',     match: ['trading as', 'trade name'],         placement: BIZ, show: true },
+      { create: 'TIN',            match: ['tin', 'seller tin'],                placement: BIZ, show: true },
+      { create: 'BRN',            match: ['brn', 'seller brn'],                placement: BIZ, show: true },
+      );
+  }
+  // How to pay: on SALES INVOICES only (receipts are already paid, and Business
+  // Details would print them on every document). Set the values once in Manager's
+  // Sales Invoices Form Defaults and every new invoice carries them.
+  const INV = [P.salesInvoice];
+  specs.push(
+    { create: 'Bank',           match: ['bank', 'bank name'],                placement: INV, show: true },
+    { create: 'Account name',   match: ['account name'],                     placement: INV, show: true },
+    { create: 'Account number', match: ['account number', 'account no'],    placement: INV, show: true },
+    { create: 'Mobile money',   match: ['mobile money', 'momo'],             placement: INV, show: true },
+    { create: 'Payment terms',  match: ['payment terms'],                    placement: INV, show: true });
   void CUST_FIELD;
   return specs;
 }
@@ -1701,10 +3147,21 @@ async function discoverCustomerPlacement(ep, tk) {
 // only carries name/code - the EFRIS Type and TIN live in per-customer custom
 // fields, so enrich each entry from its form (capped: huge customer lists get
 // name-only rows past the cap rather than hundreds of extra round trips).
+// Enriched rows are kept for a minute per business, and the per-customer forms are
+// read 4 at a time: 60 parallel requests made Manager time out and drop them.
+const _custCache = {};
+function custCacheKey(ep, tk) { return crypto.createHash('sha256').update(String(ep) + '|' + String(tk)).digest('hex').slice(0, 24); }
+function clearCustCache(ep, tk) { delete _custCache[custCacheKey(ep, tk)]; }
+async function inPool(items, size, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => { while (i < items.length) { const it = items[i++]; await fn(it); } }));
+}
 app.post('/api/manager/customers', async (req, res) => {
   const { managerEndpoint, accessToken } = req.body || {};
   const ep = normEp(managerEndpoint || ''), tk = accessToken;
   if (!ep || !tk) return res.status(400).json({ success: false, error: 'managerEndpoint and accessToken required' });
+  const ck = custCacheKey(ep, tk), hit = _custCache[ck];
+  if (hit && Date.now() - hit.at < 60000 && !(req.body && req.body.refresh)) return res.json({ success: true, customers: hit.customers, cached: true });
   try {
     const r = await managerCall(ep, tk, 'GET', '/customers', null);
     const arr = (r.data && (r.data.customers || r.data.Customers)) || [];
@@ -1714,7 +3171,7 @@ app.post('/api/manager/customers', async (req, res) => {
       const nameByKey = {};
       for (const cf of ((list.data && list.data.textCustomFields) || [])) nameByKey[String(cf.key || cf.Key || '').toLowerCase()] = String(cf.name || '').trim().toLowerCase();
       const ENRICH_CAP = 60;
-      await Promise.all(customers.slice(0, ENRICH_CAP).map(async c => {
+      await inPool(customers.slice(0, ENRICH_CAP), 2, async c => {
         if (!c.key) return;
         try {
           const f = await managerCall(ep, tk, 'GET', '/customer-form/' + bareKey(c.key), null);
@@ -1725,9 +3182,10 @@ app.post('/api/manager/customers', async (req, res) => {
           c.passport = pick(['efris passport / id', 'passport / id no', 'passport / id', 'passport', 'id no']);
           c.nationality = pick(['efris nationality', 'nationality', 'country']);
         } catch (_) {}
-      }));
+      });
       if (customers.length > ENRICH_CAP) console.log(`   customers list: enriched first ${ENRICH_CAP} of ${customers.length} with type/TIN`);
     }
+    _custCache[ck] = { at: Date.now(), customers };
     res.json({ success: true, customers });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -1738,6 +3196,7 @@ app.post('/api/manager/delete-customer', async (req, res) => {
   const { managerEndpoint, accessToken, key } = req.body || {};
   const ep = normEp(managerEndpoint || ''), tk = accessToken;
   if (!ep || !tk || !key) return res.status(400).json({ success: false, error: 'managerEndpoint, accessToken and key required' });
+  clearCustCache(ep, tk);   // the customer list changes
   try {
     const k = bareKey(key);
     const r = await managerCall(ep, tk, 'DELETE', '/customer-form/' + k, null);
@@ -1781,6 +3240,7 @@ app.post('/api/manager/create-customer', async (req, res) => {
   const { managerEndpoint, accessToken, customer } = req.body || {};
   const ep = normEp(managerEndpoint || ''), tk = accessToken;
   if (!ep || !tk || !customer || !customer.name) return res.status(400).json({ success: false, error: 'managerEndpoint, accessToken and customer.name required' });
+  clearCustCache(ep, tk);   // the customer list changes
   try {
     const placement = customer.placement || MGR_PLACEMENTS.customer || await discoverCustomerPlacement(ep, tk);
     // Reuse the SAME custom fields already created for documents - just ADD the
@@ -1788,7 +3248,7 @@ app.post('/api/manager/create-customer', async (req, res) => {
     // duplicate "EFRIS *" fields. Each concept maps to its existing field name.
     const specs = [
       { field: 'Customer Type',    aliases: ['customer type', 'buyer type'],                 val: customer.type },
-      { field: 'Buyer TIN',        aliases: ['buyer tin', 'customer tin', 'tin'],            val: customer.tin, show: true },
+      { field: 'Buyer TIN',        aliases: ['buyer tin', 'customer tin'],                   val: customer.tin, show: true },
       { field: 'Nationality',      aliases: ['nationality', 'country'],                      val: customer.nationality, show: true },
       { field: 'Passport / ID No', aliases: ['passport / id no', 'passport / id', 'passport', 'id no'], val: customer.passport, show: true },
     ];
@@ -1883,10 +3343,100 @@ app.get('/api/manager/efris-fields-status', async (req, res) => {
 
 // Create any missing EFRIS custom fields. Placement GUIDs may be overridden in
 // the body (placements:{salesInvoice,receipt,inventoryItem,nonInventoryItem}).
+// Serialize ensure-efris-fields calls per Manager endpoint. Two overlapping calls
+// each take their "what already exists" snapshot before the other's creates are
+// visible, which duplicates the item-level fields (Commodity Code, Category Path,
+// Price Currency). Chaining per endpoint makes the second call see the first's
+// fields and skip them.
+// ── Manager tax codes for the EFRIS VAT categories ──
+// buildT109 picks a line's EFRIS tax category from the Manager tax-code NAME
+// (deemed / exempt / zero / standard, else any VAT amount -> standard). A
+// VAT-registered business needs one code per category. Each wanted code is
+// matched against the existing codes by name and created only when missing;
+// new codes copy the shape of an existing tax-code form (GET /tax-code-form/{key})
+// with the name and rate replaced, so Manager's own field set is kept.
+const EFRIS_TAX_CODES = [
+  { cat: 'standard', name: 'VAT 18%', rate: 18 },
+  { cat: 'zero', name: 'Zero rated 0%', rate: 0 },
+  { cat: 'exempt', name: 'Exempt', rate: 0 },
+  { cat: 'deemed', name: 'Deemed VAT 18%', rate: 18 },
+];
+// The EFRIS category buildT109 gives a tax code with this name ('' = none: no VAT
+// word, so only a line with a VAT amount would count as standard).
+function taxCodeCategory(name) {
+  const n = String(name || '').toLowerCase();
+  if (/deemed/.test(n)) return 'deemed';
+  if (/exempt/.test(n)) return 'exempt';
+  if (/zero/.test(n)) return 'zero';
+  if (/(^|[^\d.])0(\.0+)?\s*%/.test(n)) return 'zero';
+  if (/standard|\bvat\b|18\s*%|\b18\b/.test(n)) return 'standard';
+  return '';
+}
+// Copy a tax-code form and set its name and rate. Rates is Manager's rate list
+// (one entry for a single-rate code); any other numeric *Rate* key follows too.
+function taxCodeFormFrom(template, name, rate) {
+  const out = {};
+  for (const k of Object.keys(template || {})) if (!['Key', 'key', 'Name', 'name', 'Code', 'code'].includes(k)) out[k] = template[k];
+  out.Name = name;
+  let set = false;
+  for (const k of Object.keys(out)) {
+    if (k === 'Rates' && Array.isArray(out[k])) { out[k] = [rate]; set = true; }
+    else if (/rate$/i.test(k) && typeof out[k] === 'number') { out[k] = rate; set = true; }
+  }
+  if (!set) out.Rates = [rate];
+  return out;
+}
+async function ensureEfrisTaxCodes(ep, tk) {
+  const created = [], existing = [], failed = [];
+  const list = await managerCall(ep, tk, 'GET', '/tax-codes', null);
+  if (list.status && list.status >= 400) throw new Error('Manager /tax-codes: HTTP ' + list.status);
+  const codes = ((list.data && (list.data.taxCodes || list.data.TaxCodes)) || []).map(c => ({ key: c.key || c.Key, name: String(c.name || c.Name || '') }));
+  let template = null;
+  const tplCode = codes.find(c => taxCodeCategory(c.name) === 'standard') || codes[0];
+  if (tplCode && tplCode.key) {
+    try { const f = await managerCall(ep, tk, 'GET', '/tax-code-form/' + bareKey(tplCode.key), null); if (f.status === 200 && f.data && typeof f.data === 'object') template = f.data; } catch (_) {}
+  }
+  for (const w of EFRIS_TAX_CODES) {
+    const have = codes.find(c => taxCodeCategory(c.name) === w.cat);
+    if (have) { existing.push({ category: w.cat, name: have.name }); continue; }
+    const form = taxCodeFormFrom(template || {}, w.name, w.rate);
+    try {
+      const r = await managerCall(ep, tk, 'POST', '/tax-code-form', form);
+      if (r.status === 200 || r.status === 201) { created.push({ category: w.cat, name: w.name }); codes.push({ key: '', name: w.name }); console.log('   ✓ created tax code: ' + w.name); }
+      else failed.push({ category: w.cat, name: w.name, error: (r.data && (r.data.error || JSON.stringify(r.data))) || ('HTTP ' + r.status) });
+    } catch (e) { failed.push({ category: w.cat, name: w.name, error: e.message }); }
+  }
+  return { created, existing, failed, templateUsed: template ? tplCode.name : null };
+}
+// VAT registration for the tax codes: the caller's flag, else URA's T103 tax types.
+async function vatRegisteredFor(body) {
+  const b = body || {};
+  if (typeof b.vatRegistered === 'boolean') return { vat: b.vatRegistered, source: 'settings' };
+  const c = b.config;
+  if (c && typeof c.vatRegistered === 'boolean') return { vat: c.vatRegistered, source: 'settings' };
+  if (c && c.tin && c.deviceNo) {
+    try {
+      const s = await getSession(c.tin, c.deviceNo, c.efrisPassword, uraUrl(c.mode), keyOverrideFrom(c));
+      const tt = s.login && (s.login.taxType || (s.login.taxpayer && s.login.taxpayer.taxType));
+      if (Array.isArray(tt) && tt.length) return { vat: tt.some(t => /value.?added|\bvat\b/i.test(String((t && (t.taxTypeName || t.name)) || ''))), source: 'URA T103' };
+    } catch (_) {}
+  }
+  return { vat: null, source: '' };
+}
+
+const _ensureFieldChains = new Map();
+function _ensureSerialize(key, fn) {
+  const prev = _ensureFieldChains.get(key) || Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  _ensureFieldChains.set(key, next.catch(() => {}));
+  return next;
+}
+
 app.post('/api/manager/ensure-efris-fields', async (req, res) => {
   const { managerEndpoint, accessToken, placements } = req.body || {};
   const ep = normEp(managerEndpoint || ''), tk = accessToken;
   if (!ep || !tk) return res.status(400).json({ success: false, error: 'managerEndpoint and accessToken required' });
+  return _ensureSerialize(ep, async () => {
   const P = Object.assign({}, MGR_PLACEMENTS, placements || {});
   // Resolve the Customer placement GUID (override, else auto-resolve). If
   // unknown, the customer-object fields are skipped and reported as such.
@@ -1900,6 +3450,24 @@ app.post('/api/manager/ensure-efris-fields', async (req, res) => {
     const list = await managerCall(ep, tk, 'GET', '/text-custom-fields', null);
     const allFields = (list.data && list.data.textCustomFields) || [];
     const have = new Set(allFields.map(f => (f.name || '').trim().toLowerCase()));
+    // Learn the Business Details placement from a "Trading As" field created there by
+    // hand: its placement that is not one of the known document/item/customer forms.
+    let businessNote;
+    if (!P.business) {
+      const ta = allFields.find(f => ['trading as', 'trade name'].includes((f.name || '').trim().toLowerCase()));
+      if (ta) {
+        try {
+          const tf = await managerCall(ep, tk, 'GET', '/text-custom-field-form/' + bareKey(ta.key || ta.Key), null);
+          const pl = (tf.data && (tf.data.Placement || tf.data.Placements)) || [];
+          const known = Object.values(MGR_PLACEMENTS).map(x => String(x).toLowerCase()).concat(P.customer ? [String(P.customer).toLowerCase()] : []);
+          const biz = (Array.isArray(pl) ? pl : [pl]).find(x => x && !known.includes(String(x).toLowerCase()));
+          if (biz) { P.business = biz; console.log('   Business Details placement learned from "' + ta.name + '": ' + biz); }
+          else businessNote = 'The "' + ta.name + '" field is not placed on Business Details. Edit it in Manager and tick Business Details, then run this again.';
+        } catch (_) {}
+      } else {
+        businessNote = 'To add seller and payment fields to Manager Business Details (TIN, BRN, Bank, Account name, Account number, Mobile money, Payment terms): in Manager open Settings, Custom Fields, New Text Field, name it "Trading As", tick Business Details and Display on printed documents, Create, then run this again.';
+      }
+    }
     // Build a template of non-identity attributes (everything except Name/Key/
     // Placement) from a chosen field, else the first existing field.
     let template = {};
@@ -1918,8 +3486,28 @@ app.post('/api/manager/ensure-efris-fields', async (req, res) => {
     }
     const specs = efrisFieldSpecs(P);
     const created = [], skipped = [], failed = [];
+    const extended = [];
     for (const s of specs) {
-      if (s.match.some(n => have.has(n))) { skipped.push(s.create); continue; }
+      if (s.match.some(n => have.has(n))) {
+        skipped.push(s.create);
+        // Existing field: add any placement it is missing (e.g. Credit Note on older set-ups).
+        const ex = allFields.find(f => s.match.includes((f.name || '').trim().toLowerCase()));
+        if (ex && Array.isArray(s.placement)) {
+          try {
+            const tf = await managerCall(ep, tk, 'GET', '/text-custom-field-form/' + bareKey(ex.key || ex.Key), null);
+            const form = tf.data || {};
+            const pl = [].concat(form.Placement || form.Placements || []);
+            const have2 = new Set(pl.map(x => String(x).toLowerCase()));
+            const add = s.placement.filter(g => g && !have2.has(String(g).toLowerCase()));
+            if (add.length && tf.status === 200) {
+              form.Placement = pl.concat(add);
+              const pr = await managerCall(ep, tk, 'POST', '/text-custom-field-form/' + bareKey(ex.key || ex.Key), form);
+              if (pr.status >= 200 && pr.status < 400) extended.push(ex.name);
+            }
+          } catch (_) {}
+        }
+        continue;
+      }
       // Force the field Type explicitly (Manager: 0=single line, 1=paragraph,
       // 2=drop-down, 3=QR Code) so QR Code renders as a scannable code and the
       // rest stay single-line text - never inheriting a wrong Type from the template.
@@ -1941,14 +3529,26 @@ app.post('/api/manager/ensure-efris-fields', async (req, res) => {
           console.log(`   ⚠ rich create for "${s.create}" failed (HTTP ${r.status}) - retrying minimal`);
           r = await managerCall(ep, tk, 'POST', '/text-custom-field-form', Object.assign({}, flags, base));
         }
-        if (r.status === 200 || r.status === 201) { created.push(s.create); console.log(`   ✓ created custom field: ${s.create}`); }
+        if (r.status === 200 || r.status === 201) { created.push(s.create); have.add(s.create.trim().toLowerCase()); s.match.forEach(n => have.add(n)); console.log(`   ✓ created custom field: ${s.create}`); }
         else { failed.push({ field: s.create, status: r.status, error: r._cfChallenge ? 'Blocked by Cloudflare\'s browser-challenge page (not a Manager error) - add a WAF/Bot Fight Mode exception for this path' : ((r.data && (r.data.error || JSON.stringify(r.data))) || (r._htmlSnippet ? `HTTP ${r.status} - ${r._htmlSnippet}` : ('HTTP ' + r.status))) }); }
       } catch (e) { failed.push({ field: s.create, error: e.message }); }
     }
-    res.json({ success: failed.length === 0, created, skipped, failed, templateUsed: tplField ? tplField.name : null,
-      customerPlacement: P.customer || null,
+    if (extended.length) console.log(`   ↳ added missing placements (e.g. Credit Note) to: ${extended.join(', ')}`);
+    // Tax codes for the EFRIS VAT categories (VAT-registered businesses only).
+    let taxCodes;
+    const vr = await vatRegisteredFor(req.body);
+    if (vr.vat === true) {
+      try { taxCodes = Object.assign({ vatRegistered: true, source: vr.source }, await ensureEfrisTaxCodes(ep, tk)); }
+      catch (e) { taxCodes = { vatRegistered: true, created: [], existing: [], failed: [{ name: 'tax codes', error: e.message }] }; }
+    } else {
+      taxCodes = { vatRegistered: vr.vat, created: [], existing: [], failed: [],
+        note: vr.vat === false ? 'Not VAT-registered: no VAT tax codes are needed in Manager.' : 'VAT registration unknown (set it in Settings or check My details), so no tax codes were created.' };
+    }
+    res.json({ success: failed.length === 0 && !taxCodes.failed.length, taxCodes, created, skipped, extended, failed, templateUsed: tplField ? tplField.name : null,
+      customerPlacement: P.customer || null, businessPlacement: P.business || null, businessNote,
       customerNote: P.customer ? undefined : 'Could not auto-detect Manager\'s Customer form placement, so the customer-object fields were skipped. The document-level buyer fields (Customer Type, Buyer TIN, Passport/ID, Nationality) were still created and are what EFRIS uses.' });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
+  });
 });
 
 app.get('/api/manager/divisions', async (req, res) => {
@@ -1985,7 +3585,7 @@ app.get('/api/manager/items-list', async (req, res) => {
       const sp = i.SalePrice || i.salePrice || i.salesPrice || i.SalesPrice || i.unitPrice || i.UnitPrice || i.price || i.Price;
       return {
         key:   i.key  || i.Key  || '',
-        code:  i.code || i.Code || i.ItemCode || '',
+        code:  i.code || i.Code || i.ItemCode || i.itemCode || '',
         name:  i.itemName || i.ItemName || i.name || i.Name || '',
         // The list returns the price as "SalePrice" (not Sales-); may be a {value,currency} object.
         price: num(sp),
@@ -1995,9 +3595,21 @@ app.get('/api/manager/items-list', async (req, res) => {
     };
     const inv = (invR.data && (invR.data.inventoryItems  || invR.data.InventoryItems  || [])).map(i => mapItem(i, 'inventory'));
     const ni  = (niR.data  && (niR.data.nonInventoryItems || niR.data.NonInventoryItems || [])).map(i => mapItem(i, 'service'));
-    console.log(`[items-list] inventory=${inv.length} non-inventory=${ni.length} first=${JSON.stringify((inv[0]||ni[0])||{})}`);
+    // The ?fields filter can leave out the item code. Fill missing codes from the
+    // unfiltered list (which has key and code), matched by key.
+    for (const [list, path, prop] of [[inv, '/inventory-items', 'inventoryItems'], [ni, '/non-inventory-items', 'nonInventoryItems']]) {
+      if (!list.some(x => !x.code)) continue;
+      try {
+        const full = await managerCall(ep, tk, 'GET', path, null);
+        const rows = (full.data && (full.data[prop] || full.data[prop[0].toUpperCase() + prop.slice(1)])) || [];
+        const codeByKey = {};
+        for (const r of rows) { const k = r.key || r.Key; const c = r.ItemCode || r.itemCode || r.code || r.Code; if (k && c) codeByKey[k] = c; }
+        for (const x of list) if (!x.code && codeByKey[x.key]) x.code = codeByKey[x.key];
+      } catch (_) {}
+    }
+    console.log(`[items-list] inventory=${inv.length} non-inventory=${ni.length} first=${JSON.stringify((inv[0]||ni[0])||{})} rawKeys=${Object.keys(((invR.data&&(invR.data.inventoryItems||invR.data.InventoryItems))||[])[0]||{}).join(',')}`);
     res.json({ success: true, items: [...inv, ...ni] });
-  } catch(e) { res.status(500).json({ success: false, error: e.message }); }
+  } catch(e) { res.status(502).json({ success: false, error: 'Could not read items from Manager: ' + String(e.message || '').slice(0, 160) }); }
 });
 
 // Create a new receipt in Manager (then the frontend submits to EFRIS separately)
@@ -2009,37 +3621,71 @@ app.post('/api/manager/create-receipt', async (req, res) => {
     // Manager has NO "blank form" GET (GET /receipt-form/{key} needs a key), so we
     // build the payload and POST it directly. A receipt requires a "Received in"
     // bank/cash account - use the one supplied, else default to the first account.
-    let receivedIn = receipt.receivedIn || '';
-    if (!receivedIn) {
-      try {
-        const want = String(receipt.currency || 'UGX').toUpperCase();
-        const bankR = await managerCall(ep, accessToken, 'GET', '/bank-and-cash-accounts', null);
-        const arr = (bankR.data && (bankR.data.bankAndCashAccounts || bankR.data.BankAndCashAccounts)) || [];
-        const accCur = a => String(a.currency || a.Currency || a.foreignCurrency || a.ForeignCurrency || '').toUpperCase();
-        const nm = a => String(a.name || a.Name || '');
-        const curOk = a => accCur(a) === want || (want === 'UGX' && !accCur(a) && !/eur|usd|gbp|kes|tzs|rwf|euro|dollar|pound/i.test(nm(a)));
-        // Route to the bank/cash account that matches the PAYMENT MODE, so cash
-        // doesn't land in the bank ledger. Match the account name to the method.
-        const pm = String(receipt.paymentMethod || '').toLowerCase();
-        let pmKey = null;
-        if (/cash/.test(pm)) pmKey = /cash/i;
-        else if (/mobile|momo|mtn|airtel/.test(pm)) pmKey = /mobile|momo|mtn|airtel/i;
-        else if (/bank|transfer|eft|cheque|card|pos|credit|debit|visa|master/.test(pm)) pmKey = /bank|transfer|eft/i;
-        // Match the receipt currency: an account in that currency; for UGX (base)
-        // prefer one with no foreign currency set / no foreign code in its name.
-        const pick =
-          (pmKey ? arr.find(a => curOk(a) && pmKey.test(nm(a))) : null) ||   // payment mode + currency
-          (pmKey ? arr.find(a => pmKey.test(nm(a))) : null) ||               // any account matching the mode
-          arr.find(a => accCur(a) === want) ||
-          (want === 'UGX' ? arr.find(a => !accCur(a) && !/eur|usd|gbp|kes|tzs|rwf|euro|dollar|pound/i.test(nm(a))) : null) ||
-          (want === 'UGX' ? arr.find(a => !accCur(a)) : null) ||
-          arr.find(a => !/eur|usd|gbp|kes|tzs|rwf|euro|dollar|pound/i.test(nm(a))) ||
-          arr[0];
-        if (pick) { receivedIn = pick.key || pick.Key || ''; console.log(`   Received-in account: "${nm(pick)}" (payment: ${receipt.paymentMethod || 'n/a'})`); }
-      } catch(_) {}
+    // Deposit account per payment method: the one supplied (Settings map or the
+    // per-receipt picker), else the bank/cash account whose name matches the method
+    // in the receipt currency.
+    let accts = [];
+    try { const bankR = await managerCall(ep, accessToken, 'GET', '/bank-and-cash-accounts', null); accts = (bankR.data && (bankR.data.bankAndCashAccounts || bankR.data.BankAndCashAccounts)) || []; } catch (_) {}
+    const want = String(receipt.currency || 'UGX').toUpperCase();
+    const accCur = a => String(a.currency || a.Currency || a.foreignCurrency || a.ForeignCurrency || (a.actualBalance && a.actualBalance.currency) || '').toUpperCase();
+    const nm = a => String(a.name || a.Name || '');
+    const accKey = a => a ? (a.key || a.Key || '') : '';
+    const FX = /eur|usd|gbp|kes|tzs|rwf|euro|dollar|pound/i;
+    const curOk = a => accCur(a) === want || (want === 'UGX' && !accCur(a) && !FX.test(nm(a)));
+    const accountFor = (method) => {
+      const pm = String(method || '').toLowerCase();
+      let pmKey = null;
+      if (/cash/.test(pm)) pmKey = /cash/i;
+      else if (/mobile|momo|mtn|airtel/.test(pm)) pmKey = /mobile|momo|mtn|airtel/i;
+      else if (/bank|transfer|eft|cheque|card|pos|credit|debit|visa|master|rtgs|swift|draft/.test(pm)) pmKey = /bank|transfer|eft/i;
+      return (pmKey ? accts.find(a => curOk(a) && pmKey.test(nm(a))) : null) ||
+        (pmKey ? accts.find(a => pmKey.test(nm(a))) : null) ||
+        accts.find(a => accCur(a) === want) ||
+        (want === 'UGX' ? accts.find(a => !accCur(a) && !FX.test(nm(a))) : null) ||
+        (want === 'UGX' ? accts.find(a => !accCur(a)) : null) ||
+        accts.find(a => !FX.test(nm(a))) || accts[0] || null;
+    };
+    const accName = k => { const a = accts.find(x => bareKey(accKey(x)) === bareKey(k)); return a ? nm(a) : k; };
+    // Split payment parts, each with its account. The receipt goes into the first
+    // part's account (Manager receipts have one "Received in"); each other part is
+    // moved to its own account with an Inter Account Transfer after the receipt.
+    const parts = (Array.isArray(receipt.payments) ? receipt.payments : []).filter(p => parseFloat(p.amount) > 0)
+      .map(p => ({ method: String(p.method || ''), amount: parseFloat(p.amount), txn: String(p.txn || '').trim().slice(0, 60), account: p.account || accKey(accountFor(p.method)) }));
+    let receivedIn = receipt.receivedIn || (parts[0] && parts[0].account) || accKey(accountFor(receipt.paymentMethod));
+    if (parts[0]) parts[0].account = receivedIn;
+    if (receivedIn) console.log(`   Received-in account: "${accName(receivedIn)}" (payment: ${receipt.paymentMethod || 'n/a'})`);
+    // A foreign-currency sale going into an account kept in another currency (no
+    // USD account, say): Manager would book the USD figures as shillings. Record it
+    // in the account's currency at the receipt's exchange rate instead.
+    // A sale in a foreign currency goes to an account kept in that currency when
+    // the business has one (e.g. "Cash on Hand USD"), even if the payment-method
+    // mapping in Settings points at the UGX account.
+    if (want !== 'UGX') {
+      const cur0 = accts.find(a => bareKey(accKey(a)) === bareKey(receivedIn));
+      if (!cur0 || accCur(cur0) !== want) {
+        const pmFor = m => { const x = String(m || '').toLowerCase(); return /cash/.test(x) ? /cash/i : /mobile|momo|mtn|airtel/.test(x) ? /mobile|momo|mtn|airtel/i : /bank|transfer|eft|cheque|card|pos|visa|master|rtgs|swift|draft/.test(x) ? /bank|transfer|eft/i : null; };
+        const inCur = accts.filter(a => accCur(a) === want);
+        const re = pmFor((parts[0] && parts[0].method) || receipt.paymentMethod);
+        const pick = (re && inCur.find(a => re.test(nm(a)))) || inCur[0];
+        if (pick) { receivedIn = accKey(pick); if (parts[0]) parts[0].account = receivedIn; console.log(`   ${want} sale: using the ${want} account "${nm(pick)}"`); }
+      }
+    }
+    {
+      const acct = accts.find(a => bareKey(accKey(a)) === bareKey(receivedIn));
+      const acctCur = (acct && accCur(acct)) || 'UGX';
+      const fx = parseFloat(receipt.exchangeRate) || 0;
+      if (want !== acctCur && acctCur === 'UGX') {
+        if (fx > 0) {
+          const total = (receipt.lines || []).reduce((t, l) => t + (parseFloat(l.qty) || 1) * (parseFloat(l.unitPrice) || 0), 0);
+          receipt.lines = (receipt.lines || []).map(l => ({ ...l, unitPrice: Math.round((parseFloat(l.unitPrice) || 0) * fx * 100) / 100 }));
+          parts.forEach(pt => { pt.amount = Math.round(pt.amount * fx * 100) / 100; });
+          receipt.description = (receipt.description || '') + ` (${want} ${total.toFixed(2)} at ${fx} UGX/${want})`;
+          console.log(`   ${want} receipt into a UGX account: recorded in UGX at ${fx} (${want} ${total.toFixed(2)} = UGX ${Math.round(total * fx).toLocaleString()})`);
+        } else console.log(`   ⚠ ${want} receipt into a UGX account with no exchange rate - amounts recorded as they are`);
+      }
     }
     const form = {};
-    form.Date = receipt.date || new Date().toISOString().slice(0, 10);
+    form.Date = receipt.date || eatToday();
     if (receipt.reference) form.Reference = receipt.reference;
     // "Paid by" needs a Customer KEY (a bare name shows as "Other"). Resolve the
     // name to an existing customer, else create one, then link it.
@@ -2059,6 +3705,7 @@ app.post('/api/manager/create-receipt', async (req, res) => {
               try { const cr2 = await managerCall(ep, accessToken, 'GET', '/customers', null); const a2 = (cr2.data && (cr2.data.customers || cr2.data.Customers || [])) || []; const h2 = a2.find(c => String(c.name || c.Name || '').trim().toLowerCase() === custName.toLowerCase()); if (h2) custKey = h2.key || h2.Key || ''; } catch (_) {}
             }
             console.log(`   Created Manager customer "${custName}" → ${custKey || 'unknown'}`);
+            clearCustCache(ep, accessToken);
           }
         }
       } catch (_) {}
@@ -2072,18 +3719,23 @@ app.post('/api/manager/create-receipt', async (req, res) => {
     form.QuantityColumn = true;
     form.UnitPriceColumn = true;
     form.HasLineDescription = true;
-    // Apply the branded theme: API-created receipts don't inherit Manager's "form
-    // default" theme, so copy the CustomTheme from the most recent existing receipt
-    // (the user installs the theme once and sets it on a receipt). Best-effort.
+    // Theme: Manager applies Form Defaults only in its own screens, and its API has
+    // no Form Defaults endpoint, so set the theme on the receipt itself. Manager
+    // needs both the "Custom theme" tick and WHICH theme (CustomThemeId). Use the
+    // installed EFRISConnect theme; else the theme of the latest receipt.
     try {
-      const rl = await managerCall(ep, accessToken, 'GET', '/receipts?pageSize=1', null);
-      const arr = (rl.data && (rl.data.receipts || rl.data.receiptsAndPayments)) || [];
-      if (arr[0] && (arr[0].key || arr[0].Key)) {
-        const rf = await managerCall(ep, accessToken, 'GET', '/receipt-form/' + (arr[0].key || arr[0].Key), null);
-        const t = rf.data && (rf.data.CustomTheme || rf.data.Theme);
-        if (t) { form.CustomTheme = t; console.log(`   Receipt theme copied from existing receipt: ${t}`); }
+      let themeId = bareKey(receipt.themeKey || '');
+      if (themeId) { const tg = await managerCall(ep, accessToken, 'GET', '/custom-theme-form/' + themeId, null); if (tg.status !== 200) { console.log('   Receipt theme ' + themeId + ' not found in Manager (reinstall the theme)'); themeId = ''; } }
+      if (!themeId) {
+        const rl = await managerCall(ep, accessToken, 'GET', '/receipts?pageSize=5', null);
+        for (const r0 of ((rl.data && (rl.data.receipts || rl.data.receiptsAndPayments)) || [])) {
+          const rf = await managerCall(ep, accessToken, 'GET', '/receipt-form/' + (r0.key || r0.Key), null);
+          if (rf.data && rf.data.CustomThemeId) { themeId = rf.data.CustomThemeId; break; }
+        }
       }
-    } catch (e) { console.log(`   Receipt theme copy skipped: ${e.message}`); }
+      if (themeId) { form.CustomTheme = true; form.CustomThemeId = themeId; console.log('   Receipt theme: ' + themeId); }
+      else console.log('   Receipt theme: none installed - Manager default theme used');
+    } catch (e) { console.log(`   Receipt theme skipped: ${e.message}`); }
     // Buyer + payment custom fields, so the Manager receipt (and its printed theme)
     // carry the same buyer TIN / type / payment method that EFRIS received - not
     // just the fiscal-result fields (FDN/QR) written later by saveEfrisToManager.
@@ -2096,7 +3748,7 @@ app.post('/api/manager/create-receipt', async (req, res) => {
       setCF(['Payment Method', 'Payment Mode'], receipt.paymentMethod);
       setCF(['Nationality'], receipt.nationality);
       setCF(['Passport / ID No', 'Passport/ID No', 'Passport', 'Passport Number'], receipt.passport);
-      if (Object.keys(cfStr).length) form.CustomFields2 = { Strings: cfStr };
+      if (Object.keys(cfStr).length) form.CustomFields2 = { ...(form.CustomFields2 || {}), Strings: cfStr };
     } catch (e) { console.log(`   Buyer/payment custom fields skipped: ${e.message}`); }
     form.Lines = await Promise.all((receipt.lines || []).map(async l => {
       const price = parseFloat(l.unitPrice) || 0;
@@ -2110,8 +3762,54 @@ app.post('/api/manager/create-receipt', async (req, res) => {
       if (key) { line.Item = key; console.log(`   Receipt line linked: "${l.itemName || l.itemCode}" → item ${key}`); }
       else console.log(`   ⚠ Receipt line NOT linked (posts to Suspense): code="${l.itemCode || ''}" name="${l.itemName || ''}" - no matching Manager item`);
       if (l.description) line.LineDescription = l.description;
+      if (l.taxCat) { try { const tc = await mgrTaxCodeGuid(ep, accessToken, l.taxCat === 'Deemed' ? 'Standard' : l.taxCat); if (tc) line.TaxCode = tc; else console.log(`   ⚠ No Manager tax code for ${l.taxCat} - line has no VAT in Manager`); } catch (_) {} }
       return line;
     }));
+    // Credit sale (part or none of it paid now): a Receipt always means paid in full,
+    // so record a Sales Invoice for the whole sale and a payment receipt against it
+    // for each part paid now. The rest stays owed by the customer.
+    if (receipt.creditSale) {
+      if (!form.Customer) return res.status(400).json({ success: false, error: 'A credit sale needs a named customer (the one who owes the balance).' });
+      let arKey = '';
+      try {
+        const coa = await managerCall(ep, accessToken, 'GET', '/chart-of-accounts', null);
+        const all = Object.values(coa.data || {}).find(Array.isArray) || [];
+        const ar = all.find(a => /^accounts receivable$/i.test(String(a.name || a.Name || '').trim()));
+        arKey = ar ? (ar.key || ar.Key) : '';
+      } catch (_) {}
+      if (!arKey) return res.status(502).json({ success: false, error: 'Could not find the Accounts receivable account in Manager.' });
+      // Due date: the customer's own terms in Manager when set, else 14 days.
+      let dueDays = 14;
+      try { const cf = await managerCall(ep, accessToken, 'GET', '/customer-form/' + bareKey(form.Customer), null); const dd = cf.data && (cf.data.DueDateDays || cf.data.DefaultDueDateDays); if (parseInt(dd, 10) > 0) dueDays = parseInt(dd, 10); } catch (_) {}
+      const inv = { IssueDate: form.Date, DueDateDays: dueDays, Customer: form.Customer, Lines: form.Lines, AmountsIncludeTax: true };
+      ['Reference', 'Description', 'CustomTheme', 'CustomThemeId', 'CustomFields2', 'HasLineDescription', 'QuantityColumn', 'UnitPriceColumn'].forEach(k => { if (form[k] !== undefined) inv[k] = form[k]; });
+      const ir = await managerCall(ep, accessToken, 'POST', '/sales-invoice-form', inv);
+      if (ir.status < 200 || ir.status >= 300) return res.status(502).json({ success: false, error: `Manager sales invoice creation failed: HTTP ${ir.status}`, detail: JSON.stringify(ir.data || '').slice(0, 500) });
+      let invKey = (ir.data && (ir.data.key || ir.data.Key)) || '';
+      if (!invKey && ir.headers) { const loc = ir.headers.location || ir.headers.Location || ''; invKey = String(loc).split('?')[0].split('/').filter(Boolean).pop() || ''; }
+      console.log(`   Credit sale: created Manager sales invoice → key: ${invKey || 'unknown'} ref: ${receipt.reference || ''}`);
+      const payments = [];
+      for (const pt of parts.filter(x => !/credit/i.test(x.method))) {
+        const amt = Math.round(pt.amount * 100) / 100;
+        const pr = { Date: form.Date, Reference: pt.txn || receipt.reference || '', PaidBy: 1, Customer: form.Customer, ReceivedIn: pt.account || receivedIn,
+          Description: `Payment for ${receipt.reference || 'invoice'} (${pt.method}${pt.txn ? ', Txn ' + pt.txn : ''})`,
+          // Manager only multiplies Qty x price when these column flags are set;
+          // without them the payment is stored as 0.00.
+          HasLineDescription: true, QuantityColumn: true, UnitPriceColumn: true,
+          Lines: [{ Account: arKey, AccountsReceivableSalesInvoice: invKey, Qty: 1, SalesUnitPrice: amt }] };
+        if (form.CustomThemeId) { pr.CustomTheme = true; pr.CustomThemeId = form.CustomThemeId; }
+        try {
+          const rr = await managerCall(ep, accessToken, 'POST', '/receipt-form', pr);
+          const ok = rr.status >= 200 && rr.status < 300;
+          if (ok) { try { let pk = (rr.data && (rr.data.key || rr.data.Key)) || ''; if (!pk && rr.headers) pk = String(rr.headers.location || '').split('?')[0].split('/').filter(Boolean).pop() || '';
+            if (pk) { const chk = await managerCall(ep, accessToken, 'GET', '/receipt-form/' + pk, null); const ln = ((chk.data && chk.data.Lines) || [])[0] || {};
+              if (!((parseFloat(ln.Qty) || 0) * (parseFloat(ln.SalesUnitPrice) || 0) > 0)) console.log('   ⚠ Credit sale: Manager stored the payment as 0 - check receipt ' + (pr.Reference || pk)); } } catch (_) {} }
+          console.log(`   Credit sale: ${ok ? 'recorded' : 'could NOT record'} payment ${amt} (${pt.method}) into "${accName(pr.ReceivedIn)}" against ${receipt.reference || invKey}` + (ok ? '' : ` - HTTP ${rr.status}`));
+          payments.push({ method: pt.method, amount: amt, ok });
+        } catch (e) { console.log('   Credit sale payment error: ' + e.message); payments.push({ method: pt.method, amount: amt, ok: false }); }
+      }
+      return res.json({ success: true, key: invKey, kind: 'invoice', reference: receipt.reference, payments });
+    }
     const createR = await managerCall(ep, accessToken, 'POST', '/receipt-form', form);
     if (createR.status < 200 || createR.status >= 300) {
       return res.status(502).json({
@@ -2135,7 +3833,38 @@ app.post('/api/manager/create-receipt', async (req, res) => {
       if (loc) { const parts = loc.split('/').filter(Boolean); newKey = parts[parts.length - 1]; }
     }
     console.log(`   Created Manager receipt → key: ${newKey || 'unknown'} ref: ${receipt.reference || ''}`);
-    res.json({ success: true, key: newKey, reference: receipt.reference });
+    const transfers = [];
+    for (const p of parts.slice(1)) {
+      if (!p.account || bareKey(p.account) === bareKey(receivedIn)) continue;
+      const amt = Math.round(p.amount * 100) / 100;
+      // Accounts in different currencies (a USD sale's part moved to a UGX mobile
+      // money account, say): CreditAmount leaves the source in ITS currency and
+      // DebitAmount enters the destination in ITS currency, converted at the
+      // receipt's exchange rate (UGX per unit of the sale currency).
+      const curOf = k => { const a = accts.find(x => bareKey(accKey(x)) === bareKey(k)); return (a && accCur(a)) || 'UGX'; };
+      const srcCur = curOf(receivedIn), dstCur = curOf(p.account), fxr = parseFloat(receipt.exchangeRate) || 0;
+      let dstAmt = amt;
+      if (srcCur !== dstCur) {
+        if (fxr > 0 && srcCur === want && dstCur === 'UGX') dstAmt = Math.round(amt * fxr * 100) / 100;
+        else if (fxr > 0 && srcCur === 'UGX' && dstCur === want) dstAmt = Math.round(amt / fxr * 100) / 100;
+        else console.log(`   ⚠ Split payment from a ${srcCur} account to a ${dstCur} account with no usable exchange rate - same amount recorded on both sides`);
+      }
+      // The payment's transaction ID (MoMo / bank ref) is the transfer's reference, so
+      // it matches the bank or mobile money statement; the receipt number is in the description.
+      const iat = { Date: form.Date, Reference: p.txn || receipt.reference || '', Description: `Split payment ${receipt.reference || ''}: ${p.method} part` + (p.txn ? ` (Txn ${p.txn})` : ''),
+        PaidFrom: receivedIn, ReceivedIn: p.account, Amount: amt, CreditAmount: amt, DebitAmount: dstAmt };  // amount field name differs across builds; the unknown ones are ignored
+      try {
+        const tr = await managerCall(ep, accessToken, 'POST', '/inter-account-transfer-form', iat);
+        const ok = tr.status >= 200 && tr.status < 300;
+        if (ok) { try { const chk = await managerCall(ep, accessToken, 'GET', '/inter-account-transfers?pageSize=5&term=' + encodeURIComponent(iat.Reference), null);
+          const row = ((chk.data && chk.data.interAccountTransfers) || [])[0]; const got = row && (row.amount != null ? row.amount : row.Amount);
+          const v = got && typeof got === 'object' ? (got.value != null ? got.value : got.Value) : got;
+          if (row && Math.abs((parseFloat(v) || 0) - amt) > 0.01) console.log('   ⚠ Split payment transfer recorded with amount ' + JSON.stringify(got) + ' - check it in Manager'); } catch (_) {} }
+        console.log(`   Split payment: ${ok ? 'moved' : 'could NOT move'} ${amt} (${p.method}) "${accName(receivedIn)}" → "${accName(p.account)}"` + (ok ? '' : ` - HTTP ${tr.status} ${JSON.stringify(tr.data || '').slice(0, 200)}`));
+        transfers.push({ method: p.method, amount: amt, ok });
+      } catch (e) { console.log('   Split payment transfer error: ' + e.message); transfers.push({ method: p.method, amount: amt, ok: false }); }
+    }
+    res.json({ success: true, key: newKey, reference: receipt.reference, transfers });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message });
   }
@@ -2215,11 +3944,14 @@ async function resolveManagerItemKey(ep, tk, code, name) {
       const hit = match(arr);
       if (hit) return { key: hit.key || hit.Key || null };
     }
-    // Not an inventory item - is it a non-inventory (service) item?
+    // Not an inventory item - is it a non-inventory (service) item? Return its KEY
+    // (so receipt/invoice lines link to it and don't post to Suspense) AND flag it
+    // as non-inventory, so stock callers can still reject it (services hold no stock).
     try {
       const nr = await managerCall(ep, tk, 'GET', '/non-inventory-items', null);
       const narr = (nr.data && (nr.data.nonInventoryItems || nr.data.NonInventoryItems || [])) || [];
-      if (match(narr)) return { key: null, reason: 'non-inventory' };
+      const hit = match(narr);
+      if (hit) return { key: hit.key || hit.Key || null, reason: 'non-inventory' };
     } catch (_) {}
     return { key: null, reason: 'not found' };
   } catch (_) { return { key: null, reason: 'lookup failed' }; }
@@ -2333,6 +4065,20 @@ async function recordInventoryUnitCost(ep, accessToken, itemKey, unitCost, date)
   } catch (e) { console.log(`   unit-cost record error: ${e.message}`); return 'error: ' + e.message; }
 }
 
+// The Manager supplier for a stock-in purchase invoice: found by name, else created.
+// A purchase invoice without a supplier lands in Manager's Suspense account.
+async function mgrSupplierKey(ep, tk, name) {
+  const want = String(name || '').trim() || 'Stock-in Supplier';
+  const l = await managerCall(ep, tk, 'GET', '/suppliers?pageSize=1000', null);
+  const arr = (l.data && (l.data.suppliers || l.data.Suppliers)) || [];
+  const hit = arr.find(s => String(s.name || s.Name || '').trim().toLowerCase() === want.toLowerCase());
+  if (hit) return bareKey(hit.key || hit.Key);
+  const cr = await managerCall(ep, tk, 'POST', '/supplier-form', { Name: want });
+  const k = bareKey((cr.data && (cr.data.Key || cr.data.key || cr.data.id)) || cr.location || '');
+  if (k) console.log('   Created supplier "' + want + '" in Manager for the stock-in');
+  return k;
+}
+
 app.post('/api/manager/inventory-adjust', async (req, res) => {
   const b = req.body || {};
   const { managerEndpoint, accessToken } = b;
@@ -2341,7 +4087,7 @@ app.post('/api/manager/inventory-adjust', async (req, res) => {
   }
   const ep = normEp(managerEndpoint);
   const direction = (b.direction === 'out') ? 'out' : 'in';
-  const date = b.date || new Date().toISOString().slice(0, 10);
+  const date = b.date || eatToday();
   const description = b.description || (direction === 'in' ? 'Stock-in via EFRISConnect' : 'Stock adjustment via EFRISConnect');
   // Normalise to a list of {itemKey?, itemCode?, qty}
   let items = Array.isArray(b.items) ? b.items.slice()
@@ -2349,6 +4095,7 @@ app.post('/api/manager/inventory-adjust', async (req, res) => {
   items = items.map(i => ({ itemKey: i.itemKey || '', itemCode: i.itemCode || i.code || '', itemName: i.itemName || i.name || '', qty: parseFloat(i.qty != null ? i.qty : i.quantity) || 0, unitPrice: parseFloat(i.unitPrice != null ? i.unitPrice : i.unitCost) || 0 }))
                .filter(i => i.qty > 0 && (i.itemKey || i.itemCode || i.itemName));
   if (!items.length) return res.json({ success: false, error: 'No items with a positive quantity to mirror.' });
+  let supplierKey;   // looked up once, on the first purchase invoice
 
   const results = [];
   for (const it of items) {
@@ -2356,7 +4103,9 @@ app.post('/api/manager/inventory-adjust', async (req, res) => {
     if (!key && (it.itemCode || it.itemName)) {
       const resolved = await resolveManagerItemKey(ep, accessToken, it.itemCode, it.itemName);
       key = resolved.key;
-      if (!key) {
+      // A non-inventory (service) item now resolves to a key, but it still cannot
+      // take stock - reject it by reason, not by a missing key.
+      if (!key || resolved.reason === 'non-inventory') {
         const msg = resolved.reason === 'non-inventory'
           ? 'This item is a Non-inventory (Service) item in Manager - Manager only tracks stock for Inventory items. Re-create it as a Goods (Inventory item).'
           : 'Item not found among Manager inventory items (by ItemCode). Re-Sync it to Manager first.';
@@ -2409,8 +4158,11 @@ app.post('/api/manager/inventory-adjust', async (req, res) => {
         // Purchase Invoice - standard, non-corrupting way to receive inventory.
         const payload = {
           IssueDate: (String(date).slice(0, 10)) + 'T00:00:00',
+          Description: description,
           Lines: [{ Item: key, Qty: it.qty, PurchaseUnitPrice: parseFloat(it.unitPrice) || 0 }]
         };
+        try { if (supplierKey === undefined) supplierKey = await mgrSupplierKey(ep, accessToken, b.supplierName); } catch (e) { supplierKey = ''; console.log('   Could not set the supplier: ' + e.message); }
+        if (supplierKey) payload.Supplier = supplierKey;
         const r = await managerCall(ep, accessToken, 'POST', '/purchase-invoice-form', payload);
         console.log(`   purchase-invoice POST (type ${sit}): HTTP ${r.status} item=${key} qty=${it.qty} body=${JSON.stringify(r.data||'').slice(0,120)}`);
         if (r.status >= 200 && r.status < 400) results.push({ item: it.itemCode || key, ok: true, path: 'purchase-invoice' });
@@ -2536,10 +4288,31 @@ app.post('/api/manager/readiness-audit', async (req, res) => {
     const hasFdn = ['fdn', 'fiscal document number', 'efris fdn'].some(n => haveLower.has(n));
     const hasCom = ['efris commodity code', 'commodity code', 'efris commodity', 'commodity'].some(n => haveLower.has(n));
     if (hasFdn && hasCom) add('customfields', 'EFRIS custom fields', 'ok', 'FDN and commodity-code fields exist.');
-    else add('customfields', 'EFRIS custom fields', 'warn', `Missing: ${[!hasFdn && 'FDN field', !hasCom && 'commodity-code field'].filter(Boolean).join(', ')}.`, 'Run "Check / Create EFRIS Custom Fields" in Settings → Custom Fields.');
-  } catch (e) { add('customfields', 'EFRIS custom fields', 'warn', e.message, 'Run "Check / Create EFRIS Custom Fields" in Settings → Custom Fields.'); }
+    else checks.push({ id: 'customfields', title: 'EFRIS custom fields', status: 'warn',
+      detail: `Missing: ${[!hasFdn && 'FDN field', !hasCom && 'commodity-code field'].filter(Boolean).join(', ')}.`,
+      fix: 'Use the button here, or run Check / Create EFRIS Custom Fields in Settings, Custom Fields.',
+      action: 'create-custom-fields' });
+  } catch (e) { add('customfields', 'EFRIS custom fields', 'warn', e.message, 'Run "Check / Create EFRIS Custom Fields" in Settings, Custom Fields.'); }
 
-  // 5. Chart of accounts reachable (needed by allocation picker + item sync)
+  // 5. Currencies - the base currency must be set before goods. If we can read a
+  // base, report it; if not, flag it and let the user set it inline (the connect
+  // screen renders a "Set base currency" button for the action below) so they do
+  // not have to leave the flow. Same read the Settings, Currencies tab uses.
+  try {
+    const { base, foreign } = await readMgrCurrencies(ep, tk);
+    const fc = foreign.map(c => c.code).filter(Boolean);
+    if (base && base.code) {
+      const src = base.source === 'efrisconnect' ? ' (set from EFRISConnect; Manager does not report it back through its API)' : '';
+      add('currency', 'Currencies', 'ok', `Base currency ${base.code}${src}${fc.length ? '; foreign: ' + fc.join(', ') : ' - no foreign currencies added yet'}.`, fc.length ? '' : 'Add any foreign currency you price goods in under Settings, Currencies.');
+    } else {
+      checks.push({ id: 'currency', title: 'Currencies', status: 'warn',
+        detail: 'Base currency not confirmed. Manager does not report it through its API, so EFRISConnect only knows it once it has been set from here.',
+        fix: 'Click the button to set it to UGX (also fine if it is already set in Manager - this records it). Foreign currencies you price goods in go under Settings, Currencies.',
+        action: 'set-base-currency' });
+    }
+  } catch (e) { add('currency', 'Currencies', 'warn', 'Could not read currencies now.', 'Set base and foreign currencies under Settings, Currencies before creating goods.'); }
+
+  // 6. Chart of accounts reachable (needed by allocation picker + item sync)
   try {
     const r = await managerCall(ep, tk, 'GET', '/chart-of-accounts', null);
     const arr = (r.status === 200 && r.data) ? (Object.values(r.data).find(v => Array.isArray(v)) || []) : [];
@@ -2553,8 +4326,8 @@ app.post('/api/manager/readiness-audit', async (req, res) => {
 
 // Full details for a single Manager.io item (for import prefill)
 app.get('/api/goods/manager-item-detail', async (req, res) => {
-  const ep = normEp(req.query.ep || '');
-  const tk = req.query.tk || '';
+  const ep = normEp(req.headers['x-manager-endpoint'] || req.query.ep || '');
+  const tk = req.headers['x-manager-token'] || '';
   const key = req.query.key || '';
   const type = req.query.type || 'Service';
   if (!ep || !tk || !key) return res.status(400).json({ success: false, error: 'ep, tk and key are required' });
@@ -2611,9 +4384,7 @@ app.get('/api/goods/manager-item-detail', async (req, res) => {
 app.post('/api/efris/measure-units', async (req, res) => {
   const { tin, deviceNo, efrisPassword, mode } = req.body || {};
   if (!tin || !deviceNo) return res.status(400).json({ success: false, error: 'tin and deviceNo are required' });
-  const eu = mode === 'production'
-    ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
-    : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+  const eu = uraUrl(mode);
   try {
     const session = await getSession(tin, deviceNo, efrisPassword, eu, keyOverrideFrom(req.body));
     const units = await getEfrisMeasureUnits(tin, deviceNo, session, eu);
@@ -2629,11 +4400,9 @@ app.post('/api/efris/register-goods', async (req, res) => {
   if (!tin || !deviceNo || !item) {
     return res.status(400).json({ success: false, error: 'tin, deviceNo and item are required' });
   }
-  const eu = mode === 'production'
-    ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
-    : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+  const eu = uraUrl(mode);
   try {
-    const session = await getSession(tin, deviceNo, efrisPassword, eu, keyOverrideFrom(req.body));
+    let session = await getSession(tin, deviceNo, efrisPassword, eu, keyOverrideFrom(req.body));
     if (!session.aesKey) throw new Error('No AES key available - check private key path');
 
     // Resolve the EFRIS measure-unit CODE. The frontend may pass a pre-resolved
@@ -2707,9 +4476,20 @@ app.post('/api/efris/register-goods', async (req, res) => {
     console.log(`   Payload: goodsCode=${t130Payload.goodsCode}, categoryId=${t130Payload.commodityCategoryId}, measureUnit=${measureUnit}, price=${t130Payload.unitPrice}, currency=${t130Currency}, vatCat=${vatCat}, type=${goodsTypeCode}`);
 
     // T130 is a BATCH interface - payload must be an array even for a single item
-    const t130 = await efrisCall(eu, efrisEnvEnc('T130', [t130Payload], tin, deviceNo, session.aesKey, session.privatePem));
-    const outerRc = t130.data && t130.data.returnStateInfo ? t130.data.returnStateInfo.returnCode : null;
-    const outerRm = t130.data && t130.data.returnStateInfo ? t130.data.returnStateInfo.returnMessage : '';
+    let t130 = await efrisCall(eu, efrisEnvEnc('T130', [t130Payload], tin, deviceNo, session.aesKey, session.privatePem));
+    let outerRc = t130.data && t130.data.returnStateInfo ? t130.data.returnStateInfo.returnCode : null;
+    let outerRm = t130.data && t130.data.returnStateInfo ? t130.data.returnStateInfo.returnMessage : '';
+    // rc:15 = "Data decryption error" - the cached AES key rotated on EFRIS's side.
+    // Renew the session (fresh T104 key) and retry ONCE with the new key. The failed
+    // request never reached processing, so there is no duplicate-registration risk.
+    if (outerRc === '15') {
+      console.log('   ⚠ T130 rc:15 (decryption) - renewing session and retrying once');
+      invalidateSession(tin, deviceNo);
+      session = await getSession(tin, deviceNo, efrisPassword, eu, keyOverrideFrom(req.body));
+      t130 = await efrisCall(eu, efrisEnvEnc('T130', [t130Payload], tin, deviceNo, session.aesKey, session.privatePem));
+      outerRc = t130.data && t130.data.returnStateInfo ? t130.data.returnStateInfo.returnCode : null;
+      outerRm = t130.data && t130.data.returnStateInfo ? t130.data.returnStateInfo.returnMessage : '';
+    }
     console.log(`   T130 outer rc: ${outerRc} (${outerRm})`);
 
     // Decrypt per-item results from response content
@@ -2741,7 +4521,7 @@ app.post('/api/efris/register-goods', async (req, res) => {
     if (ok) {
       try {
         const vp = { goodsCode: item.code, goodsName: '', commodityCategoryCode: '', pageNo: '1', pageSize: '20' };
-        const vr = await efrisCall(eu, efrisEnvEnc('T127', vp, tin, deviceNo, session.aesKey, session.privatePem));
+        const vr = await efrisSecure(eu, 'T127', vp, tin, deviceNo, session);
         if (vr.data?.data?.content) {
           const raw = aesDecryptStr(vr.data.data.content, session.aesKey);
           const parsed = JSON.parse(raw);
@@ -2777,10 +4557,19 @@ app.post('/api/efris/register-goods', async (req, res) => {
       // T130 against) - NOT the live T115 packaging-unit section.
       try { validUnits = getUnits().map(u => ({ code: u.code, name: u.name || u.desc || '' })); } catch(_) {}
     }
+    // rc:681 - the item is flagged excisable but this TIN has no Local Excise Duty
+    // registration in EFRIS, so EFRIS forbids haveExciseTax='101'. This is a URA
+    // registration fact, not a fixable payload error. Give a clear, actionable
+    // message and flag it so the frontend can offer "register without excise".
+    let exciseProblem = false;
+    if (!ok && (itemRc === '681' || /excise/i.test(itemRm || ''))) {
+      exciseProblem = true;
+      itemRm = `This item is marked as excisable, but TIN ${tin} is not registered for Local Excise Duty in EFRIS, so URA will not accept it as an excise good. Either add Excise Duty to your URA registration, or turn off the excise flag on this item and register it as a normal VAT good.`;
+    }
     res.json({ success: ok, returnCode: itemRc, returnMessage: itemRm, alreadyExists,
       ghost, suggestedCode: ghost ? item.code + '-1' : undefined,
-      unitProblem, sentUnit: uomCode, validUnits,
-      error: ok ? undefined : (ghost ? itemRm : `EFRIS T130: ${itemRc} - ${itemRm}`) });
+      unitProblem, sentUnit: uomCode, validUnits, exciseProblem,
+      error: ok ? undefined : (ghost || exciseProblem ? itemRm : `EFRIS T130: ${itemRc} - ${itemRm}`) });
   } catch(e) {
     console.log(`   ❌ register-goods error: ${e.message}`);
     logger.error('register-goods failed', { message: redactSecrets(e && e.message, req) });
@@ -2794,11 +4583,9 @@ app.post('/api/efris/register-goods', async (req, res) => {
 
 app.post('/api/efris/test-connection', async (req, res) => {
   const b = req.body || {};
-  const url = b.mode === 'production'
-    ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
-    : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+  const url = uraUrl(b.mode);
   try {
-    delete sessions[(b.tin||'') + '_' + (b.deviceNo||'')];
+    invalidateSession(b.tin || '', b.deviceNo || '');
     await getSession(b.tin, b.deviceNo, b.password, url, keyOverrideFrom(b));
     res.json({ success: true, message: 'Connected to URA EFRIS ' + (b.mode === 'production' ? 'Production' : 'Sandbox') });
   } catch(e) {
@@ -2812,11 +4599,24 @@ app.post('/api/efris/test-connection', async (req, res) => {
 //   config.enablerMode - 'off' | 'fallback' (URA first, Enabler on failure) | 'always'
 // The Enabler speaks the same EFRIS protocol (same AES/RSA envelope), so our
 // existing efrisCall/efrisEnvEnc work unchanged - only the base URL differs.
+// The URA Offline Enabler runs on this machine or the office LAN. Only such
+// addresses are accepted, so the relay cannot be pointed at internet hosts
+// (it would post signed invoices there). Extra LAN names: ALLOWED_ENABLER_HOSTS.
+const ENABLER_EXTRA_HOSTS = String(process.env.ALLOWED_ENABLER_HOSTS || '').split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+function enablerUrlOk(u) {
+  let p; try { p = new URL(String(u || '').trim()); } catch (_) { return false; }
+  if (p.protocol !== 'http:' && p.protocol !== 'https:') return false;
+  const h = p.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (ENABLER_EXTRA_HOSTS.includes(h)) return true;
+  if (h === 'localhost' || h === '::1' || /^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) || /^169\.254\./.test(h) || /^f[cd][0-9a-f]{2}:/.test(h) || /^fe80:/.test(h)) return true;
+  // Single-label or .local/.lan/.home names resolve on the LAN, not the internet.
+  return !h.includes('.') || /\.(local|lan|home|internal)$/.test(h);
+}
+
 function efrisEndpoints(config) {
-  const ura = config.mode === 'production'
-    ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
-    : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
-  const enabler = (config.enablerUrl || '').trim();
+  const ura = uraUrl(config.mode);
+  let enabler = (config.enablerUrl || '').trim();
+  if (enabler && !enablerUrlOk(enabler)) { console.log('   Enabler URL ignored (not a local/LAN address): ' + enabler); enabler = ''; }
   const mode = enabler ? (config.enablerMode || 'fallback') : 'off';
   if (mode === 'always') return [{ url: enabler, kind: 'enabler' }];
   if (mode === 'fallback') return [{ url: ura, kind: 'ura' }, { url: enabler, kind: 'enabler' }];
@@ -2843,22 +4643,47 @@ function isNetworkError(e) {
 
 // Core invoice/receipt submission (T109). Returns a result object; THROWS on a
 // network failure so callers can decide to queue offline. Does not touch res.
+let _inflight = 0;
 async function performInvoiceSubmission(invoice, config, eu) {
-  const session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
+  _inflight++;
+  try { return await performInvoiceSubmissionInner(invoice, config, eu); } finally { _inflight--; }
+}
+async function performInvoiceSubmissionInner(invoice, config, eu) {
+  let session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
   if (!session.aesKey) throw new Error('No AES key available to encrypt T109');
   try {
     const goodsMap = await getRegisteredGoodsMap(config.tin, config.deviceNo, session, eu);
     annotateLinesWithRegisteredGoods(invoice, goodsMap);
   } catch (e) { console.log(`   goods-map annotate skipped: ${e.message}`); }
+  // Seller details missing from this business's settings (URA rejects an empty email,
+  // rc 1115): fill them from the taxpayer record URA returned at login.
+  const tpRec = (session.login && (session.login.taxpayer || session.login)) || {};
+  config = { ...config,
+    email: config.email || tpRec.contactEmail || tpRec.email || '',
+    phone: config.phone || tpRec.contactMobile || tpRec.contactNumber || '',
+    businessAddress: config.businessAddress || tpRec.address || '',
+    businessName: config.businessName || tpRec.legalName || '',
+    tradeName: config.tradeName || tpRec.businessName || '',
+  };
   const t109data = buildT109(invoice, config);
   t109data.goodsDetails.forEach(g => console.log(`   T109 line: item="${g.item}" itemCode="${g.itemCode}" uom="${g.unitOfMeasure}" taxRule="${g.taxRule}"`));
   let t109, rc, rm;
   for (let attempt = 1; attempt <= 3; attempt++) {
-    t109 = await efrisCall(eu, efrisEnvEnc('T109', t109data, config.tin, config.deviceNo, session.aesKey, session.privatePem));
+    try { t109 = await efrisCall(eu, efrisEnvEnc('T109', t109data, config.tin, config.deviceNo, session.aesKey, session.privatePem)); }
+    catch (e) {
+      // Sent, then no answer: EFRIS may have fiscalised it. Flag it so callers do
+      // not resend it blindly (a second FDN for one sale).
+      if (e.afterSend) e.uncertain = true;
+      throw e;
+    }
     rc = t109.data && t109.data.returnStateInfo ? t109.data.returnStateInfo.returnCode : null;
     rm = t109.data && t109.data.returnStateInfo ? t109.data.returnStateInfo.returnMessage : '';
     if (rc !== '15') break;
-    console.log(`   T109 rc 15 (transient decrypt error) - retry ${attempt}/3`);
+    // rc:15 means the cached AES key rotated on EFRIS's side - renew it before the
+    // next attempt (retrying with the same stale key can never succeed).
+    console.log(`   T109 rc 15 (stale session key) - renewing session, retry ${attempt}/3`);
+    invalidateSession(config.tin, config.deviceNo);
+    session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
   }
   let contentStr = null;
   if (t109.data && t109.data.data && t109.data.data.content) {
@@ -2887,7 +4712,9 @@ async function performInvoiceSubmission(invoice, config, eu) {
   if (ok) {
     try {
       appendSubmissionLog({
-        id: Date.now(), submittedAt: issuedDate, fdn, antifakeCode, validationUrl,
+        id: crypto.randomUUID(), submittedAt: issuedDate, fdn, antifakeCode, validationUrl, tenantId: config._tenantId || undefined,
+        userId: config._userId || undefined, userName: config._userName || undefined,
+        ...(invoice._debitOf ? { kind: 'debit-note', docType: 'Debit note', originalFdn: invoice._debitOf.oriInvoiceNo || '' } : {}),
         deviceNo: config.deviceNo, invoiceId, reference: invoice.Reference || invoice.reference || '',
         returnCode: rc, status: 'success', tin: config.tin,
         customerName: t109data.buyerDetails ? (t109data.buyerDetails.buyerLegalName || t109data.buyerDetails.buyerTin || '') : '',
@@ -2895,6 +4722,11 @@ async function performInvoiceSubmission(invoice, config, eu) {
         currency: t109data.basicInformation ? t109data.basicInformation.currency || 'UGX' : 'UGX',
         invoiceKind: t109data.basicInformation ? t109data.basicInformation.invoiceKind || '' : '',
         mode: config.mode || 'sandbox',
+        // Kept so a later credit note can be prefilled (lines) and keep the buyer.
+        buyerTin: t109data.buyerDetails ? t109data.buyerDetails.buyerTin || '' : '',
+        buyerType: t109data.buyerDetails ? t109data.buyerDetails.buyerType || '' : '',
+        lines: (t109data.goodsDetails || []).filter(g => String(g.discountFlag) !== '0').map(g => ({
+          name: g.item || '', code: g.itemCode || '', qty: parseFloat(g.qty) || 0, unitPrice: parseFloat(g.unitPrice) || 0, orderNumber: parseInt(g.orderNumber, 10) })),
       });
     } catch(le) { console.log('Submission log write error:', le.message); }
   }
@@ -2906,6 +4738,12 @@ app.post('/api/efris/submit-invoice', rateLimit(30), async (req, res) => {
   if (!invoice || !config || !config.tin) {
     return res.status(400).json({ success: false, error: 'Missing invoice or config.tin' });
   }
+  // Business that is submitting: carried on the config so the submission log
+  // entry is tagged even when it is written later from the offline queue.
+  config._tenantId = reqTenant(req);
+  { const a = actor(req); config._userId = a.userId || ''; config._userName = a.userName || ''; }
+  delete invoice._debitOf;   // debit notes go through /api/efris/debit-note only
+  const saleAt = new Date().toISOString();   // when the sale was made (an offline sale is dated by this)
   try {
     // Guard: a receipt that clears an invoice has no goods lines - EFRIS can't
     // process it. The original invoice should be submitted instead.
@@ -2920,16 +4758,20 @@ app.post('/api/efris/submit-invoice', rateLimit(30), async (req, res) => {
     if (ref && !req.body.allowDuplicateRef) {
       try {
         let log = []; try { log = JSON.parse(fs.readFileSync(SUBMISSION_LOG_FILE, 'utf8')); } catch(_) {}
-        const dup = log.find(e => e.status === 'success' && String(e.reference || '').trim().toLowerCase() === ref.toLowerCase() && String(e.tin || config.tin) === String(config.tin));
+        const dup = log.find(e => e.status === 'success' && e.kind !== 'credit-note' && String(e.reference || '').trim().toLowerCase() === ref.toLowerCase() && String(e.tin || config.tin) === String(config.tin));
         if (dup) return res.json({ success: false, duplicateRef: true, existingFdn: dup.fdn || '',
           error: `Reference "${ref}" was already fiscalised (FDN ${dup.fdn || '?'}). URA requires a unique reference per transaction. Use a new receipt number, or resubmit only if you are correcting a failed attempt.` });
+        // Same reference already waiting in the offline queue: it will be sent from there.
+        const q = loadQueue().find(e => e.status === 'pending' && String(e.reference || '').trim().toLowerCase() === ref.toLowerCase() && String((e.cfgPublic || {}).tin || '') === String(config.tin));
+        if (q) return res.json({ success: false, duplicateRef: true, queued: true, offlineId: q.id,
+          error: `Reference "${ref}" is already saved offline and will be submitted automatically when EFRIS is reachable. Use a new receipt number for a different sale.` });
       } catch(_) {}
     }
     // Try each endpoint (URA, then the local Offline Mode Enabler if configured).
     // A network failure moves to the next target; a URA business rejection is a
     // real result and stops here. If every target is unreachable → queue offline.
     const targets = efrisEndpoints(config);
-    let result = null, lastNetErr = null, lastEndpointErr = null;
+    let result = null, lastNetErr = null, lastEndpointErr = null, uncertain = null;
     for (const t of targets) {
       try {
         result = await performInvoiceSubmission(invoice, cfgForTarget(config, t), t.url);
@@ -2937,6 +4779,9 @@ app.post('/api/efris/submit-invoice', rateLimit(30), async (req, res) => {
         lastNetErr = null; lastEndpointErr = null;
         break;
       } catch (subErr) {
+        // Sent but timed out: outcome unknown. Never fail over to the next target
+        // (that could fiscalise the sale twice); queue it to be checked first.
+        if (subErr.uncertain) { lastNetErr = subErr; uncertain = t.kind; console.log(`   ${t.kind} did not answer after the sale was sent: ${subErr.message}`); break; }
         if (isNetworkError(subErr)) { lastNetErr = subErr; console.log(`   ${t.kind} unreachable: ${subErr.message}`); continue; }
         // Reachable but wrong (HTTP 404 / HTML page): don't queue - it's a config
         // problem. Try the next target (e.g. fall through to URA), else surface it.
@@ -2950,7 +4795,13 @@ app.post('/api/efris/submit-invoice', rateLimit(30), async (req, res) => {
       return res.json({ success: false, endpointError: true, error: lastEndpointErr.message });
     }
     if (!result && lastNetErr) {
-      const offlineId = offlineEnqueue({ kind: 'invoice', invoice, cfgPublic: publicCfg(config), managerEndpoint: managerEndpoint || '', documentKey: documentKey || '', reference: invoice.Reference || '' });
+      const offlineId = offlineEnqueue({ kind: 'invoice', invoice, cfgPublic: publicCfg(config), tenantId: config._tenantId || '', managerEndpoint: managerEndpoint || '', documentKey: documentKey || '', reference: invoice.Reference || '', saleAt,
+        ...(uncertain ? { uncertain: true, uncertainVia: uncertain } : {}) });
+      if (uncertain) {
+        console.log(`   ⚠ EFRIS did not answer in time - outcome unknown, queued to check by reference (${offlineId})`);
+        return res.json({ success: true, queued: true, offline: true, uncertain: true, offlineId, reference: invoice.Reference || '',
+          message: 'EFRIS did not answer in time, so it may already have this sale. It is saved and will be checked with EFRIS (by reference) before it is sent again.' });
+      }
       console.log(`   ⚠ EFRIS unreachable (URA${config.enablerUrl ? ' + Enabler' : ''}) - queued offline (${offlineId})`);
       return res.json({ success: true, queued: true, offline: true, offlineId, reference: invoice.Reference || '',
         message: 'Saved offline - EFRIS is unreachable. It will be submitted automatically when the connection returns.' });
@@ -2971,6 +4822,7 @@ app.post('/api/efris/test-enabler', async (req, res) => {
   const url = String((req.body || {}).enablerUrl || '').trim();
   if (!url) return res.status(400).json({ ok: false, error: 'Enabler URL required' });
   try { new URL(url); } catch(_) { return res.json({ ok: false, error: 'That is not a valid URL.' }); }
+  if (!enablerUrlOk(url)) return res.json({ ok: false, error: 'The Offline Enabler must be on this computer or your local network (e.g. http://localhost:9880/...). Internet addresses are not allowed.' });
   try {
     // A reachable Enabler answers a posted EFRIS envelope with HTTP 200 (even a
     // business-level error rc means it's up and processing).
@@ -2993,13 +4845,11 @@ app.post('/api/efris/test-enabler', async (req, res) => {
 app.post('/api/efris/verify-tin', async (req, res) => {
   const { buyerTin, config } = req.body || {};
   if (!buyerTin || !config || !config.tin) return res.status(400).json({ success: false, error: 'buyerTin and config required' });
-  const eu = config.mode === 'production'
-    ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
-    : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+  const eu = uraUrl(config.mode);
   try {
     const session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
     // T119: taxpayer query - look up a TIN to verify it exists and get details
-    const t119 = await efrisCall(eu, efrisEnvEnc('T119', { tin: buyerTin, ninBrn: '', queryType: '1' }, config.tin, config.deviceNo, session.aesKey, session.privatePem));
+    const t119 = await efrisSecure(eu, 'T119', { tin: buyerTin, ninBrn: '', queryType: '1' }, config.tin, config.deviceNo, session);
     const rc = t119.data && t119.data.returnStateInfo ? t119.data.returnStateInfo.returnCode : null;
     const rm = t119.data && t119.data.returnStateInfo ? t119.data.returnStateInfo.returnMessage : '';
     let info = null;
@@ -3027,17 +4877,46 @@ app.post('/api/efris/verify-tin', async (req, res) => {
   }
 });
 
+// Detect VAT registration from a T119 taxpayer record without hardcoding a
+// single field name (URA records vary). Returns { status, detail } where status
+// is true (registered), false (not), or null (could not determine).
+function detectVatRegistration(tp, info) {
+  const truthy = (v) => {
+    if (v === null || v === undefined) return false;
+    const s = String(v).trim().toLowerCase();
+    return !(s === '' || s === '0' || s === 'false' || s === 'no' || s === 'n' || s === 'null' || s === 'none');
+  };
+  const scan = (obj) => {
+    if (!obj || typeof obj !== 'object') return null;
+    // 1. A field that means VAT registration - its own value decides yes/no.
+    //    (Other VAT flags, e.g. isAllowOutOfScopeVAT, describe different rules.)
+    for (const k of Object.keys(obj)) {
+      if (/^(is)?vat(reg(istered|istration)?|flag|status|payer)?$/i.test(k) && (typeof obj[k] !== 'object' || obj[k] === null)) {
+        const v = obj[k];
+        return { status: truthy(v), detail: k + '=' + (v === '' || v === null ? '(empty)' : String(v)) };
+      }
+    }
+    // 2. A registered-tax-type field that lists VAT (name or code 01).
+    for (const k of Object.keys(obj)) {
+      if (/tax.?type|registeredtax|taxregist/i.test(k)) {
+        const s = JSON.stringify(obj[k] || '').toLowerCase();
+        if (/vat|value.?added/.test(s) || /"0?1"/.test(s)) return { status: true, detail: k + ' lists VAT' };
+      }
+    }
+    return null;
+  };
+  return scan(tp) || scan(info) || { status: null, detail: '' };
+}
+
 // ── My details (T119 with own TIN) ────────────────────────────
 app.post('/api/efris/my-details', async (req, res) => {
   const { config } = req.body || {};
   if (!config || !config.tin) return res.status(400).json({ success: false, error: 'config.tin required' });
-  const eu = config.mode === 'production'
-    ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
-    : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+  const eu = uraUrl(config.mode);
   try {
     const session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
     if (!session.aesKey) throw new Error('No AES key');
-    const t119 = await efrisCall(eu, efrisEnvEnc('T119', { tin: config.tin, ninBrn: '', queryType: '1' }, config.tin, config.deviceNo, session.aesKey, session.privatePem));
+    const t119 = await efrisSecure(eu, 'T119', { tin: config.tin, ninBrn: '', queryType: '1' }, config.tin, config.deviceNo, session);
     const rc = t119.data && t119.data.returnStateInfo ? t119.data.returnStateInfo.returnCode : null;
     const rm = t119.data && t119.data.returnStateInfo ? t119.data.returnStateInfo.returnMessage : '';
     let info = null;
@@ -3046,13 +4925,58 @@ app.post('/api/efris/my-details', async (req, res) => {
     }
     if (rc !== '00') return res.json({ success: false, error: 'URA ' + rc + ': ' + rm });
     const tp = (info && (info.taxpayer || info)) || {};
-    const brn = (tp.ninBrn && !/non/i.test(tp.ninBrn)) ? tp.ninBrn : (tp.brn || '');
+    // URA sends "NIN/BRN" in one field ("/8002001593213" when there is no NIN): keep the BRN.
+    const nb = String((tp.ninBrn && !/non/i.test(tp.ninBrn)) ? tp.ninBrn : (tp.brn || '')).split('/').map(x => x.trim()).filter(Boolean);
+    const brn = nb.length ? nb[nb.length - 1] : '';
     const addr = String(tp.address || tp.placeOfBusiness || '').replace(/\s{2,}/g, ' ').trim();
-    res.json({ success: true, legalName: tp.taxpayerLegalName || tp.legalName || tp.taxpayerName || '', businessName: tp.taxpayerName || tp.businessName || tp.legalName || '', address: addr, email: tp.contactEmail || '', phone: tp.contactMobile || tp.contactNumber || '', brn, tin: config.tin });
+    // VAT registration readout. The exact field URA returns is not fixed across
+    // taxpayer records, so detect generically: any key mentioning VAT decides
+    // yes/no by its value; otherwise a registered-tax-type list mentioning VAT.
+    // VAT registration comes from the registered tax types in the T103 login reply
+    // (T119 has no VAT field on current EFRIS). Only without that list fall back
+    // to scanning the T119 / login fields.
+    let vat = { status: null, detail: '' };
+    const tt = session.login && (session.login.taxType || (session.login.taxpayer && session.login.taxpayer.taxType));
+    if (Array.isArray(tt) && tt.length) {
+      const names = tt.map(t => String((t && (t.taxTypeName || t.name)) || '')).filter(Boolean);
+      const hasVat = names.some(n => /value.?added|\bvat\b/i.test(n));
+      vat = { status: hasVat, detail: 'T103 tax types: ' + names.join(', ') };
+    } else {
+      vat = detectVatRegistration(tp, info);
+      if (vat.status === null && session.login) {
+        const lv = detectVatRegistration(session.login.taxpayer || {}, session.login);
+        if (lv.status !== null) vat = { status: lv.status, detail: 'T103 ' + lv.detail };
+      }
+    }
+    try { console.log('[T119 taxpayer fields] ' + Object.keys(tp).join(', ') + (vat.detail ? ' | vat: ' + vat.detail : ' | vat: not found')); } catch(_) {}
+    // Diagnostics so the VAT field can be pinned without reading server logs:
+    // the list of keys URA returned, plus any tax/VAT/registration-related pairs.
+    const taxpayerFields = Object.keys(tp);
+    const taxInfo = {};
+    for (const k of taxpayerFields) { if (/vat|tax|regist/i.test(k) && (typeof tp[k] !== 'object' || tp[k] === null)) taxInfo[k] = tp[k]; }
+    res.json({ success: true, legalName: tp.taxpayerLegalName || tp.legalName || tp.taxpayerName || '', businessName: tp.taxpayerName || tp.businessName || tp.legalName || '', address: addr, email: tp.contactEmail || '', phone: tp.contactMobile || tp.contactNumber || '', brn, tin: config.tin, vatRegistered: vat.status, vatDetail: vat.detail, taxpayerFields, taxInfo });
   } catch(e) {
     logger.error('my-details failed', { message: redactSecrets(e && e.message, req) });
     res.status(500).json({ success: false, error: e.message });
   }
+});
+
+// ── Sandbox test: make URA issue a new session key behind the relay's back ──
+// A fresh T104 for the same device makes URA replace the key the relay has cached,
+// so the next write (T109/T130/T131) gets rc:15 and must renew its session and
+// retry. Sandbox only, and the cache is deliberately left untouched.
+app.post('/api/efris/test/rotate-key', rateLimit(6), async (req, res) => {
+  const { config } = req.body || {};
+  if (!config || !config.tin || !config.deviceNo) return res.status(400).json({ success: false, error: 'config with tin and deviceNo required' });
+  if (config.mode !== 'sandbox') return res.status(403).json({ success: false, error: 'Only available in sandbox mode.' });
+  const eu = uraUrl('sandbox');
+  try {
+    const t101 = await efrisCall(eu, efrisEnv('T101', '', config.tin, config.deviceNo));
+    const t104 = await efrisCall(eu, efrisEnv('T104', '', config.tin, config.deviceNo));
+    const rc = t104.data && t104.data.returnStateInfo ? t104.data.returnStateInfo.returnCode : null;
+    console.log('   TEST: URA issued a new session key for device ' + config.deviceNo + ' (T104 rc=' + rc + '); the relay still holds the old one');
+    res.json({ success: t101.status === 200 && t104.status === 200, rc });
+  } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
 // ── Credit Note (T108) ────────────────────────────────────────
@@ -3095,13 +5019,19 @@ app.post('/api/efris/credit-note', rateLimit(30), async (req, res) => {
       remarks: remarks || '',
       sellersReferenceNo: referenceNo || cnInvoice.Reference || ('CN-' + Date.now()),
     });
-    t108data.goodsDetails.forEach(g => console.log(`   CN line: item="${g.item}" itemCode="${g.itemCode}" uom="${g.unitOfMeasure}" qty=${g.qty} total=${g.total}`));
+    // URA matches each credit-note line to the ORIGINAL invoice line with the same
+    // orderNumber (1427 "item must be the same as the original invoice" otherwise),
+    // so keep the original line positions when only some lines are credited.
+    if (Array.isArray(items) && items.length === t108data.goodsDetails.length && items.every(it => Number.isInteger(+it.orderNumber) && +it.orderNumber >= 0)) {
+      t108data.goodsDetails.forEach((g, j) => { g.orderNumber = String(+items[j].orderNumber); });
+    }
+    t108data.goodsDetails.forEach(g => console.log(`   CN line: #${g.orderNumber} item="${g.item}" itemCode="${g.itemCode}" uom="${g.unitOfMeasure}" qty=${g.qty} total=${g.total}`));
     // Per Interface Design v24.0.1, the Credit-Note Application interface is T110
     // (T108 is a query). Our payload is already a T110 application (reasonCode,
     // applicationTime, invoiceApplyCategoryCode). Send T110; if this EFRIS build
     // doesn't recognise it (older sandbox), fall back to T108 which worked before.
     const cnSubmit = async (code) => {
-      const r = await efrisCall(eu, efrisEnvEnc(code, t108data, cnCfg.tin, cnCfg.deviceNo, session.aesKey, session.privatePem));
+      const r = await efrisSecure(eu, code, t108data, cnCfg.tin, cnCfg.deviceNo, session);
       const c = r.data && r.data.returnStateInfo ? r.data.returnStateInfo.returnCode : null;
       const m = r.data && r.data.returnStateInfo ? r.data.returnStateInfo.returnMessage : '';
       return { r, c, m };
@@ -3134,6 +5064,20 @@ app.post('/api/efris/credit-note', rateLimit(30), async (req, res) => {
       } catch(e) { console.log('   T108 parse error:', e.message); }
     }
     const ok = rc === '00' || !!fdn;
+    // Record the credit note (negative amount) so Documents and the Z report net it
+    // off the day's sales.
+    if (ok) {
+      try {
+        appendSubmissionLog({
+          id: crypto.randomUUID(), kind: 'credit-note', docType: 'Credit note', submittedAt: new Date().toISOString(), fdn: fdn || '', antifakeCode: antifakeCode || '', validationUrl,
+          tenantId: reqTenant(req) || undefined, deviceNo: cnCfg.deviceNo, invoiceId, reference: cnRef || t108data.sellersReferenceNo || '',
+          originalFdn: originalFDN, returnCode: rc, status: 'success', tin: config.tin,
+          customerName: t108data.buyerDetails ? (t108data.buyerDetails.buyerLegalName || t108data.buyerDetails.buyerTin || '') : '',
+          totalAmount: -Math.abs(parseFloat(t108data.summary && t108data.summary.grossAmount) || 0),
+          currency: t108data.currency || 'UGX', invoiceKind: t108data.basicInformation ? t108data.basicInformation.invoiceKind || '' : '', mode: config.mode || 'sandbox',
+        });
+      } catch (le) { console.log('Submission log write error:', le.message); }
+    }
     res.json(ok
       ? { success: true, fdn, referenceNo: cnRef, antifakeCode, invoiceId, validationUrl, qrCode: validationUrl, deviceNo: config.deviceNo, returnCode: rc, returnMessage: rm }
       : { success: false, error: 'URA ' + rc + ': ' + rm, returnCode: rc });
@@ -3147,12 +5091,10 @@ app.post('/api/efris/credit-note', rateLimit(30), async (req, res) => {
 app.post('/api/efris/invoices-report', async (req, res) => {
   const { startDate, endDate, pageNo, pageSize, buyerTin, referenceNo, config } = req.body || {};
   if (!startDate || !endDate || !config || !config.tin) return res.status(400).json({ success: false, error: 'startDate, endDate and config required' });
-  const eu = config.mode === 'production'
-    ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
-    : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+  const eu = uraUrl(config.mode);
   try {
     const session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
-    if (!session.aesKey) throw new Error('No AES key - private key not found or could not decrypt T104 session. Check that backend/data/private_key.pem exists and matches your EFRIS device.');
+    if (!session.aesKey) throw new Error('No AES key - private key not found or could not decrypt T104 session. Check that private_key.pem exists in the data folder (' + DATA_DIR + ') and matches your EFRIS device.');
     // T106 = Invoice/Receipt query (by conditions). T144 was being validated as a
     // GOODS interface by URA (hence "2194 goodsCode cannot be empty"). T106 lists the
     // taxpayer's issued invoices/receipts in a date range.
@@ -3166,7 +5108,7 @@ app.post('/api/efris/invoices-report', async (req, res) => {
       referenceNo: referenceNo || '', branchName: '', queryType: '1',
       dataSource: '', sellerTinOrNin: config.tin, currencyType: '', invoiceIndustryCode: '',
     };
-    const t106 = await efrisCall(eu, efrisEnvEnc('T106', t106data, config.tin, config.deviceNo, session.aesKey, session.privatePem));
+    const t106 = await efrisSecure(eu, 'T106', t106data, config.tin, config.deviceNo, session);
     const rc = t106.data && t106.data.returnStateInfo ? t106.data.returnStateInfo.returnCode : null;
     const rm = t106.data && t106.data.returnStateInfo ? t106.data.returnStateInfo.returnMessage : '';
     let records = [], page = {};
@@ -3189,15 +5131,681 @@ app.post('/api/efris/invoices-report', async (req, res) => {
   }
 });
 
+// ── Credit-note follow-up: status (T111), withdraw (T120), cancel (T114) ──
+// A T110 credit note is only an APPLICATION: URA approves it later and only then
+// gives it an FDN. T111 lists our applications with their approval status.
+const CN_STATUS_TEXT = { '101': 'Approved', '102': 'Pending approval', '103': 'Rejected', '104': 'Withdrawn' };
+function efrisRcOf(r) {
+  const s = (r && r.data && r.data.returnStateInfo) || {};
+  return { rc: s.returnCode != null ? String(s.returnCode) : null, rm: s.returnMessage || '' };
+}
+// Decoded JSON content of an EFRIS answer (encrypted/zipped or plain), or null.
+function efrisContentJson(r, session) {
+  const c = r && r.data && r.data.data && r.data.data.content;
+  if (!c) return null;
+  try { return JSON.parse(efrisDecodeJson(c, session.aesKey) || aesDecryptStr(c, session.aesKey)); } catch (_) { return null; }
+}
+// Session on the first EFRIS target (the Enabler only in 'always' mode).
+async function efrisQuerySession(config) {
+  const t = efrisEndpoints(config)[0];
+  const cfg = cfgForTarget(config, t);
+  const session = await getSession(cfg.tin, cfg.deviceNo, cfg.efrisPassword, t.url, keyOverrideFrom(cfg));
+  if (!session.aesKey) throw new Error('No AES key - check the EFRIS private key in Settings.');
+  return { eu: t.url, cfg, session };
+}
+function efrisFriendly(e, what) {
+  return isNetworkError(e) ? 'EFRIS is unreachable right now, so ' + what + '. Try again when the connection is back.' : (e && e.message) || String(e);
+}
+function cnItem(r) {
+  const st = String(r.approveStatus || '');
+  return { id: String(r.id || ''), referenceNo: r.referenceNo || '', oriInvoiceNo: r.oriInvoiceNo || '', invoiceNo: r.invoiceNo || '',
+    approveStatus: st, statusText: CN_STATUS_TEXT[st] || st, grossAmount: r.grossAmount, currency: r.currency || '',
+    applicationTime: r.applicationTime || '', taskId: r.taskId || '', categoryCode: String(r.invoiceApplyCategoryCode || ''),
+    buyerName: r.buyerLegalName || r.buyerBusinessName || r.buyerName || undefined };
+}
+// T111 (my own credit/debit-note applications), up to 5 pages of 100.
+async function t111Query(config, f) {
+  const { eu, cfg, session } = await efrisQuerySession(config);
+  const out = [];
+  for (let p = 1; p <= 5; p++) {
+    const body = { referenceNo: f.referenceNo || '', oriInvoiceNo: f.oriInvoiceNo || '', invoiceNo: '', combineKeywords: '', approveStatus: '',
+      startDate: f.startDate || '', endDate: f.endDate || '', pageNo: String(p), pageSize: '99', queryType: '1',   // URA rejects 100 despite "max 100"
+      invoiceApplyCategoryCode: '101,103', creditNoteType: '1' };
+    const r = await efrisSecure(eu, 'T111', body, cfg.tin, cfg.deviceNo, session);
+    const { rc, rm } = efrisRcOf(r);
+    if (rc !== '00') { if (p === 1) throw new Error('URA ' + rc + ': ' + rm); break; }
+    const d = efrisContentJson(r, session) || {};
+    const recs = d.records || d.list || (Array.isArray(d) ? d : []);
+    out.push(...recs);
+    if (p >= (Number(d.page && d.page.pageCount) || 1) || recs.length < 100) break;
+  }
+  return out.map(cnItem);
+}
+// URA's portal link for a fiscal document (what receipts print as their QR code).
+function efrisValidationUrl(mode, fdn, antifakeCode) {
+  if (!fdn || !antifakeCode) return null;
+  const portal = mode === 'production'
+    ? 'https://efris.ura.go.ug/site_mobile/#/invoiceValidation'
+    : 'https://efristest.ura.go.ug/site_new/#/invoiceValidation';
+  return `${portal}?invoiceNo=${encodeURIComponent(fdn)}&antiFakeCode=${encodeURIComponent(antifakeCode)}`;
+}
+// URA T111 times are dd/MM/yyyy HH:mm:ss in Uganda time; ISO, or '' when unreadable.
+function uraTimeIso(v) {
+  const m = String(v || '').match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!m) return '';
+  const t = Date.parse(`${m[3]}-${m[2]}-${m[1]}T${m[4] || '00'}:${m[5] || '00'}:${m[6] || '00'}+03:00`);
+  return isNaN(t) ? '' : new Date(t).toISOString();
+}
+// T108 (invoice details) for an issued document: its verification (antifake)
+// code and URA's QR data. null when URA does not give them.
+async function t108Details(config, fdn) {
+  const { eu, cfg, session } = await efrisQuerySession(config);
+  const r = await efrisSecure(eu, 'T108', { invoiceNo: String(fdn) }, cfg.tin, cfg.deviceNo, session);
+  const { rc, rm } = efrisRcOf(r);
+  if (rc !== '00') { console.log(`   T108 details for ${fdn}: URA ${rc} ${rm}`); return null; }
+  const d = efrisContentJson(r, session) || {};
+  const bi = d.basicInformation || {}, sm = d.summary || {};
+  const antifakeCode = bi.antifakeCode || bi.antiFakeCode || d.antifakeCode || d.antiFakeCode || '';
+  const qrCode = sm.qrCode || d.qrCode || '';
+  if (!antifakeCode && !qrCode) return null;
+  return { antifakeCode, qrCode, issuedDate: bi.issuedDate || '' };
+}
+// Approved credit notes about to be written to Manager: fetch the verification
+// code + QR (T108) for those that only have the FDN, and keep them in the log.
+// Failures are logged and skipped: the FDN is still written.
+async function cnEnrich(config, entries) {
+  for (const e of entries) {
+    if (!e.fdn || e.antifakeCode) continue;
+    try {
+      const d = await t108Details(config, e.fdn);
+      if (!d) continue;
+      e.antifakeCode = d.antifakeCode || '';
+      e.validationUrl = efrisValidationUrl(e.mode || config.mode, e.fdn, d.antifakeCode) || e.validationUrl || null;
+      e.qrCode = d.qrCode || e.validationUrl || '';
+      updateSubmissionLog(log => {
+        const x = log.find(y => y.id === e.id); if (!x) return false;
+        x.antifakeCode = e.antifakeCode; x.validationUrl = e.validationUrl; x.qrCode = e.qrCode;
+      });
+    } catch (err) { console.log(`   Credit note ${e.reference}: verification code lookup failed: ${err.message}`); }
+  }
+}
+// Store URA's verdict on our credit-note log entries. Only entries of the same
+// TIN, the same business (adopt.tenantId; untagged older entries too) and the same
+// mode (sandbox / production; entries without one too) are candidates, so a
+// sandbox and a production note, or two businesses, sharing a TIN and reference
+// stay apart. URA's application id is matched first, then the reference (only on
+// entries not bound to another application); an exact business and mode match
+// wins over an untagged entry. With `adopt` ({ tenantId, mode, deviceNo }), a
+// credit note URA has but the log does not (e.g. one issued before credit notes
+// were logged) is added to the log. Returns the approved entries whose FDN is not
+// in Manager yet.
+function applyCnStatus(items, tin, adopt) {
+  const refKey = v => String(v || '').trim().toLowerCase();
+  const tid = (adopt && adopt.tenantId) || '';
+  const mode = (adopt && adopt.mode) || '';
+  const pending = [];
+  updateSubmissionLog(log => {
+    let changed = false;
+    const fits = e => e.kind === 'credit-note' && String(e.tin || '') === String(tin)
+      && (!tid || !e.tenantId || e.tenantId === tid) && (!mode || !e.mode || e.mode === mode);
+    const score = e => (tid && e.tenantId === tid ? 2 : 0) + (mode && e.mode === mode ? 1 : 0);
+    const best = list => list.reduce((a, e) => (!a || score(e) > score(a) ? e : a), null);
+    const cands = log.filter(fits);
+    const find = it => {
+      const k = refKey(it.referenceNo);
+      const byApp = it.id ? cands.filter(e => e.applicationId && String(e.applicationId) === String(it.id)) : [];
+      if (byApp.length) return best(byApp);
+      if (!k) return null;
+      return best(cands.filter(e => refKey(e.reference) === k && (!e.applicationId || !it.id || String(e.applicationId) === String(it.id))));
+    };
+    const seen = new Set();
+    for (const it of items) {
+      const k = refKey(it.referenceNo);
+      let e = find(it);
+      if (!e) {
+        // Adopt only credit-note applications (not cancellations of other notes).
+        if (!adopt || !(k || it.id) || (it.categoryCode && it.categoryCode !== '101')) continue;
+        const gross = Math.abs(parseFloat(it.grossAmount) || 0);
+        e = {
+          id: crypto.randomUUID(), kind: 'credit-note', docType: 'Credit note', adopted: true,
+          submittedAt: uraTimeIso(it.applicationTime) || new Date().toISOString(),
+          fdn: '', reference: it.referenceNo || '', originalFdn: it.oriInvoiceNo || '', oriInvoiceNo: it.oriInvoiceNo || '',
+          grossAmount: it.grossAmount != null ? String(it.grossAmount) : '', totalAmount: -gross, currency: it.currency || 'UGX',
+          customerName: it.buyerName || '', approveStatus: '', statusText: '', applicationId: it.id || '',
+          tenantId: adopt.tenantId || undefined, tin: String(tin), deviceNo: adopt.deviceNo || '', mode: adopt.mode || 'sandbox',
+          returnCode: '00', status: 'success', userName: 'URA check',
+        };
+        // Buyer and Manager reference come from the original invoice we fiscalised.
+        const orig = it.oriInvoiceNo ? log.find(x => x.kind !== 'credit-note' && String(x.fdn || '') === String(it.oriInvoiceNo)) : null;
+        if (orig) {
+          e.originalReference = orig.reference || '';
+          if (!e.customerName) e.customerName = orig.customerName || '';
+          if (orig.buyerTin) e.buyerTin = orig.buyerTin;
+          if (orig.buyerType) e.buyerType = orig.buyerType;
+        }
+        log.unshift(e);
+        cands.push(e);
+        changed = true;
+        console.log(`   Credit note ${e.reference || it.id} found at URA (${it.statusText || 'status ' + it.approveStatus}), added to the history`);
+      }
+      if (seen.has(e.id)) continue;
+      seen.add(e.id);
+      const was = e.approveStatus || '';
+      if (was !== it.approveStatus || (it.id && e.applicationId !== it.id) || (it.approveStatus === '101' && it.invoiceNo && !e.fdn)) {
+        e.approveStatus = it.approveStatus; e.statusText = it.statusText;
+        if (it.id) e.applicationId = it.id;
+        if (it.approveStatus === '101' && it.invoiceNo && !e.fdn) e.fdn = it.invoiceNo;
+        changed = true;
+        if (was !== it.approveStatus) {
+          if (it.approveStatus === '101') console.log(`   Credit note ${e.reference} approved by URA: FDN ${e.fdn || '?'}`);
+          else console.log(`   Credit note ${e.reference} is now ${it.statusText} at URA`);
+        }
+      }
+      if (e.approveStatus === '101' && e.fdn && !e.mgrWritten && !e.cancelled) pending.push({ ...e });
+    }
+    return changed ? undefined : false;
+  });
+  return pending;
+}
+// The Manager credit note whose Reference is one of `refs`: { key, formBase } or null.
+// Manager's credit-note list has no Reference column (its search does not match it
+// either), so candidates are read through the form: first the search hits for each
+// ref (the extension puts URA's ref in the description), then the whole list.
+// Matching is exact: the form's Reference equals a ref (case and surrounding spaces
+// ignored), or the list description holds a ref of 8+ characters as a whole word
+// (so CN-INV-1 never matches CN-INV-12, and a short ref never matches by description).
+// Each Manager's key -> Reference is cached for the life of the process, and the
+// whole-list walk reads at most CN_SCAN_MAX forms per call.
+const CN_SCAN_MAX = 300;
+const _cnRefCache = new Map();   // normalised endpoint -> Map(key -> Reference)
+const escRe = v => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function descHasRef(desc, ref) {
+  if (!desc || String(ref).length < 8) return false;
+  const edge = '[\\s|.,;:!?()\\[\\]{}"\'/\\\\#]';
+  return new RegExp('(?:^|' + edge + ')' + escRe(ref) + '(?:$|' + edge + ')', 'i').test(String(desc));
+}
+async function findMgrCreditNoteByReference(ep, tk, refs, exclude) {
+  refs = (Array.isArray(refs) ? refs : [refs]).map(r => String(r || '').trim()).filter(Boolean);
+  const skipKey = k => !!(exclude && exclude.has(k));
+  if (!refs.length) return null;
+  const want = new Set(refs.map(r => r.toLowerCase()));
+  const formBase = '/credit-note-form';
+  const cache = _cnRefCache.get(ep) || new Map();
+  _cnRefCache.set(ep, cache);
+  const checked = new Set();
+  let reads = 0;
+  const matchKey = async (key, capped) => {
+    if (!key || checked.has(key) || skipKey(key)) return null;
+    checked.add(key);
+    if (!cache.has(key)) {
+      if (capped && reads >= CN_SCAN_MAX) return null;
+      reads++;
+      try {
+        const f = await managerCall(ep, tk, 'GET', `${formBase}/${key}`, null);
+        if (f.status === 200 && f.data) cache.set(key, String(f.data.Reference || ''));
+      } catch (_) {}
+    }
+    return cache.has(key) && want.has(cache.get(key).trim().toLowerCase()) ? { key, formBase } : null;
+  };
+  const list = async q => {
+    try {
+      const r = await managerCall(ep, tk, 'GET', '/credit-notes' + q, null);
+      return (r.status === 200 && r.data && (r.data.creditNotes || r.data.CreditNotes)) || [];
+    } catch (_) { return []; }
+  };
+  for (const ref of refs) {
+    for (const x of await list('?term=' + encodeURIComponent(ref))) {
+      const key = bareKey(x.key || x.Key);
+      if (!key || skipKey(key)) continue;
+      const hit = await matchKey(key, false); if (hit) return hit;
+      if (refs.some(r => descHasRef(x.description || x.Description, r))) return { key, formBase };
+    }
+  }
+  for (let skip = 0; skip < 1000 && reads < CN_SCAN_MAX; skip += 100) {
+    const page = await list('?pageSize=100&skip=' + skip);
+    for (const x of page) { const hit = await matchKey(bareKey(x.key || x.Key), true); if (hit) return hit; }
+    if (page.length < 100) break;
+  }
+  return null;
+}
+// Write an approved credit note's FDN (and, when known, its verification code and
+// QR) onto its Manager credit note with Status 'Approved'. The branded theme then
+// prints it as issued instead of "Awaiting URA approval" (it keys on the FDN
+// field). Not found in Manager: skipped quietly (counts as an attempt).
+// References the Manager credit note may carry: ours, "CN-" + the original invoice's
+// reference (the extension's default), or "CN-" + the original FDN (URA's seller
+// reference). Several credit notes can share one original, so the "CN-" fallbacks
+// are used only while no other credit note for that original has been written to
+// a Manager document.
+function cnMgrRefs(e, log) {
+  log = log || readSubmissionLog();
+  let origRef = e.originalReference || '';
+  const ori = String(e.oriInvoiceNo || e.originalFdn || '');
+  if (!origRef && ori) {
+    const o = log.find(x => x.kind !== 'credit-note' && String(x.fdn || '') === ori);
+    if (o) origRef = o.reference || '';
+  }
+  const sibling = !!ori && log.some(x => x.kind === 'credit-note' && x.id !== e.id && x.mgrKey
+    && String(x.oriInvoiceNo || x.originalFdn || '') === ori);
+  const refs = [e.reference];
+  if (!sibling) refs.push(origRef && 'CN-' + origRef, e.oriInvoiceNo && 'CN-' + e.oriInvoiceNo);
+  return [...new Set(refs.filter(Boolean))];
+}
+// Manager documents already holding another credit note (never written twice).
+function cnUsedKeys(e, log) {
+  return new Set((log || readSubmissionLog()).filter(x => x.kind === 'credit-note' && x.id !== e.id && x.mgrKey).map(x => String(x.mgrKey)));
+}
+async function cnWriteBack(ep, tk, e) {
+  let ok = false, key = '';
+  try {
+    const log = readSubmissionLog();
+    const refs = cnMgrRefs(e, log);
+    const hit = await findMgrCreditNoteByReference(ep, tk, refs, cnUsedKeys(e, log));
+    if (!hit) console.log(`   Credit note ${e.reference}: no Manager credit note with reference ${refs.join(' or ')}; not written`);
+    if (hit) {
+      const fiscal = { fdn: e.fdn, antifakeCode: e.antifakeCode || '', validationUrl: e.validationUrl || e.qrCode || '', deviceNo: e.deviceNo || '' };
+      const w = await saveEfrisToManager(ep, tk, hit.key, fiscal, null, { formBase: hit.formBase, status: 'Approved', note: 'Credit Note FDN: ' + e.fdn });
+      ok = !!(w && w.success);
+      if (ok) { key = hit.key; console.log(`   Credit note ${e.reference}: FDN ${e.fdn}${e.antifakeCode ? ' and verification code' : ''} written to Manager`); }
+      else console.log(`   Credit note ${e.reference}: Manager write-back failed (${(w && w.error) || 'not accepted'})`);
+    }
+  } catch (err) { console.log(`   Credit note ${e.reference}: Manager write-back error: ${err.message}`); }
+  updateSubmissionLog(log => {
+    const x = log.find(y => y.id === e.id); if (!x) return false;
+    x.mgrAttempts = (x.mgrAttempts || 0) + 1;
+    if (ok) { x.mgrWritten = true; x.mgrKey = key; }
+  });
+  return ok;
+}
+
+app.post('/api/efris/credit-notes/status', async (req, res) => {
+  const { referenceNo, oriInvoiceNo, startDate, endDate, managerEndpoint, accessToken } = req.body || {};
+  let config = (req.body || {}).config;
+  if (!config || !config.tin) return res.status(400).json({ success: false, error: 'config.tin required' });
+  // The business's own TIN and mode come from its saved settings when it has
+  // them, not from the request, so URA's answer is filed under the right business.
+  const tid = reqTenant(req);
+  let saved = null;
+  if (tid) { try { saved = vault.getTenant(tid); } catch (_) {} }
+  if (saved) config = { ...config, tin: saved.tin || config.tin, mode: saved.mode || config.mode };
+  try {
+    const items = await t111Query(config, { referenceNo, oriInvoiceNo, startDate, endDate });
+    const view = scopedView(req, 'credit');
+    const toWrite = applyCnStatus(items, config.tin, { tenantId: tid, mode: config.mode || 'sandbox', deviceNo: config.deviceNo }).filter(view.sees);
+    let managerUpdated = 0;
+    if (managerEndpoint && accessToken && toWrite.length) {
+      const ep = normEp(managerEndpoint);
+      await cnEnrich(config, toWrite);
+      // Stop retrying (and logging) notes with no Manager credit note after 3 tries.
+      for (const e of toWrite) if ((e.mgrAttempts || 0) < 3 && await cnWriteBack(ep, accessToken, e)) managerUpdated++;
+    }
+    res.json({ success: true, items, managerUpdated });
+  } catch (e) {
+    logger.error('credit-notes/status failed', { message: redactSecrets(e && e.message, req) });
+    res.json({ success: false, error: efrisFriendly(e, 'credit-note status could not be checked') });
+  }
+});
+
+// Background: every 15 minutes, ask URA about credit notes still pending, for
+// businesses whose credentials are in the vault, and write approved FDNs into
+// Manager. Skipped while the vault is locked.
+let _cnPolling = false;
+async function pollPendingCreditNotes() {
+  if (_cnPolling || !vault.isUnlocked()) return;
+  _cnPolling = true;
+  try {
+    const cutoff = Date.now() - 90 * 86400000;
+    const isCn = e => e.kind === 'credit-note' && e.status === 'success' && e.tenantId && !e.cancelled && e.reference;
+    const needsMgr = e => e.approveStatus === '101' && e.fdn && !e.mgrWritten && (e.mgrAttempts || 0) < 5;
+    const log = readSubmissionLog().filter(isCn);
+    const pend = log.filter(e => (e.approveStatus === '102' || (!e.approveStatus && !e.fdn)) && Date.parse(e.submittedAt || 0) > cutoff);
+    const tids = [...new Set(pend.concat(log.filter(needsMgr)).map(e => e.tenantId))];
+    // Each business is checked under its own context, so its lines in the
+    // activity log are tagged with it. Returns 'stop' when the run should end.
+    const one = async tid => {
+      let t = null; try { t = vault.getTenant(tid); } catch (_) { return 'stop'; }   // locked meanwhile
+      const creds = t && offlineCredsFromVault({ tenantId: tid });
+      if (!creds) return '';
+      // Only this business's own TIN and its saved mode (its credentials are for that mode).
+      const sameMode = x => !x.mode || !t.mode || x.mode === t.mode;
+      for (const e of pend.filter(x => x.tenantId === tid && (!t.tin || String(x.tin) === String(t.tin)) && sameMode(x))) {
+        const cfg = { tin: e.tin, deviceNo: t.deviceNo || e.deviceNo, mode: t.mode || e.mode, ...creds.cfg };
+        try { applyCnStatus(await t111Query(cfg, { referenceNo: e.reference }), e.tin, { tenantId: tid, mode: cfg.mode, deviceNo: cfg.deviceNo }); }
+        catch (err) {
+          if (isNetworkError(err)) { reqCtx.run({ user: null, tenantId: '' }, () => console.log('   Credit-note status check: URA unreachable, will retry in 15 minutes')); return 'stop'; }
+          console.log(`   Credit-note status check for ${e.reference} failed: ${err.message}`);
+        }
+      }
+      if (!t.managerEndpoint || !t.managerToken) return '';
+      const ep = normEp(t.managerEndpoint);
+      const due = readSubmissionLog().filter(x => isCn(x) && x.tenantId === tid && needsMgr(x) && sameMode(x));
+      if (due.some(x => !x.antifakeCode)) await cnEnrich({ tin: due[0].tin, deviceNo: t.deviceNo || due[0].deviceNo, mode: t.mode || due[0].mode, ...creds.cfg }, due);
+      for (const e of due) await cnWriteBack(ep, t.managerToken, e);
+      return '';
+    };
+    for (const tid of tids) {
+      if (await reqCtx.run({ user: null, tenantId: tid }, () => one(tid)) === 'stop') return;
+    }
+  } finally { _cnPolling = false; }
+}
+setInterval(() => { pollPendingCreditNotes().catch(e => console.log('   Credit-note status check error: ' + e.message)); }, 15 * 60000).unref();
+
+// Withdraw a credit-note application still pending at URA (T120). businessKey is
+// taken to be the T111 record id (unconfirmed; URA's answer is logged).
+app.post('/api/efris/credit-notes/void', rateLimit(30), async (req, res) => {
+  const { config, id, referenceNo } = req.body || {};
+  if (!config || !config.tin || !id) return res.status(400).json({ success: false, error: 'config and the application id (from the status list) are required' });
+  try {
+    const { eu, cfg, session } = await efrisQuerySession(config);
+    const r = await efrisSecure(eu, 'T120', { businessKey: String(id), referenceNo: String(referenceNo || '') }, cfg.tin, cfg.deviceNo, session);
+    const { rc, rm } = efrisRcOf(r);
+    console.log(`   T120 withdraw credit-note application id=${id} ref=${referenceNo || '-'}: rc=${rc} ${rm}`);
+    if (rc === '00') {
+      const ref = String(referenceNo || '').trim().toLowerCase();
+      updateSubmissionLog(log => {
+        const e = log.find(x => x.kind === 'credit-note' && String(x.tin || '') === String(config.tin) && (x.applicationId === String(id) || (ref && String(x.reference || '').trim().toLowerCase() === ref)));
+        if (!e) return false;
+        e.approveStatus = '104'; e.statusText = CN_STATUS_TEXT['104'];
+      });
+    }
+    res.json(rc === '00' ? { success: true, returnCode: rc, returnMessage: rm } : { success: false, returnCode: rc, returnMessage: rm, error: 'URA ' + rc + ': ' + rm });
+  } catch (e) {
+    logger.error('credit-notes/void failed', { message: redactSecrets(e && e.message, req) });
+    res.json({ success: false, error: efrisFriendly(e, 'the credit note was not withdrawn') });
+  }
+});
+
+// Cancel an ISSUED (approved) credit note (T114, category 104).
+app.post('/api/efris/credit-notes/cancel', rateLimit(30), async (req, res) => {
+  const { config, oriInvoiceId, invoiceNo, reasonCode, reason } = req.body || {};
+  if (!config || !config.tin || !oriInvoiceId || !invoiceNo) return res.status(400).json({ success: false, error: 'config, oriInvoiceId (the original invoice\'s EFRIS id) and invoiceNo (the credit note FDN) are required' });
+  const code = String(reasonCode || '');
+  if (!['101', '102', '103'].includes(code)) return res.status(400).json({ success: false, error: 'reasonCode must be 101 (buyer refused), 102 (not delivered) or 103 (other)' });
+  if (code === '103' && !String(reason || '').trim()) return res.status(400).json({ success: false, error: 'Give a reason when the reason is "Other"' });
+  try {
+    const { eu, cfg, session } = await efrisQuerySession(config);
+    const body = { oriInvoiceId: String(oriInvoiceId), invoiceNo: String(invoiceNo), reason: String(reason || ''), reasonCode: code, invoiceApplyCategoryCode: '104', attachmentList: [] };
+    const r = await efrisSecure(eu, 'T114', body, cfg.tin, cfg.deviceNo, session);
+    const { rc, rm } = efrisRcOf(r);
+    console.log(`   T114 cancel credit note ${invoiceNo}: rc=${rc} ${rm}`);
+    if (rc === '00') {
+      updateSubmissionLog(log => {
+        const e = log.find(x => x.kind === 'credit-note' && String(x.tin || '') === String(config.tin) && String(x.fdn || '') === String(invoiceNo));
+        if (!e) return false;
+        e.cancelled = true; e.cancelledAt = new Date().toISOString();
+      });
+    }
+    res.json(rc === '00' ? { success: true, returnCode: rc, returnMessage: rm } : { success: false, returnCode: rc, returnMessage: rm, error: 'URA ' + rc + ': ' + rm });
+  } catch (e) {
+    logger.error('credit-notes/cancel failed', { message: redactSecrets(e && e.message, req) });
+    res.json({ success: false, error: efrisFriendly(e, 'the credit note was not cancelled') });
+  }
+});
+
+// ── Debit Note (T109, invoiceType 4) ──────────────────────────
+// Same flow as submit-invoice, but the T109 points at the ORIGINAL invoice's EFRIS
+// id. Not queued offline: a debit note is raised at the desk and can be resent.
+app.post('/api/efris/debit-note', rateLimit(30), async (req, res) => {
+  const { invoice, config, originalFDN, originalInvoiceId, reason } = req.body || {};
+  if (!invoice || !config || !config.tin) return res.status(400).json({ success: false, error: 'Missing invoice or config.tin' });
+  if (!originalInvoiceId) return res.status(400).json({ success: false, error: 'A debit note needs the original invoice\'s EFRIS Invoice ID. Open the original from Documents, or enter its FDN so it can be looked up.' });
+  if (!(invoice.Lines || []).length) return res.json({ success: false, error: 'The debit note has no line items. Add the extra goods or charges being billed.' });
+  config._tenantId = reqTenant(req);
+  { const a = actor(req); config._userId = a.userId || ''; config._userName = a.userName || ''; }
+  const dn = { ...invoice, _debitOf: { oriInvoiceId: String(originalInvoiceId), oriInvoiceNo: String(originalFDN || '') } };
+  delete dn.IsRefund; delete dn.isRefund;
+  if (reason && !dn.Notes) dn.Notes = String(reason);
+  try {
+    // URA wants a unique reference per document (URS 9.18), debit notes included.
+    const ref = String(dn.Reference || '').trim();
+    if (ref && !req.body.allowDuplicateRef) {
+      const dup = readSubmissionLog().find(e => e.status === 'success' && e.kind !== 'credit-note' && String(e.reference || '').trim().toLowerCase() === ref.toLowerCase() && String(e.tin || config.tin) === String(config.tin));
+      if (dup) return res.json({ success: false, duplicateRef: true, existingFdn: dup.fdn || '',
+        error: `Reference "${ref}" was already fiscalised (FDN ${dup.fdn || '?'}). Use a new number for this debit note.` });
+    }
+    const targets = efrisEndpoints(config);
+    let result = null, lastNetErr = null, lastEndpointErr = null, uncertain = false;
+    for (const t of targets) {
+      try {
+        result = await performInvoiceSubmission(dn, cfgForTarget(config, t), t.url);
+        if (t.kind === 'enabler' && result) result.viaEnabler = true;
+        lastNetErr = null; lastEndpointErr = null;
+        break;
+      } catch (subErr) {
+        if (subErr.uncertain) { lastNetErr = subErr; uncertain = true; break; }
+        if (isNetworkError(subErr)) { lastNetErr = subErr; console.log(`   ${t.kind} unreachable: ${subErr.message}`); continue; }
+        if (subErr.endpointFailure) { lastEndpointErr = subErr; continue; }
+        throw subErr;
+      }
+    }
+    if (!result && lastEndpointErr && !lastNetErr) return res.json({ success: false, endpointError: true, error: lastEndpointErr.message });
+    if (!result && uncertain) return res.json({ success: false, uncertain: true, error: 'EFRIS did not answer in time, so it may already have this debit note. Check Documents (or EFRIS) for reference "' + ref + '" before sending it again.' });
+    if (!result) return res.json({ success: false, offline: true, error: 'EFRIS is unreachable, so the debit note was not issued. Debit notes are not saved offline; try again when the connection is back.' });
+    if (result.ok) console.log(`   Debit note ${ref || '?'} on ${originalFDN || originalInvoiceId} issued: FDN ${result.fdn}`);
+    return res.json(result.ok
+      ? { success: true, fdn: result.fdn, qrCode: result.qrCode, antifakeCode: result.antifakeCode, validationUrl: result.validationUrl, deviceNo: result.deviceNo, issuedDate: result.issuedDate, invoiceId: result.invoiceId, viaEnabler: !!result.viaEnabler, returnCode: result.returnCode, returnMessage: result.returnMessage }
+      : { success: false, error: 'URA ' + result.returnCode + ': ' + result.returnMessage, returnCode: result.returnCode });
+  } catch (e) {
+    logger.error('debit-note failed', { message: redactSecrets(e && e.message, req) });
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ── URA exchange rate (T121): 1 unit of `currency` = rate UGX, cached 6 hours ──
+const _uraRateCache = {};
+app.post('/api/efris/exchange-rate', async (req, res) => {
+  const { config } = req.body || {};
+  const cur = String((req.body || {}).currency || '').trim().toUpperCase();
+  if (!config || !config.tin || !/^[A-Z]{3}$/.test(cur)) return res.status(400).json({ success: false, error: 'config and a 3-letter currency code are required' });
+  if (cur === 'UGX') return res.json({ success: true, currency: 'UGX', rate: 1, source: 'URA' });
+  const ck = (config.mode === 'production' ? 'p|' : 's|') + cur;
+  const hit = _uraRateCache[ck];
+  if (hit && Date.now() - hit.ts < 6 * 3600000) return res.json({ success: true, currency: cur, rate: hit.rate, source: 'URA', cached: true });
+  try {
+    const { eu, cfg, session } = await efrisQuerySession(config);
+    const r = await efrisSecure(eu, 'T121', { currency: cur }, cfg.tin, cfg.deviceNo, session);
+    const { rc, rm } = efrisRcOf(r);
+    if (rc !== '00') return res.json({ success: false, error: 'URA ' + rc + ': ' + rm });
+    let d = efrisContentJson(r, session) || {};
+    if (Array.isArray(d)) d = d.find(x => String(x.currency || '').toUpperCase() === cur) || d[0] || {};
+    const rate = parseFloat(d.rate);
+    if (!(rate > 0)) return res.json({ success: false, error: 'URA has no exchange rate for ' + cur + '.' });
+    _uraRateCache[ck] = { ts: Date.now(), rate };
+    res.json({ success: true, currency: cur, rate, source: 'URA' });
+  } catch (e) {
+    logger.error('exchange-rate failed', { message: redactSecrets(e && e.message, req) });
+    res.json({ success: false, error: efrisFriendly(e, 'the URA rate could not be read') });
+  }
+});
+
+// ── Reconciliation: URA vs Manager ────────────────────────────
+// Every row of a Manager list (pageSize/skip paging). soft: a missing list is empty.
+async function mgrListAll(ep, tk, listPath, props, soft) {
+  const out = [], size = 500;
+  for (let page = 0; page < 40; page++) {
+    const r = await managerCall(ep, tk, 'GET', listPath + (listPath.includes('?') ? '&' : '?') + 'pageSize=' + size + '&skip=' + (page * size), null);
+    if (r.status !== 200 || !r.data || typeof r.data !== 'object') {
+      if (page === 0 && !soft) throw new Error('Manager ' + listPath + ' returned HTTP ' + r.status);
+      break;
+    }
+    let arr = null;
+    for (const p of props) if (Array.isArray(r.data[p])) { arr = r.data[p]; break; }
+    if (!arr) arr = Object.values(r.data).find(Array.isArray) || [];
+    out.push(...arr);
+    const total = Number(r.data.totalRecords);
+    if (arr.length < size || (total && out.length >= total)) break;
+  }
+  return out;
+}
+const mgrNum = v => { if (v == null) return 0; if (typeof v === 'object') v = v.value != null ? v.value : (v.amount != null ? v.amount : 0); return parseFloat(v) || 0; };
+// T106 (issued invoices/receipts/notes) for a date range, all pages (max 20).
+async function t106All(config, startDate, endDate) {
+  const { eu, cfg, session } = await efrisQuerySession(config);
+  const out = [];
+  for (let p = 1; p <= 20; p++) {
+    const body = {
+      oriInvoiceNo: '', invoiceNo: '', deviceNo: '', buyerTin: '', buyerLegalName: '', buyerNinBrn: '',
+      combineKeywords: '', invoiceType: '', invoiceKind: '', isInvalid: '', isRefund: '',
+      startDate, endDate, pageNo: String(p), pageSize: '99',
+      referenceNo: '', branchName: '', queryType: '1',
+      dataSource: '', sellerTinOrNin: cfg.tin, currencyType: '', invoiceIndustryCode: '',
+    };
+    const r = await efrisSecure(eu, 'T106', body, cfg.tin, cfg.deviceNo, session);
+    const { rc, rm } = efrisRcOf(r);
+    if (rc !== '00') { if (p === 1) throw new Error('URA ' + rc + ': ' + rm); break; }
+    const d = efrisContentJson(r, session) || {};
+    const recs = d.records || d.invoiceList || d.list || (Array.isArray(d) ? d : []);
+    out.push(...recs);
+    if (p >= (Number(d.page && d.page.pageCount) || 1) || recs.length < 99) break;
+  }
+  return out;
+}
+function t106Kind(r) {
+  const t = String(r.invoiceType || '');
+  if (t === '2') return 'credit-note';
+  if (t === '4') return 'debit-note';
+  return String(r.invoiceKind || '') === '2' ? 'receipt' : 'invoice';
+}
+
+// URA T106 dates come as dd/MM/yyyy[ HH:mm:ss]; return yyyy-MM-dd so the page does not read them as MM/dd.
+function uraIsoDate(v) {
+  const t = String(v || '');
+  const m = t.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : t.slice(0, 10);
+}
+app.post('/api/reconcile/documents', async (req, res) => {
+  const { config, startDate, endDate, managerEndpoint, accessToken } = req.body || {};
+  const dOk = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ''));
+  if (!config || !config.tin || !dOk(startDate) || !dOk(endDate)) return res.status(400).json({ success: false, error: 'config, startDate and endDate (yyyy-MM-dd) are required' });
+  if (!managerEndpoint || !accessToken) return res.status(400).json({ success: false, error: 'Manager endpoint and access token are required' });
+  try {
+    const ura = (await t106All(config, startDate, endDate)).map(r => ({
+      fdn: String(r.invoiceNo || '').trim(), reference: String(r.referenceNo || '').trim(), amount: parseFloat(r.grossAmount) || 0,
+      currency: r.currency || '', date: uraIsoDate(r.issuedDate || r.issuedDateStr), kind: t106Kind(r) }));
+    const ep = normEp(managerEndpoint);
+    const [inv, rcp, cn] = await Promise.all([
+      mgrListAll(ep, accessToken, '/sales-invoices', ['salesInvoices', 'SalesInvoices'], false),
+      mgrListAll(ep, accessToken, '/receipts', ['receipts', 'Receipts'], true),
+      mgrListAll(ep, accessToken, '/credit-notes', ['creditNotes', 'CreditNotes'], true),
+    ]);
+    const mgrDoc = (x, type) => ({
+      reference: String(x.reference || x.Reference || '').trim(), type,
+      amount: mgrNum(x.invoiceAmount || x.amount || x.creditNoteAmount || x.total || x.Amount),
+      date: String(x.issueDate || x.date || x.IssueDate || x.Date || '').slice(0, 10), key: bareKey(x.key || x.Key),
+      text: String(x.reference || x.Reference || '') + ' ' + String(x.description || x.Description || '') });
+    const mgr = [].concat(inv.map(x => mgrDoc(x, 'invoice')), rcp.map(x => mgrDoc(x, 'receipt')), cn.map(x => mgrDoc(x, 'credit-note')))
+      .filter(m => m.date >= startDate && m.date <= endDate);
+    const byRef = {}, byFdn = {};
+    ura.forEach((u, i) => { if (u.reference) (byRef[u.reference.toLowerCase()] = byRef[u.reference.toLowerCase()] || []).push(i); if (u.fdn) byFdn[u.fdn] = i; });
+    const used = new Set(), onlyManager = [], amountMismatch = [];
+    let matched = 0;
+    for (const m of mgr) {
+      let i = (byRef[m.reference.toLowerCase()] || []).find(j => !used.has(j));
+      if (i == null) for (const f of (m.text.match(/\d{10,}/g) || [])) { if (byFdn[f] != null && !used.has(byFdn[f])) { i = byFdn[f]; break; } }
+      if (i == null) { onlyManager.push({ reference: m.reference, type: m.type, amount: m.amount, date: m.date, key: m.key }); continue; }
+      used.add(i); matched++;
+      const u = ura[i];
+      if (Math.abs(Math.abs(u.amount) - Math.abs(m.amount)) > 1) amountMismatch.push({ reference: m.reference || u.reference, fdn: u.fdn, uraAmount: u.amount, managerAmount: m.amount });
+    }
+    const onlyUra = ura.filter((u, i) => !used.has(i));
+    // A receipt that only pays sales invoices is a payment, not a sale: URA never has
+    // it. Read the unmatched receipts' lines and list those separately.
+    const payments = [], notAtUra = [];
+    for (const m of onlyManager) {
+      let isPayment = false;
+      if (m.type === 'receipt' && m.key) {
+        try {
+          const f = await managerCall(ep, accessToken, 'GET', '/receipt-form/' + bareKey(m.key), null);
+          const ls = (f.data && Array.isArray(f.data.Lines)) ? f.data.Lines : [];
+          isPayment = ls.length > 0 && ls.every(l => l && l.AccountsReceivableSalesInvoice && !l.Item);
+        } catch (_) {}
+      }
+      (isPayment ? payments : notAtUra).push(m);
+    }
+    console.log(`   Reconcile ${startDate}..${endDate}: URA ${ura.length}, Manager ${mgr.length}, matched ${matched}, mismatched amounts ${amountMismatch.length}, invoice payments ${payments.length}`);
+    res.json({ success: true, counts: { ura: ura.length, manager: mgr.length - payments.length, matched, payments: payments.length }, onlyUra, onlyManager: notAtUra, payments, amountMismatch });
+  } catch (e) {
+    logger.error('reconcile/documents failed', { message: redactSecrets(e && e.message, req) });
+    res.json({ success: false, error: efrisFriendly(e, 'the documents could not be compared') });
+  }
+});
+
+// Current stock EFRIS holds for a registered good (field name varies by version).
+function goodsStockOf(it) {
+  for (const c of [it.stockQuantity, it.goodsStock, it.remainingStock, it.currentStock, it.stock, it.stockValue, it.stockQty]) {
+    if (c != null && c !== '') { const n = parseFloat(c); if (isFinite(n)) return n; }
+  }
+  return null;
+}
+// Every good registered under the TIN (T127), all pages.
+async function t127All(config) {
+  const { eu, cfg, session } = await efrisQuerySession(config);
+  const out = [];
+  for (let p = 1; p <= 30; p++) {
+    const r = await efrisSecure(eu, 'T127', { goodsCode: '', goodsName: '', commodityCategoryCode: '', pageNo: String(p), pageSize: '99' }, cfg.tin, cfg.deviceNo, session);
+    const { rc, rm } = efrisRcOf(r);
+    if (rc !== '00' && rc !== '45') { if (p === 1) throw new Error('URA ' + rc + ': ' + rm); break; }
+    const d = efrisContentJson(r, session) || {};
+    const recs = d.records || d.goodsList || d.list || (Array.isArray(d) ? d : []);
+    out.push(...recs);
+    if (p >= (Number(d.page && d.page.pageCount) || 1) || recs.length < 99) break;
+  }
+  return out;
+}
+
+app.post('/api/reconcile/stock', async (req, res) => {
+  const { config, managerEndpoint, accessToken } = req.body || {};
+  if (!config || !config.tin) return res.status(400).json({ success: false, error: 'config.tin required' });
+  if (!managerEndpoint || !accessToken) return res.status(400).json({ success: false, error: 'Manager endpoint and access token are required' });
+  try {
+    // Services (serviceMark 101) carry no stock.
+    const goods = (await t127All(config)).filter(g => String(g.serviceMark || '') !== '101').map(g => ({
+      name: String(g.goodsName || g.name || '').trim(), code: String(g.goodsCode || g.itemCode || '').trim(), qty: goodsStockOf(g) || 0 }));
+    const ep = normEp(managerEndpoint);
+    let items = await mgrListAll(ep, accessToken, '/inventory-items', ['inventoryItems', 'InventoryItems'], false);
+    const qtyOf = i => { for (const k of ['qtyOnHand', 'QtyOnHand', 'qtyOwned', 'QtyOwned', 'quantityOnHand', 'QuantityOnHand', 'qty', 'Qty']) if (i[k] != null) return mgrNum(i[k]); return null; };
+    if (items[0]) console.log('   Reconcile stock: Manager inventory list fields: ' + Object.keys(items[0]).join(', '));
+    // The default list columns may leave out the quantity: ask for it by name.
+    if (items.length && !items.some(i => qtyOf(i) != null)) {
+      try {
+        const extra = await mgrListAll(ep, accessToken, '/inventory-items?fields=ItemCode&fields=ItemName&fields=QtyOnHand&fields=QtyOwned', ['inventoryItems', 'InventoryItems'], true);
+        const byKey = {}; extra.forEach(x => { byKey[x.key || x.Key] = x; });
+        items = items.map(i => { const x = byKey[i.key || i.Key]; return x ? { ...i, ...x, _q: qtyOf(x) } : i; });
+      } catch (e) { console.log('   Reconcile stock: quantity column not available: ' + e.message); }
+    }
+    const mgr = items.map(i => ({
+      name: String(i.ItemName || i.itemName || i.name || i.Name || '').trim(), code: String(i.ItemCode || i.itemCode || i.code || i.Code || '').trim(),
+      qty: i._q != null ? i._q : (qtyOf(i) || 0), key: bareKey(i.key || i.Key) }));
+    const used = new Set(), rows = [], onlyUra = [];
+    const r3 = n => Math.round(n * 1000) / 1000;
+    for (const g of goods) {
+      let j = g.code ? mgr.findIndex((m, k) => !used.has(k) && m.code && m.code.toUpperCase() === g.code.toUpperCase()) : -1;
+      if (j < 0 && g.name) j = mgr.findIndex((m, k) => !used.has(k) && m.name.toLowerCase() === g.name.toLowerCase());
+      if (j < 0) { onlyUra.push({ name: g.name, code: g.code, uraQty: g.qty }); continue; }
+      used.add(j);
+      rows.push({ name: g.name || mgr[j].name, code: g.code || mgr[j].code, uraQty: g.qty, managerQty: mgr[j].qty, diff: r3(mgr[j].qty - g.qty) });
+    }
+    const onlyManager = mgr.filter((m, k) => !used.has(k)).map(m => ({ name: m.name, code: m.code, managerQty: m.qty, key: m.key }));
+    console.log(`   Reconcile stock: URA ${goods.length} goods, Manager ${mgr.length} items, matched ${rows.length}, differing ${rows.filter(r => r.diff).length}`);
+    res.json({ success: true, rows, onlyUra, onlyManager });
+  } catch (e) {
+    logger.error('reconcile/stock failed', { message: redactSecrets(e && e.message, req) });
+    res.json({ success: false, error: efrisFriendly(e, 'stock could not be compared') });
+  }
+});
+
 // ── Stock-in (T131) ───────────────────────────────────────────
 app.post('/api/efris/stock-in', rateLimit(30), async (req, res) => {
   const { supplierName, supplierTin, stockInDate, stockInType, branchId, remarks, productionBatchNo, productionDate, items, config } = req.body || {};
   if (!items || !items.length || !config || !config.tin) return res.status(400).json({ success: false, error: 'items and config required' });
-  const eu = config.mode === 'production'
-    ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
-    : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+  // operationType 101 (stock-in) mandates a supplier name (URA 2081). Reject early
+  // with a clear message rather than after a round-trip to EFRIS.
+  if (!supplierName || !String(supplierName).trim()) {
+    return res.status(400).json({ success: false, error: 'Supplier Name is required for a stock-in (URA 2081). Enter the supplier you bought the stock from.' });
+  }
+  const eu = uraUrl(config.mode);
   try {
-    const session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
+    let session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
     if (!session.aesKey) throw new Error('No AES key for T131');
     // EFRIS T131 requires the header wrapped in `goodsStockIn` and items in
     // `goodsStockInItem`. operationType lives ONLY in the header (101 = stock-in).
@@ -3209,7 +5817,7 @@ app.post('/api/efris/stock-in', rateLimit(30), async (req, res) => {
         supplierTin:       supplierTin || '',
         supplierName:      supplierName || '',
         remarks:           remarks || '',
-        stockInDate:       (stockInDate || new Date().toISOString().slice(0,10)).slice(0,10),
+        stockInDate:       (stockInDate || eatToday()).slice(0,10),
         stockInType:       stockInType || '104',
         productionBatchNo: productionBatchNo || '',
         productionDate:    productionDate || '',
@@ -3241,7 +5849,11 @@ app.post('/api/efris/stock-in', rateLimit(30), async (req, res) => {
       rc = t131.data && t131.data.returnStateInfo ? t131.data.returnStateInfo.returnCode : null;
       rm = t131.data && t131.data.returnStateInfo ? t131.data.returnStateInfo.returnMessage : '';
       if (rc !== '15') break;
-      console.log(`   T131 rc 15 (transient decrypt error) - retry ${attempt}/3`);
+      // rc:15 means the cached AES key rotated on EFRIS's side - renew it before the
+      // next attempt (the following env is rebuilt with the new session key).
+      console.log(`   T131 rc 15 (stale session key) - renewing session, retry ${attempt}/3`);
+      invalidateSession(config.tin, config.deviceNo);
+      session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
     }
     let errors = [], rawContent = null;
     if (t131.data && t131.data.data && t131.data.data.content) {
@@ -3275,11 +5887,9 @@ app.post('/api/efris/stock-in', rateLimit(30), async (req, res) => {
 app.post('/api/efris/stock-adjust', async (req, res) => {
   const { adjustDate, adjustType, branchId, remarks, items, config } = req.body || {};
   if (!items || !items.length || !config || !config.tin) return res.status(400).json({ success: false, error: 'items and config required' });
-  const eu = config.mode === 'production'
-    ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
-    : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+  const eu = uraUrl(config.mode);
   try {
-    const session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
+    let session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
     if (!session.aesKey) throw new Error('No AES key for stock adjust');
     // Stock adjustment is the SAME T131 interface with operationType 102 (decrease)
     // plus an adjustType. Same goodsStockIn/goodsStockInItem wrapper as stock-in -
@@ -3291,7 +5901,7 @@ app.post('/api/efris/stock-adjust', async (req, res) => {
         supplierName:     '',
         adjustType:       adjustType || '102',
         remarks:          remarks || '',
-        stockInDate:      (adjustDate || new Date().toISOString().slice(0,10)).slice(0,10),
+        stockInDate:      (adjustDate || eatToday()).slice(0,10),
         branchId:         branchId || '',
         invoiceNo:        '',
         rollBackIfError:  '1',
@@ -3311,6 +5921,10 @@ app.post('/api/efris/stock-adjust', async (req, res) => {
       rc = t132.data && t132.data.returnStateInfo ? t132.data.returnStateInfo.returnCode : null;
       rm = t132.data && t132.data.returnStateInfo ? t132.data.returnStateInfo.returnMessage : '';
       if (rc !== '15') break;
+      // rc:15 = stale AES key; renew the session before retrying.
+      console.log(`   T131(adjust) rc 15 (stale session key) - renewing session, retry ${attempt}/3`);
+      invalidateSession(config.tin, config.deviceNo);
+      session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
     }
     let errors = [];
     if (t132.data && t132.data.data && t132.data.data.content) {
@@ -3345,10 +5959,13 @@ app.post('/api/efris/preview-invoice', async (req, res) => {
 
 // Write EFRIS fiscal data (FDN/QR/etc.) back onto the source Manager document.
 // Shared by the save-to-manager endpoint and the offline-queue flush.
-async function saveEfrisToManager(ep, accessToken, key, efrisData, vatRegistered) {
-  let formBase = '/sales-invoice-form';
-  let getR = await managerCall(ep, accessToken, 'GET', '/sales-invoice-form/' + key, null);
-  if (getR.status !== 200 || (getR.data && getR.data.error)) {
+// opts (credit notes): { formBase, status, note } - only that form, given status,
+// note appended to the description, title left alone.
+async function saveEfrisToManager(ep, accessToken, key, efrisData, vatRegistered, opts) {
+  opts = opts || {};
+  let formBase = opts.formBase || '/sales-invoice-form';
+  let getR = await managerCall(ep, accessToken, 'GET', formBase + '/' + key, null);
+  if (!opts.formBase && (getR.status !== 200 || (getR.data && getR.data.error))) {
     const rcptR = await managerCall(ep, accessToken, 'GET', '/receipt-form/' + key, null);
     if (rcptR.status === 200 && rcptR.data && !rcptR.data.error) { getR = rcptR; formBase = '/receipt-form'; }
   }
@@ -3364,10 +5981,14 @@ async function saveEfrisToManager(ep, accessToken, key, efrisData, vatRegistered
   setCFAny(['EFRIS Device Number', 'Device Number'], efrisData.deviceNo);
   setCFAny(['EFRIS Issued Time', 'Issued Time'], efrisData.issuedDate ? new Date(efrisData.issuedDate).toLocaleString('en-UG', { timeZone: 'Africa/Kampala' }) : '');
   if (efrisData.invoiceId) setCFAny(['EFRIS Invoice ID', 'Invoice ID'], efrisData.invoiceId);
-  setCFAny(['Status', 'EFRIS Status'], 'Submitted');
-  setCFAny(['Submission Date', 'EFRIS Submission Date'], new Date().toISOString().slice(0,10));
+  setCFAny(['Status', 'EFRIS Status'], opts.status || 'Submitted');
+  setCFAny(['Submission Date', 'EFRIS Submission Date'], eatToday());
+  if (efrisData.operator) setCFAny(['Issued By', 'Issued by', 'Served By', 'Operator'], efrisData.operator);   // the person URA recorded as operator
+  // A document saved in Manager without a reference takes the number sent to URA.
+  if (efrisData.reference && !String(form.Reference || '').trim()) form.Reference = String(efrisData.reference);
+  if (opts.note && !String(form.Description || '').includes(opts.note)) form.Description = (form.Description ? form.Description + ' | ' : '') + opts.note;
   const docTypeLabel = vatRegistered ? 'Tax Invoice' : 'e-Receipt';
-  if ('CustomTitle' in form || form.CustomTitle === undefined) form.CustomTitle = docTypeLabel;
+  if (!opts.formBase && ('CustomTitle' in form || form.CustomTitle === undefined)) form.CustomTitle = docTypeLabel;
   const postR = await managerCall(ep, accessToken, 'POST', formBase + '/' + key, form);
   const ok = postR.status === 200 || postR.status === 201 || postR.status === 204;
   return ok ? { success: true } : { success: false, error: 'Manager POST returned ' + postR.status };
@@ -3389,9 +6010,16 @@ app.post('/api/efris/save-to-manager', async (req, res) => {
 
 // Create a credit note in Manager linked to the original invoice/receipt
 app.post('/api/manager/create-credit-note', async (req, res) => {
-  const { managerEndpoint, accessToken, originalKey, originalDocType, reason, referenceNo, efrisFdn, efrisInvoiceId, efrisAntifake, efrisQr, efrisSubDate } = req.body || {};
-  if (!managerEndpoint || !accessToken || !originalKey) return res.status(400).json({ success: false, error: 'Missing required fields' });
+  const { managerEndpoint, accessToken, originalDocType, reason, referenceNo, efrisFdn, efrisInvoiceId, efrisAntifake, efrisQr, efrisSubDate, items, originalReference } = req.body || {};
+  let originalKey = bareKey((req.body || {}).originalKey || '');
+  if (!managerEndpoint || !accessToken || (!originalKey && !originalReference)) return res.status(400).json({ success: false, error: 'Missing required fields' });
   const ep = normEp(managerEndpoint);
+  // Opened from the Credit Note tab there is no document key: find the original in
+  // Manager by its reference (the number sent to URA).
+  if (!originalKey) {
+    originalKey = await findMgrDocByReference(ep, accessToken, originalReference);
+    if (!originalKey) return res.json({ success: false, error: 'No sales invoice or receipt with reference "' + originalReference + '" was found in Manager, so the credit note was not recorded there. Create it in Manager by hand.' });
+  }
   // Overwrite a credit-note form's EFRIS custom fields with the CREDIT NOTE's own
   // values (so it doesn't inherit the original invoice's FDN/QR when cloned).
   const applyCnEfris = (form, cfMeta) => {
@@ -3429,7 +6057,7 @@ app.post('/api/manager/create-credit-note', async (req, res) => {
   // a negative sales invoice). POST directly - Manager form endpoints 500/404 on a
   // bare GET, so we must not GET-probe them.
   let cfMeta = null; try { cfMeta = await mgrTextCustomFields(ep, accessToken); } catch (_) {}
-  const today = new Date().toISOString().slice(0, 10);
+  const today = eatToday();
   // Reference: prefer the caller's clean reference; never fall back to the raw key.
   const cnRef = referenceNo || ('CN-' + (origForm.Reference || origForm.InvoiceNumber || ''));
   const cnForm = {
@@ -3440,12 +6068,35 @@ app.post('/api/manager/create-credit-note', async (req, res) => {
   };
   if (origForm.Customer) cnForm.Customer = origForm.Customer;
   else if (origForm.Contact) cnForm.Contact = origForm.Contact;
-  // Invoice/receipt lines store the price as SalesUnitPrice (UnitPrice is usually empty),
-  // which is why the credit note showed 0.00. Read both and write both.
-  if (Array.isArray(origForm.Lines)) cnForm.Lines = origForm.Lines.map(l => {
-    const price = parseFloat(l.SalesUnitPrice != null ? l.SalesUnitPrice : (l.UnitPrice != null ? l.UnitPrice : l.Amount)) || 0;
-    return { Item: l.Item, LineDescription: l.LineDescription, Qty: parseFloat(l.Qty) || 1, UnitPrice: price, SalesUnitPrice: price };
-  });
+  else {
+    // A walk-in receipt has no customer, and Manager puts a credit note without one
+    // into Suspense. Use (or create) a "Walk-in Customer".
+    try {
+      const cl = await managerCall(ep, accessToken, 'GET', '/customers?pageSize=500', null);
+      const arr = (cl.data && (cl.data.customers || cl.data.Customers)) || [];
+      const hit = arr.find(c => /^walk-?in customer$/i.test(String(c.name || c.Name || '').trim()));
+      let ck = hit ? bareKey(hit.key || hit.Key) : '';
+      if (!ck) {
+        const cr = await managerCall(ep, accessToken, 'POST', '/customer-form', { Name: 'Walk-in Customer' });
+        ck = bareKey((cr.data && (cr.data.Key || cr.data.key || cr.data.id)) || cr.location || '');
+        if (ck) console.log('   Created customer "Walk-in Customer" for credit notes on walk-in receipts');
+      }
+      if (ck) cnForm.Customer = ck;
+    } catch (e) { console.log('   Could not set a customer on the credit note: ' + e.message); }
+  }
+  // Same price basis and tax codes as the original, so VAT is reversed correctly.
+  if (origForm.AmountsIncludeTax != null) cnForm.AmountsIncludeTax = origForm.AmountsIncludeTax;
+  // Manager receipts have no such flag: their prices include tax. A credit note's
+  // prices exclude tax unless told otherwise, which would add VAT on top again
+  // (a 1,000 receipt became a 1,180 credit note).
+  else if (origFormBase === '/receipt-form') cnForm.AmountsIncludeTax = true;
+  if (origForm.TaxCodeEnabled != null) cnForm.TaxCodeEnabled = origForm.TaxCodeEnabled;
+  // Print with the same theme as the original (Manager has no form defaults over the API).
+  if (origForm.CustomThemeId) { cnForm.CustomTheme = true; cnForm.CustomThemeId = origForm.CustomThemeId; }
+  if (origFormBase === '/sales-invoice-form') cnForm.SalesInvoice = originalKey;   // links the credit note to the invoice
+  const credLines = await creditLinesFrom(ep, accessToken, origForm.Lines || [], items);
+  if (!credLines.length) return res.json({ success: false, error: 'None of the credited items match a line on the original document, so nothing was recorded in Manager.' });
+  cnForm.Lines = credLines;
   if (cfMeta) applyCnEfris(cnForm, cfMeta);
   const cnPaths = ['/credit-note-form', '/sales-credit-note-form', '/customer-credit-note-form'];
   let lastCnErr = '';
@@ -3460,8 +6111,16 @@ app.post('/api/manager/create-credit-note', async (req, res) => {
         console.log(`   Manager credit note created via ${path} → key: ${newKey || 'unknown'}`);
         return res.json({ success: true, key: newKey, method: path });
       }
-      if (r.status !== 404) lastCnErr = `${path} HTTP ${r.status}: ${JSON.stringify(r.data || '').slice(0, 150)}`;
-    } catch (e) { lastCnErr = path + ': ' + e.message; }
+      // Only "no such form" (404) means try the next path. Any other answer is
+      // Manager rejecting this credit note; creating a negative invoice instead
+      // would hide that and could book the credit twice.
+      if (r.status !== 404) {
+        const err = `${path} HTTP ${r.status}: ${JSON.stringify(r.data || '').slice(0, 150)}`;
+        console.log('   Manager credit note not created: ' + err);
+        return res.json({ success: false, error: 'Manager did not accept the credit note (' + err + ')' });
+      }
+      lastCnErr = path + ' HTTP 404';
+    } catch (e) { return res.json({ success: false, error: 'Manager credit note failed (' + path + ': ' + e.message + ')' }); }
   }
   console.log(`   No native credit-note endpoint worked (${lastCnErr}) - using negative-invoice fallback`);
 
@@ -3473,15 +6132,15 @@ app.post('/api/manager/create-credit-note', async (req, res) => {
     fallbackForm.Date = today; fallbackForm.IssueDate = today;
     fallbackForm.Reference = cnRef;
     fallbackForm.Description = reason + (efrisFdn ? ' | Credit Note FDN: ' + efrisFdn : '');
-    if (fallbackForm.Lines) {
-      fallbackForm.Lines = fallbackForm.Lines.map(l => {
-        const price = parseFloat(l.SalesUnitPrice != null ? l.SalesUnitPrice : (l.UnitPrice != null ? l.UnitPrice : l.Amount)) || 0;
-        return { ...l, Qty: -(parseFloat(l.Qty) || 1), UnitPrice: price, SalesUnitPrice: price };
-      });
-    }
+    fallbackForm.Lines = credLines.map(l => ({ ...l, Qty: -(parseFloat(l.Qty) || 1) }));
     // Overwrite the cloned (original's) EFRIS custom fields with the credit note's.
     try { const cfMeta = await mgrTextCustomFields(ep, accessToken); applyCnEfris(fallbackForm, cfMeta); } catch (_) {}
     const fallR = await managerCall(ep, accessToken, 'POST', origFormBase, fallbackForm);
+    if (!(fallR.status >= 200 && fallR.status < 300) || (fallR.data && fallR.data.error)) {
+      const err = `${origFormBase} HTTP ${fallR.status}: ${JSON.stringify(fallR.data || '').slice(0, 150)}`;
+      console.log('   Fallback credit note not created: ' + err);
+      return res.json({ success: false, error: 'Manager did not accept the credit note (' + err + ')' });
+    }
     let newKey = null;
     if (fallR.data && fallR.data.key) newKey = fallR.data.key;
     else if (Array.isArray(fallR.data) && fallR.data.length) newKey = fallR.data[fallR.data.length - 1].key;
@@ -3492,14 +6151,55 @@ app.post('/api/manager/create-credit-note', async (req, res) => {
   }
 });
 
+// Key of the Manager sales invoice or receipt whose Reference is `ref`.
+async function findMgrDocByReference(ep, tk, ref) {
+  ref = String(ref || '').trim(); if (!ref) return '';
+  for (const [list, prop] of [['/sales-invoices', 'salesInvoices'], ['/receipts', 'receipts']]) {
+    try {
+      const r = await managerCall(ep, tk, 'GET', list + '?term=' + encodeURIComponent(ref), null);
+      const arr = (r.data && (r.data[prop] || r.data[prop.charAt(0).toUpperCase() + prop.slice(1)])) || [];
+      const hit = arr.find(x => String(x.reference || x.Reference || '').trim() === ref);
+      if (hit) return bareKey(hit.key || hit.Key);
+    } catch (_) {}
+  }
+  return '';
+}
+// The credit note's lines: the original's lines (item, account, tax code kept) with
+// the CREDITED quantity, matched by item code, else by name. Without `items`, the
+// whole document is credited (the old behaviour).
+async function creditLinesFrom(ep, tk, origLines, items) {
+  const priceOf = l => parseFloat(l.SalesUnitPrice != null ? l.SalesUnitPrice : (l.UnitPrice != null ? l.UnitPrice : l.Amount)) || 0;
+  const base = l => { const p = priceOf(l); const o = { ...l, UnitPrice: p, SalesUnitPrice: p }; delete o.Key; delete o.key; return o; };
+  if (!Array.isArray(items) || !items.length) return origLines.map(l => ({ ...base(l), Qty: parseFloat(l.Qty) || 1 }));
+  const info = [];
+  for (const l of origLines) {
+    let code = '', name = String(l.LineDescription || '').split('\n')[0];
+    if (l.Item) {
+      let it = null;
+      try { it = (await managerCall(ep, tk, 'GET', '/inventory-item-form/' + l.Item)).data; } catch (_) {}
+      if (!it || it.error) { try { it = (await managerCall(ep, tk, 'GET', '/non-inventory-item-form/' + l.Item)).data; } catch (_) {} }
+      if (it && !it.error) { code = it.ItemCode || it.Code || ''; name = it.Name || it.ItemName || name; }
+    }
+    info.push({ l, code: code.toLowerCase(), name: name.toLowerCase(), used: false });
+  }
+  const out = [];
+  for (const it of items) {
+    const qty = Math.abs(parseFloat(it.quantity != null ? it.quantity : it.qty) || 0); if (!qty) continue;
+    const c = String(it.itemCode || '').trim().toLowerCase(), n = String(it.itemName || '').trim().toLowerCase();
+    const m = info.find(x => !x.used && c && x.code === c) || info.find(x => !x.used && n && x.name === n);
+    if (!m) continue;
+    m.used = true;
+    out.push({ ...base(m.l), Qty: qty });
+  }
+  return out;
+}
+
 // Return the live T115 dictionary's structure for inspection - used to identify
 // which section holds the goods measure-unit codes EFRIS validates against.
 app.post('/api/efris/dictionary-dump', async (req, res) => {
   const { tin, deviceNo, efrisPassword, mode } = req.body || {};
   if (!tin || !deviceNo) return res.status(400).json({ success: false, error: 'tin and deviceNo required' });
-  const eu = mode === 'production'
-    ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation'
-    : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+  const eu = uraUrl(mode);
   try {
     const session = await getSession(tin, deviceNo, efrisPassword, eu, keyOverrideFrom(req.body));
     const dict = await getEfrisDictionary(tin, deviceNo, session, eu);
@@ -3558,6 +6258,15 @@ app.get('/api/manager/invoice', async (req, res) => {
   } catch(e) {
     res.json({ success: false, error: e.message });
   }
+});
+
+// Find a sales invoice or receipt in Manager by its reference (credit notes opened by FDN).
+app.get('/api/manager/find-doc', async (req, res) => {
+  const { ep, tk } = mgrCreds(req);
+  const ref = String(req.query.ref || '').trim();
+  if (!ep || !tk || !ref) return res.status(400).json({ success: false, error: 'ep, tk and ref are required' });
+  try { const key = await findMgrDocByReference(ep, tk, ref); res.json(key ? { success: true, key } : { success: false, error: 'not found' }); }
+  catch (e) { res.json({ success: false, error: e.message }); }
 });
 
 app.get('/api/manager/invoices', async (req, res) => {
@@ -3672,7 +6381,9 @@ function managerSignature(port, host) {
       r.on('end', () => {
         const ct = String(r.headers['content-type'] || '');
         const looksJson = ct.includes('json') || /^[\s]*[[{]/.test(body);
-        const authWall = r.statusCode === 401 || r.statusCode === 403;
+        const authWall = r.statusCode === 401 || r.statusCode === 403
+          // Manager Server Edition sends a browser without a session to its login page.
+          || (r.statusCode >= 300 && r.statusCode < 400 && /login|sign-?in|access-token/i.test(String(r.headers.location || '')));
         // A Manager server returns JSON on /api2 (200 or auth error). Reject plain
         // HTML unless it explicitly mentions Manager.
         if (looksJson || authWall || /manager/i.test(body)) resolve(true);
@@ -3690,10 +6401,10 @@ async function scanChunk(ports, host, openLimit) {
   await Promise.all(Array.from({ length: Math.min(CONC, ports.length) }, worker));
   return open;
 }
-app.post('/api/manager/detect', async (req, res) => {
+app.post('/api/manager/detect', rateLimit(6), async (req, res) => {
   const host = '127.0.0.1';
   // Ports people actually see for Manager (fixed installs / container host) - tried first.
-  const common = [8080, 8081, 8082, 8090, 8443, 8888, 8889, 9090, 9091, 9000, 55667, 44300, 3100];
+  const common = [5000, 8080, 8081, 8082, 8090, 8443, 8888, 8889, 9090, 9091, 9000, 55667, 44300, 3100];
   // Full ephemeral range where Manager's random port lives.
   const full = [];
   for (let p = 1024; p <= 65535; p++) if (!common.includes(p)) full.push(p);
@@ -3756,16 +6467,17 @@ let _connCache = { ts: 0, key: '', data: null };
 // Report reachability of URA (and the Enabler if configured) + offline-queue depth.
 app.get('/api/connectivity', async (req, res) => {
   const mode = (req.query.mode === 'production') ? 'production' : 'sandbox';
-  const enablerUrl = (req.query.enablerUrl || '').trim();
+  let enablerUrl = (req.query.enablerUrl || '').trim();
+  if (enablerUrl && !enablerUrlOk(enablerUrl)) enablerUrl = '';
   const enablerMode = (req.query.enablerMode || (enablerUrl ? 'fallback' : 'off'));
   const key = mode + '|' + enablerUrl + '|' + enablerMode;
   const now = Date.now();
   if (_connCache.data && _connCache.key === key && (now - _connCache.ts) < 15000) {
     return res.json({ ..._connCache.data, cached: true, pending: loadQueue().filter(e => e.status === 'pending').length });
   }
-  const uraHost = mode === 'production' ? 'https://efrisws.ura.go.ug/' : 'https://efristest.ura.go.ug/';
+  const uraPing = uraHost(mode);
   const [ura, enabler] = await Promise.all([
-    pingUrl(uraHost, 3500),
+    pingUrl(uraPing, 3500),
     enablerUrl ? pingUrl(enablerUrl, 2500) : Promise.resolve(null),
   ]);
   const data = { success: true, ura, enabler, enablerMode, mode };
@@ -3842,9 +6554,11 @@ async function fxFromCurrencyApi(target, date) {
 app.get('/api/fx-rate', async (req, res) => {
   const target = String(req.query.target || '').trim().toUpperCase();
   const date = String(req.query.date || '').trim();   // YYYY-MM-DD
-  const key = String(req.query.key || '').trim();
+  // ExchangeRate-API key: X-Fx-Key header, else FX_API_KEY env. ?key= is still
+  // accepted from older extensions; never logged.
+  const key = String(req.headers['x-fx-key'] || process.env.FX_API_KEY || req.query.key || '').trim();
   if (!target || target === 'UGX') return res.json({ success: true, rate: 1, source: 'UGX base' });
-  const today = new Date().toISOString().slice(0, 10);
+  const today = eatToday();
   const isPast = !!(date && date < today);
   // 0) Manager's own rate service - keyless, historical, matches Manager's books.
   try {
@@ -3859,7 +6573,7 @@ app.get('/api/fx-rate', async (req, res) => {
       if (j && j.result === 'success' && j.conversion_rates && j.conversion_rates.UGX > 0)
         return res.json({ success: true, rate: Math.round(j.conversion_rates.UGX * 10000) / 10000, date, source: 'ExchangeRate-API (' + date + ')', historical: true });
       if (j && j.result === 'error') console.log('FX history (key): ' + (j['error-type'] || 'error'));
-    } catch (e) { console.log('FX history (key) failed: ' + e.message); }
+    } catch (e) { console.log('FX history (key) failed: ' + String(e.message).split(key).join('[key]')); }
   }
   // 2) Keyless historical/latest via currency-api (default - no key needed).
   try {
@@ -3882,7 +6596,7 @@ app.get('/api/fx-rate', async (req, res) => {
 function fxFromManager(target, date) {
   return new Promise(resolve => {
     try {
-      const d = /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : new Date().toISOString().slice(0, 10);
+      const d = /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : eatToday();
       const body = JSON.stringify({
         BaseCurrency: { Code: 'UGX', Name: 'Uganda Shillings', Prefix: 'Ugx', Suffix: '/=', DecimalPlaces: null },
         ExchangeRate: { Date: d, Currency: { Code: String(target).toUpperCase() }, ExchangeRateValue: 0, ExchangeRateIsInverse: false },
@@ -3913,34 +6627,70 @@ app.post('/api/manager/set-exchange-rate', async (req, res) => {
   if (!ep || !tk || !cur || !(rt > 0)) {
     return res.status(400).json({ success: false, error: 'managerEndpoint, accessToken, currency and a positive rate are required' });
   }
-  const d = date || new Date().toISOString().slice(0, 10);
-  // Try the known Manager foreign-exchange-rate form path. Report the raw result
-  // so the operator (or a later verification pass) can see exactly what happened.
+  const d = date || eatToday();
+  // Manager keeps one record per date and currency (/exchange-rate-form) with the
+  // currency's own key and the rate in ExchangeRateValue (1 foreign = n base).
+  // Update the day's record when it exists instead of adding a duplicate.
   try {
-    const r = await managerCall(ep, tk, 'POST', '/foreign-exchange-rate-form', { Date: d, Currency: cur, Rate: rt });
-    if (r._html) return res.json({ success: false, error: 'Manager returned a login/HTML page - check the access token', verified: false });
+    const fc = await managerCall(ep, tk, 'GET', '/foreign-currencies', null);
+    if (fc._html) return res.json({ success: false, error: 'Manager returned a login/HTML page - check the access token', verified: false });
+    const curRec = ((fc.data && fc.data.foreignCurrencies) || []).find(c => String(c.code || '').toUpperCase() === cur);
+    if (!curRec) return res.json({ success: false, error: cur + ' is not set up in Manager (Settings > Currencies)', verified: false });
+    const curKey = curRec.key;
+    const body = { Date: d, Currency: curKey, ExchangeRateValue: rt };
+    let existing = null;
+    try {
+      const l = await managerCall(ep, tk, 'GET', '/exchange-rates?pageSize=200', null);
+      for (const x of ((l.data && l.data.exchangeRates) || []).filter(x => String(x.date || '').slice(0, 10) === d)) {
+        const f = await managerCall(ep, tk, 'GET', '/exchange-rate-form/' + x.key, null);
+        if (f.data && bareKey(f.data.Currency || '') === bareKey(curKey)) { existing = x.key; break; }
+      }
+    } catch (_) {}
+    const r = existing ? await managerCall(ep, tk, 'PUT', '/exchange-rate-form/' + existing, body)
+                       : await managerCall(ep, tk, 'POST', '/exchange-rate-form', body);
     const ok = r.status >= 200 && r.status < 300;
-    res.json({ success: ok, verified: ok, status: r.status, currency: cur, rate: rt, date: d,
-      note: ok ? 'Pushed to Manager (confirm it appears under Settings → Exchange Rates).'
-               : 'Manager did not accept the exchange-rate form - the path/fields need confirming for this build.', data: r.data });
+    console.log(`   Exchange rate ${ok ? (existing ? 'updated' : 'recorded') : 'NOT recorded'} in Manager: 1 ${cur} = ${rt} (${d})` + (ok ? '' : ' - HTTP ' + r.status));
+    res.json({ success: ok, verified: ok, status: r.status, currency: cur, rate: rt, date: d, updated: !!existing });
   } catch (e) { res.json({ success: false, error: e.message, verified: false }); }
 });
 
 // ── Currency scan: what base + foreign currencies does this Manager business have? ──
-app.get('/api/manager/currencies', async (req, res) => {
-  const { ep, tk } = mgrCreds(req);
-  if (!ep || !tk) return res.status(400).json({ success: false, error: 'ep and tk are required' });
+// Read Manager's base + foreign currencies. The base currency is a singleton
+// form exposed at slightly different paths across builds, so try a few and accept
+// any that yields a code. Shared by the Currencies tab endpoint and the readiness
+// audit so both report the same thing.
+// Manager's Base Currency is a built-in SINGLETON addressed by a fixed GUID (the
+// generic /base-currency-form path throws "not a valid GUID"). This is that GUID.
+const MGR_BASE_CURRENCY_GUID = '39dde4fc-7af8-44cc-8572-3b1ff4cfb918';
+// Manager (26.9) accepts writes to that singleton but its API answers GET on it
+// with 404, so a base currency that IS set cannot be read back. Remember each
+// successful set per business (keyed by a hash of endpoint + token, never the
+// token itself) and report that when Manager cannot.
+const BASE_CCY_FILE = path.join(DATA_DIR, 'base_currency.json');
+function baseCcyId(ep, tk) { return crypto.createHash('sha256').update(String(ep) + '|' + String(tk)).digest('hex').slice(0, 24); }
+function loadBaseCcy() { try { return JSON.parse(fs.readFileSync(BASE_CCY_FILE, 'utf8')); } catch (_) { return {}; } }
+function rememberBaseCcy(ep, tk, rec) {
+  const all = loadBaseCcy(); all[baseCcyId(ep, tk)] = Object.assign({ setAt: new Date().toISOString() }, rec);
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(BASE_CCY_FILE, JSON.stringify(all, null, 2)); } catch (e) { console.log('base currency record not saved: ' + e.message); }
+}
+async function readMgrCurrencies(ep, tk) {
   let base = null, foreign = [], baseDebug = {};
-  // Base currency is a singleton form. Different builds expose it at slightly
-  // different paths / shapes, so try a few and accept any that yields a code.
-  for (const p of ['/base-currency-form', '/base-currency', '/base-currency-settings']) {
+  for (const p of ['/base-currency-form/' + MGR_BASE_CURRENCY_GUID, '/base-currency-form', '/base-currency', '/base-currency-settings']) {
     try {
       const b = await managerCall(ep, tk, 'GET', p);
       baseDebug[p] = b.status;
       if (b.status === 200 && b.data && !b.data.error) {
         const d = b.data.baseCurrency || b.data.BaseCurrency || b.data;
-        const code = d.Code || d.code || d.currency || d.Currency || '';
+        // Handle the code as a nested object OR as a plain string (some builds
+        // return just "UGX"), plus a couple of extra key spellings.
+        const code = (typeof d === 'string' ? d : '')
+          || d.Code || d.code || d.currency || d.Currency || d.currencyCode || d.CurrencyCode
+          || (typeof b.data.BaseCurrency === 'string' ? b.data.BaseCurrency : '')
+          || '';
         if (code) { base = { code: String(code).toUpperCase(), name: d.Name || d.name || '' }; break; }
+        // 200 but nothing parseable - log the raw shape once so the parser can be
+        // matched exactly to this Manager build.
+        console.log(`   base-currency GET ${p} 200 but no code parsed; raw: ${JSON.stringify(b.data).slice(0, 400)}`);
       }
     } catch(_) {}
   }
@@ -3949,7 +6699,17 @@ app.get('/api/manager/currencies', async (req, res) => {
     const arr = (f.data && (f.data.foreignCurrencies || f.data.currencies || f.data.foreignCurrency)) || [];
     foreign = (Array.isArray(arr) ? arr : []).map(c => ({ key: c.key || c.Key || '', code: c.code || c.Code || '', name: c.name || c.Name || '' })).filter(c => c.code);
   } catch(_) {}
-  res.json({ success: true, base: (base && base.code) ? base : null, foreign, baseDebug });
+  if (!base) {
+    const rec = loadBaseCcy()[baseCcyId(ep, tk)];
+    if (rec && rec.code) base = { code: rec.code, name: rec.name || '', source: 'efrisconnect', setAt: rec.setAt };
+  }
+  return { base: (base && base.code) ? base : null, foreign, baseDebug };
+}
+app.get('/api/manager/currencies', async (req, res) => {
+  const { ep, tk } = mgrCreds(req);
+  if (!ep || !tk) return res.status(400).json({ success: false, error: 'ep and tk are required' });
+  const { base, foreign, baseDebug } = await readMgrCurrencies(ep, tk);
+  res.json({ success: true, base, foreign, baseDebug });
 });
 
 // ── Currency create/configure (ISO-4217 driven from the client) ──
@@ -3961,16 +6721,41 @@ app.post('/api/manager/add-currency', async (req, res) => {
   const cc = String(code || '').trim().toUpperCase();
   if (!ep || !tk || !cc || !name) return res.status(400).json({ success: false, error: 'managerEndpoint, accessToken, code and name are required' });
   const isBase = kind === 'base';
-  const formPath = isBase ? '/base-currency-form' : '/foreign-currency-form';
-  const body = isBase
-    ? { Code: cc, Name: name }
-    : { Code: cc, Name: name, Prefix: prefix || '', Suffix: suffix || '', DecimalPlaces: (decimalPlaces != null ? Number(decimalPlaces) : 2) };
   try {
-    const r = await managerCall(ep, tk, 'POST', formPath, body);
+    let r, postedPath;
+    if (isBase) {
+      // The Base Currency is a SINGLETON updated by its fixed GUID. Posting to the
+      // generic /base-currency-form path 201s but sets nothing (and GET on it throws
+      // "not a valid GUID"), so update the singleton at /base-currency-form/{guid}.
+      // Manager's API spec defines PUT for /{key}; older builds took POST there, so
+      // fall back to it. (POST to the bare /base-currency-form creates a separate
+      // record that Manager's own Base Currency screen ignores - never use it.)
+      postedPath = '/base-currency-form/' + MGR_BASE_CURRENCY_GUID;
+      const baseBody = { Code: cc, Name: name, Prefix: prefix || '', Suffix: suffix || '', DecimalPlaces: (decimalPlaces != null ? Number(decimalPlaces) : 2) };
+      r = await managerCall(ep, tk, 'PUT', postedPath, baseBody);
+      if (!(r.status >= 200 && r.status < 300) && !r._html) r = await managerCall(ep, tk, 'POST', postedPath, baseBody);
+      if (r.status >= 200 && r.status < 300 && !r._html) rememberBaseCcy(ep, tk, { code: cc, name, prefix: prefix || '', suffix: suffix || '' });
+    } else {
+      postedPath = '/foreign-currency-form';
+      r = await managerCall(ep, tk, 'POST', postedPath, { Code: cc, Name: name, Prefix: prefix || '', Suffix: suffix || '', DecimalPlaces: (decimalPlaces != null ? Number(decimalPlaces) : 2) });
+    }
     if (r._html) return res.json({ success: false, error: 'Manager returned a login/HTML page - check the access token' });
     const ok = r.status >= 200 && r.status < 300;
-    res.json({ success: ok, status: r.status, code: cc,
-      note: ok ? 'Created in Manager' : 'Manager did not accept the currency form (path/fields may differ for this build).', data: r.data });
+    // Read the base back so we can confirm it actually took.
+    // confirmed: true/false when Manager reports the base back; null when it cannot
+    // (this build) - the write status is then the only signal.
+    let confirmed = null, readBack;
+    if (isBase) {
+      try { const c = await readMgrCurrencies(ep, tk); if (c.base && c.base.code && c.base.source !== 'efrisconnect') { readBack = c.base.code; confirmed = (c.base.code === cc); } } catch(_) {}
+    }
+    console.log(`   add-currency ${kind || 'foreign'} ${cc}: ${isBase ? 'PUT/POST' : 'POST'} ${postedPath} -> HTTP ${r.status}${isBase ? ` (readback: ${readBack || 'none'}, confirmed: ${confirmed === null ? 'n/a - Manager does not report it' : confirmed})` : ''}`);
+    res.json({ success: ok, confirmed, readBack, status: r.status, code: cc,
+      note: ok
+        ? (isBase ? (confirmed === true ? 'Base currency set and confirmed.'
+            : confirmed === false ? `Manager reports a different base currency (${readBack}) - check Manager: Settings, Currencies, Base Currency.`
+            : 'Base currency set. Manager does not report it back through its API, so EFRISConnect keeps a record of it.') : 'Created in Manager')
+        : `Manager did not accept the currency form (HTTP ${r.status}).`,
+      data: r.data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
@@ -3987,7 +6772,7 @@ app.post('/api/efris/search-goods', async (req, res) => {
   const goodsCacheFile = path.join(DATA_DIR, 'goods_search_cache_' + String(tin).replace(/[^0-9A-Za-z]/g, '') + '.json');
   const serveCached = () => { try { const disk = JSON.parse(fs.readFileSync(goodsCacheFile, 'utf8')); if (Array.isArray(disk) && disk.length) { console.log('   Using cached goods list (offline)'); return disk; } } catch(_) {} return null; };
   try {
-    const eu = mode === 'production' ? 'https://efrisws.ura.go.ug/ws/taapp/getInformation' : 'https://efristest.ura.go.ug/efrisws/ws/taapp/getInformation';
+    const eu = uraUrl(mode);
     // T127 = Goods/Services Inquiry (query goods registered under this TIN).
     // NOTE: T130 is goods *registration* (upload) and only echoes the request back -
     // it must NOT be used for search. T127 takes a single object (not a batch array).
@@ -3996,7 +6781,6 @@ app.post('/api/efris/search-goods', async (req, res) => {
     // item-code lookup) must pass `goodsCode` instead, or EFRIS returns 0 records.
     const GOODS_SEARCH_IFACE = 'T127';
     const payload = { goodsCode: goodsCode || '', goodsName: query || '', commodityCategoryCode: '', pageNo: '1', pageSize: '99' };
-    const sessionKey = tin + '_' + deviceNo;
     let items = [], outerRc, outerRm, pageInfo = null;
     // One retry with a forced-fresh session: a decrypt failure on a *reused*
     // cached session ("wrong final block length") looks like the server-side
@@ -4005,7 +6789,7 @@ app.post('/api/efris/search-goods', async (req, res) => {
     // resolves that class of failure without surfacing a confusing 0-results.
     for (let attempt = 1; attempt <= 2; attempt++) {
       const session = await getSession(tin, deviceNo, efrisPassword, eu, keyOverrideFrom(req.body));
-      const t131 = await efrisCall(eu, efrisEnvEnc(GOODS_SEARCH_IFACE, payload, tin, deviceNo, session.aesKey, session.privatePem));
+      const t131 = await efrisSecure(eu, GOODS_SEARCH_IFACE, payload, tin, deviceNo, session);
       outerRc = t131.data?.returnStateInfo?.returnCode;
       outerRm = t131.data?.returnStateInfo?.returnMessage || '';
       console.log(`\n🔍 ${GOODS_SEARCH_IFACE} search rc: ${outerRc} - ${outerRm}`);
@@ -4027,7 +6811,7 @@ app.post('/api/efris/search-goods', async (req, res) => {
         } catch(e) { decryptErr = e; console.log(`   T127 search decrypt error (attempt ${attempt}): ${e.message}`); }
       }
       if (!decryptErr) break;
-      if (attempt === 1) { delete sessions[sessionKey]; console.log('   Dropping cached session, retrying T127 with a fresh one…'); }
+      if (attempt === 1) { invalidateSession(tin, deviceNo); console.log('   Dropping cached session, retrying T127 with a fresh one…'); }
       else logger.error('search-goods decrypt failed after session retry', { message: decryptErr.message });
     }
     // Pagination: on a full catalog load, pull the remaining pages so the picker +
@@ -4036,7 +6820,7 @@ app.post('/api/efris/search-goods', async (req, res) => {
       try {
         const session = await getSession(tin, deviceNo, efrisPassword, eu, keyOverrideFrom(req.body));
         for (let p = 2; p <= Number(pageInfo.pageCount); p++) {
-          const pr = await efrisCall(eu, efrisEnvEnc(GOODS_SEARCH_IFACE, { ...payload, pageNo: String(p) }, tin, deviceNo, session.aesKey, session.privatePem));
+          const pr = await efrisSecure(eu, GOODS_SEARCH_IFACE, { ...payload, pageNo: String(p) }, tin, deviceNo, session);
           if (pr.data?.data?.content) {
             const raw = efrisDecodeJson(pr.data.data.content, session.aesKey);
             if (raw) { const pd = JSON.parse(raw); items = items.concat(pd.records || pd.goodsList || pd.list || []); }
@@ -4046,6 +6830,13 @@ app.post('/api/efris/search-goods', async (req, res) => {
       } catch (e) { console.log(`   T127 pagination stopped: ${e.message}`); }
     }
     console.log(`   T127 search found ${items.length} items`);
+    // One-time: log the field names EFRIS returns per record, so the current-stock
+    // field (if any) can be identified for opening-balance import at sync time.
+    if (items[0]) console.log(`   T127 record fields: ${Object.keys(items[0]).join(', ')}`);
+    // Normalize whatever EFRIS calls "current stock" into a single `currentStock`
+    // field, so an import can seed the Manager opening balance from it. EFRIS
+    // naming varies by version; take the first present numeric candidate.
+    for (const it of items) { const n = goodsStockOf(it); if (n != null) it.currentStock = n; }
     // Log each record's type/unit so goods-vs-service classification can be verified.
     for (const it of items) { const seg = parseInt(String(it.commodityCategoryCode||'').slice(0,2),10); console.log(`     • ${it.goodsCode||'?'}  cat=${it.commodityCategoryCode} unit=${it.measureUnit} (${seg>=70&&seg<=94?'Service':'Goods'})`); }
     // Receipt-time currency conversion: the good stays priced in its ORIGINAL
@@ -4086,21 +6877,103 @@ app.post('/api/efris/search-goods', async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 const SUBMISSION_LOG_FILE = path.join(DATA_DIR, 'submission_log.json');
 
-let _logWriting = false;
-const _logQueue = [];
-function appendSubmissionLog(entry) {
-  _logQueue.push(entry);
-  if (!_logWriting) _flushLogQueue();
+// Keep about a year of a busy till's documents (the Z report and Documents read it).
+const SUBMISSION_LOG_MAX = 20000;
+// ── Per-business view of the submission log ──
+// Several businesses (Manager files) can share one relay and even one TIN, so
+// each entry records the business that created it (tenantId, the request's
+// checked X-Tenant-Id). A request with a tenant id sees its own entries plus
+// older, untagged entries for the same TIN (flagged unlinked). A request without
+// one sees the entries of the businesses the user holds a role in (owners and the
+// service principal: everything).
+function reqTenant(req) { return String((req && req.tenantId) || ''); }
+function tenantView(req) {
+  const tid = reqTenant(req);
+  const user = req && req.auth;
+  const metas = tenantMetaMap();
+  if (tid) {
+    const tin = (metas[tid] && metas[tid].tin) || '';
+    return { tid, sees: e => e.tenantId ? e.tenantId === tid : (!!tin && String(e.tin || '') === tin) };
+  }
+  if (user && (user.owner || user.service)) return { tid: '', sees: () => true };
+  const ids = new Set(tenantIdsFor(user));
+  const tins = new Set([...ids].map(i => metas[i] && metas[i].tin).filter(Boolean));
+  return { tid: '', sees: e => e.tenantId ? ids.has(e.tenantId) : tins.has(String(e.tin || '')) };
 }
-function _flushLogQueue() {
-  if (!_logQueue.length) { _logWriting = false; return; }
-  _logWriting = true;
-  const entry = _logQueue.shift();
-  let log = [];
-  try { log = JSON.parse(fs.readFileSync(SUBMISSION_LOG_FILE, 'utf8')); } catch(e) {}
-  log.unshift(entry);
-  if (log.length > 1000) log = log.slice(0, 1000);
-  fs.writeFile(SUBMISSION_LOG_FILE, JSON.stringify(log, null, 2), () => _flushLogQueue());
+// What the caller may do with one entry: their permissions in the entry's own
+// business. An older untagged entry counts as the requested business's, or, with
+// no business named, as any of the caller's businesses with the entry's TIN. Never
+// the union of all their roles: a cashier in A and accountant in B is a cashier
+// for A's entries whether or not X-Tenant-Id is sent.
+function entryPermsFn(req) {
+  const user = req && req.auth, tid = reqTenant(req);
+  if (!user) { const none = new Set(); return () => none; }
+  if (user.owner || user.service) { const all = new Set(['*']); return () => all; }
+  const metas = tenantMetaMap();
+  const cache = new Map();
+  return e => {
+    const own = e && e.tenantId ? String(e.tenantId) : tid;
+    const key = own ? 't:' + own : 'tin:' + String((e && e.tin) || '');
+    if (cache.has(key)) return cache.get(key);
+    let p;
+    if (own) p = auth.permissionsFor(user, own);
+    else {
+      p = new Set();
+      const tin = String((e && e.tin) || '');
+      for (const id of Object.keys(user.roles || {})) {
+        if (tin && metas[id] && String(metas[id].tin || '') === tin) for (const x of auth.permissionsFor(user, id)) p.add(x);
+      }
+    }
+    cache.set(key, p);
+    return p;
+  };
+}
+// tenantView narrowed entry by entry: `perm` in the entry's business, or (for the
+// caller's own entries) `ownPerm` there.
+function scopedView(req, perm, ownPerm) {
+  const v = tenantView(req);
+  const P = entryPermsFn(req);
+  const uid = req && req.auth && req.auth.id;
+  return { tid: v.tid, perms: P,
+    sees: e => v.sees(e) && (auth.can(P(e), perm) || (!!ownPerm && auth.can(P(e), ownPerm) && !!uid && e.userId === uid)) };
+}
+// Reading the log: a cashier ('log-own' without 'log-all') sees only the entries
+// they made, business by business.
+function logView(req) { return scopedView(req, 'log-all', 'log-own'); }
+function markUnlinked(e) { return e.tenantId ? e : Object.assign({}, e, { unlinked: true }); }
+
+// Atomic write: temp file then rename, so a crash or a reader never sees a half-
+// written file. Synchronous on purpose: a read-change-write built on it runs to the
+// end before any other request's, so writers cannot overwrite each other.
+function writeFileAtomic(file, data) {
+  const tmp = file + '.' + process.pid + '.tmp';
+  try { fs.writeFileSync(tmp, data); }
+  catch (e) { try { fs.rmSync(tmp, { force: true }); } catch (_) {} throw e; }
+  try { fs.renameSync(tmp, file); }
+  catch (e) {
+    // Windows: antivirus/indexer can hold the target open for a moment; write in place.
+    try { fs.writeFileSync(file, data); } finally { try { fs.rmSync(tmp, { force: true }); } catch (_) {} }
+  }
+}
+function readSubmissionLog() { try { const l = JSON.parse(fs.readFileSync(SUBMISSION_LOG_FILE, 'utf8')); return Array.isArray(l) ? l : []; } catch (_) { return []; } }
+// The ONE writer of the submission log: every change (new submission, Manager-only
+// row, link, delete, URA import) goes through here. fn changes the array in place
+// (or returns a new one); returning false means nothing to save.
+function updateSubmissionLog(fn) {
+  let log = readSubmissionLog();
+  const out = fn(log);
+  if (out === false) return false;
+  if (Array.isArray(out)) log = out;
+  if (log.length > SUBMISSION_LOG_MAX) log = log.slice(0, SUBMISSION_LOG_MAX);
+  writeFileAtomic(SUBMISSION_LOG_FILE, JSON.stringify(log, null, 2));
+  return true;
+}
+// Each entry records who made it: the signed-in user of the request, or the user
+// who queued a sale that the offline queue sends later.
+function appendSubmissionLog(entry) {
+  const e = { ...entry };
+  if (!e.userId) { delete e.userId; delete e.userName; Object.assign(e, actor()); }
+  updateSubmissionLog(log => { log.unshift(e); });
 }
 
 // Issued-document retrieval: the extension saves a render snapshot (the receipt.html
@@ -4109,21 +6982,87 @@ function _flushLogQueue() {
 // survives browser cache clears and is shared across sessions on the same relay.
 const RECEIPT_SNAP_FILE = path.join(DATA_DIR, 'receipt_snapshots.json');
 function _readSnaps() { try { return JSON.parse(fs.readFileSync(RECEIPT_SNAP_FILE, 'utf8')); } catch(e) { return {}; } }
+// Snapshots carry the business that saved them; a business only reads its own.
+// Within it, someone who sees the whole log (log-all) reads any snapshot, others
+// only the ones they saved (older ones with no user: anyone who may view there).
+// Replacing one (write) needs 'sell' in its business.
+// Older snapshots (no tenantId) stay readable by owners, and by an admin of the
+// requested business when the snapshot's seller TIN (if it has one) is theirs.
+function snapVisible(req, hit, write) {
+  const tid = reqTenant(req), user = req.auth;
+  if (hit.tenantId) {
+    if (tid ? hit.tenantId !== tid : !tenantIdsFor(user).includes(hit.tenantId)) return false;
+    const p = auth.permissionsFor(user, hit.tenantId);
+    if (write) return auth.can(p, 'sell');
+    if (auth.can(p, 'log-all')) return true;
+    return hit.userId ? hit.userId === (user && user.id) : auth.can(p, 'view');
+  }
+  if (user && (user.owner || user.service)) return true;
+  if (!tid || auth.roleIn(user, tid) !== 'admin') return false;
+  let tin = ''; try { tin = new URLSearchParams(String(hit.query || '')).get('tin') || ''; } catch (_) {}
+  const own = (tenantMetaMap()[tid] || {}).tin || '';
+  return !tin || tin === own;
+}
 app.post('/api/receipt-snapshot', (req, res) => {
   const { key, query } = req.body || {};
   if (!key || !query) return res.status(400).json({ success: false, error: 'key and query required' });
   const map = _readSnaps();
-  map[String(key)] = { query: String(query), savedAt: Date.now() };
+  const prev = map[String(key)];
+  if (prev && !snapVisible(req, prev, true)) return res.status(403).json({ success: false, error: 'You do not have access to this business' });
+  map[String(key)] = { query: String(query), savedAt: Date.now(), tenantId: reqTenant(req) || undefined, ...actor(req) };
   // Keep the most recent 1000 snapshots.
   const keys = Object.keys(map);
   if (keys.length > 1000) keys.sort((a, b) => (map[a].savedAt || 0) - (map[b].savedAt || 0)).slice(0, keys.length - 1000).forEach(k => delete map[k]);
-  fs.writeFile(RECEIPT_SNAP_FILE, JSON.stringify(map), () => {});
+  writeFileAtomic(RECEIPT_SNAP_FILE, JSON.stringify(map));
   res.json({ success: true });
 });
 app.get('/api/receipt-snapshot', (req, res) => {
   const hit = _readSnaps()[String(req.query.key || '')];
-  if (!hit) return res.json({ success: false, error: 'No saved document for this reference' });
+  if (!hit || !snapVisible(req, hit)) return res.json({ success: false, error: 'No saved document for this reference' });
   res.json({ success: true, query: hit.query });
+});
+
+// Reprint marking (URS 9.10): how many times each document was printed, kept on
+// the relay so a reprint on ANY computer is marked COPY. Keyed by business + FDN
+// (or the reference for an unfiscalised document). Only the Print action counts.
+const PRINT_COUNT_FILE = path.join(DATA_DIR, 'print_counts.json');
+function _readPrints() { try { return JSON.parse(fs.readFileSync(PRINT_COUNT_FILE, 'utf8')) || {}; } catch (e) { return {}; } }
+// The business the count belongs to: the one named by X-Tenant-Id, else the
+// caller's only business. Owners/service with no business use the shared bucket.
+function printTenant(req) {
+  const tid = reqTenant(req); if (tid) return { tid };
+  const u = req.auth;
+  if (u && (u.owner || u.service)) return { tid: '' };
+  const ids = tenantIdsFor(u);
+  return ids.length === 1 ? { tid: ids[0] } : { error: 'Choose a business first' };
+}
+function printKey(req, raw) {
+  const key = String(raw || '').trim().slice(0, 120);
+  if (!key) return { error: 'key required' };
+  const t = printTenant(req); if (t.error) return t;
+  return { id: t.tid + '|' + key, key, tid: t.tid };
+}
+function printView(e) {
+  return { count: e ? e.count || 0 : 0, firstAt: e ? e.firstAt : null, lastAt: e ? e.lastAt : null, firstBy: e ? e.firstBy || '' : '', lastBy: e ? e.lastBy || '' : '' };
+}
+app.get('/api/print-count', (req, res) => {
+  const k = printKey(req, req.query.key);
+  if (k.error) return res.status(400).json({ success: false, error: k.error });
+  res.json({ success: true, key: k.key, ...printView(_readPrints()[k.id]) });
+});
+app.post('/api/print-count', (req, res) => {
+  const k = printKey(req, (req.body || {}).key);
+  if (k.error) return res.status(400).json({ success: false, error: k.error });
+  const map = _readPrints(), now = new Date().toISOString(), who = actor(req).userName || '';
+  const e = map[k.id] || { tenantId: k.tid || undefined, key: k.key, count: 0, firstAt: now, firstBy: who };
+  e.count = (e.count || 0) + 1; e.lastAt = now; e.lastBy = who;
+  if ((req.body || {}).ref) e.ref = String(req.body.ref).slice(0, 80);
+  map[k.id] = e;
+  // Keep the most recent 5000 documents.
+  const ids = Object.keys(map);
+  if (ids.length > 5000) ids.sort((a, b) => String(map[a].lastAt).localeCompare(String(map[b].lastAt))).slice(0, ids.length - 5000).forEach(i => delete map[i]);
+  writeFileAtomic(PRINT_COUNT_FILE, JSON.stringify(map));
+  res.json({ success: true, key: k.key, ...printView(e) });
 });
 
 app.get('/api/submission-log', (req, res) => {
@@ -4133,11 +7072,15 @@ app.get('/api/submission-log', (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = Math.min(parseInt(req.query.limit) || 50, 1000);
     const q = (req.query.q || '').toLowerCase();
+    const view = logView(req);
+    // Credit/debit notes only for users with the credit permission in that
+    // entry's business (not cashiers).
+    const notes = e => auth.can(view.perms(e), 'credit');
+    log = log.filter(e => view.sees(e) && ((e.kind !== 'credit-note' && e.kind !== 'debit-note') || notes(e))).map(markUnlinked);
+    const has = v => String(v || '').toLowerCase().includes(q);
     const filtered = q ? log.filter(e =>
-      (e.fdn || '').toLowerCase().includes(q) ||
-      (e.invoiceId || '').toLowerCase().includes(q) ||
-      (e.reference || '').toLowerCase().includes(q) ||
-      (e.customerName || '').toLowerCase().includes(q)
+      has(e.fdn) || has(e.invoiceId) || has(e.reference) || has(e.customerName) ||
+      has(e.originalFdn) || has(e.oriInvoiceNo) || has(e.applicationId)
     ) : log;
     const total = filtered.length;
     const items = filtered.slice((page - 1) * limit, page * limit);
@@ -4153,19 +7096,19 @@ app.get('/api/submission-log', (req, res) => {
 app.post('/api/manager-only-log', (req, res) => {
   const b = req.body || {};
   try {
-    let log = []; try { log = JSON.parse(fs.readFileSync(SUBMISSION_LOG_FILE, 'utf8')); } catch(_) {}
     const ref = String(b.reference || '').trim();
-    if (ref && log.some(e => e.managerOnly && String(e.reference || '').trim() === ref)) return res.json({ success: true, deduped: true });
+    let deduped = false;
+    updateSubmissionLog(log => {
+    if (ref && log.some(e => e.managerOnly && String(e.reference || '').trim() === ref)) { deduped = true; return false; }
     log.unshift({
-      id: Date.now(), managerOnly: true, status: 'manager-only', fdn: '',
+      id: crypto.randomUUID(), managerOnly: true, status: 'manager-only', fdn: '', tenantId: reqTenant(req) || undefined, ...actor(req),
       reference: b.reference || '', customerName: b.customerName || '',
       totalAmount: b.totalAmount || 0, currency: b.currency || 'UGX',
       invoiceKind: '3', mode: b.mode || '', docKey: b.docKey || '',
       submittedAt: b.submittedAt || new Date().toISOString()
     });
-    if (log.length > 5000) log = log.slice(0, 5000);
-    fs.writeFile(SUBMISSION_LOG_FILE, JSON.stringify(log, null, 2), () => {});
-    res.json({ success: true });
+    });
+    res.json(deduped ? { success: true, deduped: true } : { success: true });
   } catch(e) { res.json({ success: false, error: e.message }); }
 });
 
@@ -4174,15 +7117,21 @@ app.post('/api/manager-only-log', (req, res) => {
 // gross/tax/net totals by currency. `date` = YYYY-MM-DD (defaults to today).
 app.get('/api/z-report', (req, res) => {
   try {
-    const date = (req.query.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const date = (req.query.date || new Date(Date.now() + 3 * 3600000).toISOString().slice(0, 10)).slice(0, 10);   // today in Uganda time
     let log = []; try { log = JSON.parse(fs.readFileSync(SUBMISSION_LOG_FILE, 'utf8')); } catch(_) {}
-    const day = log.filter(e => String(e.submittedAt || '').slice(0, 10) === date && (e.status ? e.status === 'success' : true));
+    const view = scopedView(req, 'reports');
+    // The business day is Uganda time (EAT, UTC+3): a document fiscalised at 01:00
+    // belongs to that day, not to the previous UTC date.
+    const eatDay = iso => { const t = Date.parse(iso || ''); return isNaN(t) ? String(iso || '').slice(0, 10) : new Date(t + 3 * 3600000).toISOString().slice(0, 10); };
+    // Cancelled, rejected or withdrawn credit notes never took effect: leave them out.
+    const lapsed = e => e.cancelled || (e.kind === 'credit-note' && (e.approveStatus === '103' || e.approveStatus === '104'));
+    const day = log.filter(view.sees).filter(e => eatDay(e.submittedAt) === date && (e.status ? e.status === 'success' : true) && !lapsed(e));
     const byCurrency = {};
     let count = 0, credits = 0;
     for (const e of day) {
       const cur = e.currency || 'UGX';
       const amt = parseFloat(e.totalAmount) || 0;
-      const isCredit = amt < 0 || String(e.returnCode) === 'CN' || /credit/i.test(e.docType || '');
+      const isCredit = amt < 0 || e.kind === 'credit-note' || String(e.returnCode) === 'CN' || /credit/i.test(e.docType || '');
       const b = byCurrency[cur] || (byCurrency[cur] = { currency: cur, count: 0, gross: 0 });
       b.count++; b.gross += amt; count++; if (isCredit) credits++;
     }
@@ -4200,21 +7149,84 @@ app.get('/api/submission-log/by-fdn/:fdn', (req, res) => {
     let log = [];
     try { log = JSON.parse(fs.readFileSync(SUBMISSION_LOG_FILE, 'utf8')); } catch(e) {}
     const fdn = String(req.params.fdn || '').trim();
-    const hit = log.find(e => String(e.fdn || '').trim() === fdn);
+    const view = logView(req);
+    const hit = log.filter(e => view.sees(e) && ((e.kind !== 'credit-note' && e.kind !== 'debit-note') || auth.can(view.perms(e), 'credit')))
+      .find(e => String(e.fdn || '').trim() === fdn);
     if (!hit) return res.json({ success: false, error: 'FDN not found in local submission history. Enter the original invoice ID manually if you have it.' });
-    res.json({ success: true, fdn: hit.fdn, invoiceId: hit.invoiceId || '', reference: hit.reference || '', customerName: hit.customerName || '', amount: hit.totalAmount || 0, currency: hit.currency || 'UGX' });
+    res.json({ success: true, fdn: hit.fdn, invoiceId: hit.invoiceId || '', reference: hit.reference || '', customerName: hit.customerName || '', amount: hit.totalAmount || 0, currency: hit.currency || 'UGX',
+      buyerTin: hit.buyerTin || '', buyerType: hit.buyerType || '', lines: Array.isArray(hit.lines) ? hit.lines : [],
+      antifakeCode: hit.antifakeCode || '', validationUrl: hit.validationUrl || '', submittedAt: hit.submittedAt || '', deviceNo: hit.deviceNo || '' });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
+// Add documents URA has (from its T106 report) that are missing from the local
+// history - e.g. submitted before the history recorded them, or from another PC -
+// so Documents and the Z report match URA. Never overwrites an existing FDN.
+app.post('/api/submission-log/import', async (req, res) => {
+  const recs = Array.isArray((req.body || {}).records) ? req.body.records.slice(0, 200) : [];
+  const { tin, deviceNo, mode } = req.body || {};
+  if (!recs.length) return res.json({ success: true, added: 0 });
+  let added = 0, _refreshed = 0;
+  try { updateSubmissionLog(log => {
+  const have = new Set(log.map(e => String(e.fdn || '').trim()).filter(Boolean));
+  const tid = reqTenant(req);
+  // URA dates arrive as dd/MM/yyyy HH:mm:ss (or epoch ms).
+  const when = r => {
+    // Prefer whichever of URA's date fields carries the time of day.
+    const cands = [r.issuedDate, r.issuedDateStr, r.invoiceDate].map(x => String(x == null ? '' : x).trim()).filter(Boolean);
+    const v = cands.find(x => /\d{1,2}:\d{2}/.test(x)) || cands.find(x => /^\d{12,}$/.test(x)) || cands[0] || '';
+    if (/^\d{12,}$/.test(String(v))) return new Date(+v).toISOString();
+    const m = String(v).match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?/);
+    if (m) return new Date(Date.UTC(+m[3], +m[2] - 1, +m[1], (+m[4] || 0) - 3, +m[5] || 0, +m[6] || 0)).toISOString();   // EAT is UTC+3
+    const d = new Date(v); return isNaN(d) ? new Date().toISOString() : d.toISOString();
+  };
+  const cur = c => (/^\d+$/.test(String(c || '')) ? (String(c) === '101' ? 'UGX' : String(c)) : (c || 'UGX'));
+  recs.forEach((r, i) => {
+    const fdn = String(r.invoiceNo || r.fdn || '').trim();
+    if (!/^\d{6,}$/.test(fdn)) return;
+    // Already there: only an entry that itself came from URA gets its time refreshed.
+    if (have.has(fdn)) { const ex = log.find(e => String(e.fdn) === fdn && e.importedFromUra); if (ex) { const t = when(r); if (t !== ex.submittedAt) { ex.submittedAt = t; _refreshed++; } } return; }
+    have.add(fdn); added++;
+    log.push({ id: crypto.randomUUID(), submittedAt: when(r), fdn, antifakeCode: r.antifakeCode || '', validationUrl: '', tenantId: tid || undefined, ...actor(req),
+      deviceNo: r.deviceNo || deviceNo || '', invoiceId: String(r.id || r.invoiceId || ''), reference: r.referenceNo || '',
+      returnCode: '00', status: 'success', tin: tin || r.sellerTin || '', customerName: r.buyerLegalName || r.buyerBusinessName || '',
+      totalAmount: parseFloat(r.grossAmount) || 0, currency: cur(r.currency), invoiceKind: r.invoiceKind || '', mode: mode || 'sandbox',
+      importedFromUra: true });
+  });
+  if (!added && !_refreshed) return false;
+  log.sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')));
+  }); } catch (e) { return res.status(500).json({ success: false, error: e.message }); }
+  if (added || _refreshed) console.log('   Submission history: added ' + added + ' document(s) from URA');
+  res.json({ success: true, added });
+});
+
+// Link an older, untagged entry to the requesting business, so it stops showing
+// in other businesses that share the TIN. Only untagged entries this business
+// can already see can be linked.
+app.post('/api/submission-log/:id/link', (req, res) => {
+  try {
+    const view = tenantView(req);
+    if (!view.tid) return res.status(400).json({ success: false, error: 'No business selected' });
+    // Ids are numbers (older rows) or UUID strings: compare as text.
+    const id = String(req.params.id);
+    let found = false;
+    updateSubmissionLog(log => {
+      const e = log.find(x => String(x.id) === id);
+      if (!e || e.tenantId || !view.sees(e)) return false;
+      e.tenantId = view.tid; found = true;
+    });
+    if (!found) return res.json({ success: false, error: 'Entry not found or already linked' });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
 app.delete('/api/submission-log/:id', (req, res) => {
   try {
-    let log = [];
-    try { log = JSON.parse(fs.readFileSync(SUBMISSION_LOG_FILE, 'utf8')); } catch(e) {}
-    const id = parseInt(req.params.id);
-    log = log.filter(e => e.id !== id);
-    fs.writeFileSync(SUBMISSION_LOG_FILE, JSON.stringify(log, null, 2));
+    const id = String(req.params.id);
+    const view = scopedView(req, 'log-all');
+    updateSubmissionLog(log => log.filter(e => !(String(e.id) === id && view.sees(e))));
     res.json({ success: true });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message });
@@ -4232,26 +7244,48 @@ function publicCfg(config) {
   const c = config || {};
   return { tin: c.tin, deviceNo: c.deviceNo, mode: c.mode || 'sandbox',
     businessName: c.businessName, tradeName: c.tradeName, businessAddress: c.businessAddress,
-    brn: c.brn, phone: c.phone, email: c.email, vatRegistered: !!c.vatRegistered };
+    brn: c.brn, phone: c.phone, email: c.email, vatRegistered: !!c.vatRegistered,
+    // Non-secret fields buildT109 also reads (default commodity, unit, operator).
+    defaultCommodityCode: c.defaultCommodityCode, defaultCommodityName: c.defaultCommodityName,
+    defaultUnitOfMeasure: c.defaultUnitOfMeasure, issuedBy: c.issuedBy, operator: c.operator };
 }
 function loadQueue() { try { return JSON.parse(fs.readFileSync(OFFLINE_QUEUE_FILE, 'utf8')); } catch(e) { return []; } }
-function saveQueue(q) { try { fs.writeFileSync(OFFLINE_QUEUE_FILE, JSON.stringify(q, null, 2)); } catch(e) { console.log('offline queue write error: ' + e.message); } }
+function saveQueue(q) { try { writeFileAtomic(OFFLINE_QUEUE_FILE, JSON.stringify(q, null, 2)); } catch(e) { console.log('offline queue write error: ' + e.message); } }
 function offlineEnqueue(entry) {
   const q = loadQueue();
-  const id = 'off_' + Date.now() + '_' + Math.floor((process.hrtime()[1] % 100000));
-  q.push({ id, createdAt: new Date().toISOString(), status: 'pending', attempts: 0, lastError: '', ...entry });
+  const id = 'off_' + crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  q.push({ id, createdAt, saleAt: createdAt, status: 'pending', attempts: 0, lastError: '', ...actor(), ...entry });
   saveQueue(q);
   return id;
 }
 
+// Queue entries are per business, like the submission log.
+// perm: what the caller needs in the entry's business ('queue' to see or link, 'log-all' to delete).
+function queueView(req, perm) { const v = scopedView(req, perm || 'queue'); return e => v.sees({ tenantId: e.tenantId, tin: (e.cfgPublic || {}).tin, userId: e.userId }); }
 app.get('/api/offline-queue', (req, res) => {
-  const q = loadQueue();
-  res.json({ success: true, pending: q.filter(e => e.status === 'pending').length,
-    items: q.map(e => ({ id: e.id, createdAt: e.createdAt, kind: e.kind, reference: e.reference, status: e.status, attempts: e.attempts, lastError: e.lastError, fdn: e.fdn || '' })) });
+  const q = loadQueue().filter(queueView(req));
+  res.json({ success: true, pending: q.filter(e => e.status === 'pending').length, failed: q.filter(e => e.status === 'failed').length,
+    items: q.map(e => ({ id: e.id, createdAt: e.createdAt, saleAt: e.saleAt || e.createdAt, kind: e.kind, reference: e.reference, status: e.status, attempts: e.attempts, lastError: e.lastError, fdn: e.fdn || '', uncertain: !!e.uncertain,
+      doneAt: e.doneAt || '', result: e.status === 'done' ? (e.result || { fdn: e.fdn }) : undefined, inManager: !!e.mgrWritten })),
+    retry: (typeof _retry !== 'undefined') ? { nextAt: _retry.nextAt, lastAt: _retry.lastAt, lastOutcome: _retry.lastOutcome, online: _retry.online, now: Date.now() } : null });
+});
+
+// Attach the Manager document created for a queued sale, so the FDN is written
+// onto it when the queue fiscalises it (the wizard creates the Manager receipt
+// straight away: Manager is local and reachable while URA is not).
+app.post('/api/offline-queue/:id/link', (req, res) => {
+  const { documentKey, managerEndpoint } = req.body || {};
+  if (!documentKey || !managerEndpoint) return res.status(400).json({ success: false, error: 'documentKey and managerEndpoint required' });
+  const q = loadQueue(); const e = q.find(x => x.id === req.params.id);
+  if (!e || !queueView(req)(e)) return res.json({ success: false, error: 'not found' });
+  if (!e.documentKey) { e.documentKey = bareKey(documentKey); e.managerEndpoint = managerEndpoint; saveQueue(q); }
+  res.json({ success: true, status: e.status, fdn: e.fdn || '' });
 });
 
 app.delete('/api/offline-queue/:id', (req, res) => {
-  const q = loadQueue().filter(e => e.id !== req.params.id);
+  const sees = queueView(req, 'log-all');
+  const q = loadQueue().filter(e => !(e.id === req.params.id && sees(e)));
   saveQueue(q);
   res.json({ success: true });
 });
@@ -4259,45 +7293,251 @@ app.delete('/api/offline-queue/:id', (req, res) => {
 // Flush the queue: re-submit each pending item to EFRIS using the secrets supplied
 // now (efrisPassword + Manager accessToken). Successful items get an FDN, are
 // written back to the source Manager document, and removed from the queue.
+// Re-submit pending queue entries. credsFor(entry) supplies the secrets for that
+// entry ({ cfg, accessToken }) or null to skip it. Shared by the Flush button and
+// the automatic retry below. Stops at the first network error (still offline).
+let _flushing = false;
+// Fields the flush owns. Only these are merged back into the queue file, so a
+// /link (documentKey, managerEndpoint) made while a flush was running survives.
+const FLUSH_FIELDS = ['status', 'fdn', 'result', 'attempts', 'lastError', 'doneAt', 'mgrWritten', 'mgrAttempts', 'uncertain', 'uncertainVia'];
+// Fiscalised, linked to a Manager document, but the FDN is not on it yet.
+function needsWriteBack(e) { return e.status === 'done' && !!e.documentKey && !!e.managerEndpoint && !e.mgrWritten && (e.mgrAttempts || 0) < 5; }
+// Write the FDN onto the source Manager document. mgrWritten is set only when
+// Manager accepted it; a failure is retried on later passes (max 5 tries).
+// ep: where to write. A token from the vault only ever goes to the business's
+// saved endpoint, never to the endpoint stored on the queue entry by a caller.
+async function offlineWriteBack(entry, accessToken, vatRegistered, data, ep) {
+  if (!ep) return;
+  entry.mgrAttempts = (entry.mgrAttempts || 0) + 1;
+  try {
+    const w = await saveEfrisToManager(normEp(ep), accessToken, bareKey(entry.documentKey), data, vatRegistered);
+    if (w && w.success) entry.mgrWritten = true;
+    else console.log('offline write-back error: ' + ((w && w.error) || 'Manager did not accept the update'));
+  } catch (e) { console.log('offline write-back error: ' + e.message); }
+}
+// A sale whose T109 timed out AFTER it was sent may already be fiscalised. Ask
+// EFRIS (T106 invoice query, by reference) before sending it again, so it never
+// gets a second FDN. Returns a submission-like result when found, null when EFRIS
+// has no such document; throws when it cannot tell (network error: still offline).
+async function findIssuedByReference(entry, cfg, ref) {
+  const targets = efrisEndpoints(cfg);
+  const t = targets.find(x => x.kind === (entry.uncertainVia || 'ura')) || targets[0];
+  const qc = cfgForTarget(cfg, t);
+  const session = await getSession(qc.tin, qc.deviceNo, qc.efrisPassword, t.url, keyOverrideFrom(qc));
+  if (!session.aesKey) throw new Error('No AES key for T106');
+  const t106data = {
+    oriInvoiceNo: '', invoiceNo: '', deviceNo: qc.deviceNo || '',
+    buyerTin: '', buyerLegalName: '', buyerNinBrn: '',
+    combineKeywords: '', invoiceType: '', invoiceKind: '', isInvalid: '', isRefund: '',
+    startDate: eatParts(Date.parse(entry.saleAt || entry.createdAt) || Date.now()).date, endDate: eatToday(),
+    pageNo: '1', pageSize: '20',
+    referenceNo: ref, branchName: '', queryType: '1',
+    dataSource: '', sellerTinOrNin: qc.tin, currencyType: '', invoiceIndustryCode: '',
+  };
+  const t106 = await efrisSecure(t.url, 'T106', t106data, qc.tin, qc.deviceNo, session);
+  const rc = t106.data && t106.data.returnStateInfo ? t106.data.returnStateInfo.returnCode : null;
+  const rm = t106.data && t106.data.returnStateInfo ? t106.data.returnStateInfo.returnMessage : '';
+  let records = null;
+  if (t106.data && t106.data.data && t106.data.data.content) {
+    try {
+      const d = JSON.parse(efrisDecodeJson(t106.data.data.content, session.aesKey) || aesDecryptStr(t106.data.data.content, session.aesKey));
+      records = d.records || d.invoiceList || d.list || (Array.isArray(d) ? d : []);
+    } catch (e) { console.log('   T106 parse error:', e.message); }
+  } else if (rc === '00') records = [];
+  if (!records) throw new Error('Could not check EFRIS for reference ' + ref + ' (T106 ' + rc + ': ' + rm + '); not sending it again until EFRIS can be checked');
+  const hit = records.find(r => String(r.referenceNo || '').trim() === ref && String(r.invoiceNo || '').trim());
+  if (!hit) return null;
+  const fdn = String(hit.invoiceNo).trim();
+  const antifakeCode = hit.antifakeCode || hit.antiFakeCode || '';
+  const efrisPortal = cfg.mode === 'production'
+    ? 'https://efris.ura.go.ug/site_mobile/#/invoiceValidation'
+    : 'https://efristest.ura.go.ug/site_new/#/invoiceValidation';
+  const validationUrl = antifakeCode ? `${efrisPortal}?invoiceNo=${encodeURIComponent(fdn)}&antiFakeCode=${encodeURIComponent(antifakeCode)}` : null;
+  const issuedDate = entry.saleAt || entry.createdAt || new Date().toISOString();
+  const invoiceId = String(hit.id || hit.invoiceId || '');
+  console.log(`   Offline queue: ${ref} was already fiscalised (FDN ${fdn}) - not resending`);
+  try {
+    // The timed-out submission never reached the log; record it now.
+    appendSubmissionLog({
+      id: crypto.randomUUID(), submittedAt: issuedDate, fdn, antifakeCode, validationUrl, tenantId: entry.tenantId || undefined,
+      userId: entry.userId || undefined, userName: entry.userName || undefined,
+      deviceNo: hit.deviceNo || qc.deviceNo, invoiceId, reference: ref, returnCode: '00', status: 'success', tin: cfg.tin,
+      customerName: hit.buyerLegalName || hit.buyerBusinessName || '', totalAmount: parseFloat(hit.grossAmount) || 0,
+      currency: (entry.invoice && entry.invoice.Currency) || 'UGX', invoiceKind: hit.invoiceKind || '', mode: cfg.mode || 'sandbox',
+    });
+  } catch (le) { console.log('Submission log write error:', le.message); }
+  return { ok: true, fdn, qrCode: validationUrl || antifakeCode, antifakeCode, validationUrl, deviceNo: hit.deviceNo || qc.deviceNo, issuedDate, invoiceId, returnCode: '00', returnMessage: 'Found in EFRIS' };
+}
+// One queue entry: send it (or retry its Manager write-back). Returns true when
+// URA is unreachable, so the caller stops and keeps the rest queued.
+async function flushOne(entry, credsFor, results) {
+  const creds = credsFor(entry); if (!creds) return false;
+  const cfg = { ...entry.cfgPublic, ...creds.cfg };
+  const wbEp = creds.fromVault ? (creds.managerEndpoint || '') : entry.managerEndpoint;
+  // Fiscalised on an earlier pass, but the FDN did not reach Manager: retry that only.
+  if (entry.status === 'done') {
+    if (creds.accessToken) await offlineWriteBack(entry, creds.accessToken, cfg.vatRegistered, entry.result || { fdn: entry.fdn }, wbEp);
+    return false;
+  }
+  if (!cfg.efrisPassword) return false;
+  entry.attempts = (entry.attempts || 0) + 1;
+  // Dated when the sale was made, not when it is finally sent.
+  const saleAt = entry.saleAt || entry.createdAt;
+  const invoice = saleAt ? { ...entry.invoice, _saleAt: saleAt } : entry.invoice;
+  const ref = String(((entry.invoice || {}).IsRefund || (entry.invoice || {}).isRefund ? 'CN-' : '') + ((entry.invoice || {}).Reference || '')).trim();
+  try {
+    let r = null, netErr = null;
+    if (entry.uncertain) {
+      if (!ref) {
+        entry.status = 'failed';
+        entry.lastError = 'EFRIS did not answer in time and this sale has no reference to check it by. Check EFRIS for it before submitting it again.';
+        results.push({ id: entry.id, tenantId: entry.tenantId || '', reference: entry.reference, ok: false, error: entry.lastError });
+        return false;
+      }
+      r = await findIssuedByReference(entry, cfg, ref);
+    }
+    if (!r) for (const t of efrisEndpoints(cfg)) {
+      try { r = await performInvoiceSubmission(invoice, cfgForTarget({ ...cfg, _tenantId: entry.tenantId || '', _userId: entry.userId || '', _userName: entry.userName || '' }, t), t.url); netErr = null; break; }
+      catch (te) {
+        // Sent but no answer: outcome unknown. Do not try the next target (that
+        // could fiscalise it twice); check EFRIS by reference on the next pass.
+        if (te.uncertain) { entry.uncertain = true; entry.uncertainVia = t.kind; netErr = te; break; }
+        if (isNetworkError(te)) { netErr = te; continue; } throw te;
+      }
+    }
+    if (!r && netErr) throw netErr;
+    if (r.ok) {
+      entry.status = 'done'; entry.fdn = r.fdn; entry.doneAt = new Date().toISOString(); entry.uncertain = false; entry.lastError = '';
+      // Kept for a day so the extension can tell the cashier and print it.
+      entry.result = { fdn: r.fdn, antifakeCode: r.antifakeCode, validationUrl: r.validationUrl, qrCode: r.qrCode, invoiceId: r.invoiceId, deviceNo: r.deviceNo, issuedDate: r.issuedDate };
+      // Write-back to the source Manager document (retried later if it fails).
+      if (entry.documentKey && entry.managerEndpoint && creds.accessToken) await offlineWriteBack(entry, creds.accessToken, cfg.vatRegistered, r, wbEp);
+      results.push({ id: entry.id, tenantId: entry.tenantId || '', reference: entry.reference, ok: true, fdn: r.fdn });
+    } else {
+      // URA rejected it (a business error, not a connection problem): resending
+      // the same document cannot succeed, so stop retrying. It stays listed
+      // (status failed) until the cashier fixes and resubmits or deletes it.
+      entry.status = 'failed'; entry.uncertain = false;
+      entry.lastError = 'URA ' + r.returnCode + ': ' + r.returnMessage;
+      results.push({ id: entry.id, tenantId: entry.tenantId || '', reference: entry.reference, ok: false, error: entry.lastError });
+    }
+  } catch (e) {
+    entry.lastError = e.message;
+    results.push({ id: entry.id, tenantId: entry.tenantId || '', reference: entry.reference, ok: false, error: e.message, network: isNetworkError(e) });
+    if (isNetworkError(e)) return true; // still offline - stop, keep the rest queued
+  }
+  return false;
+}
+async function flushOfflineQueue(credsFor) {
+  if (_flushing) return { busy: true, results: [] };
+  _flushing = true;
+  const results = [];
+  try {
+    const q = loadQueue();
+    // Each entry runs under its own business, so the lines it prints (activity
+    // log) are tagged with that business, not with whoever pressed Try now.
+    const base = reqCtx.getStore();
+    const user = (base && base.user) || null;
+    for (const entry of q.filter(e => e.status === 'pending' || needsWriteBack(e))) {
+      const stop = await reqCtx.run({ user, tenantId: entry.tenantId || '' }, () => flushOne(entry, credsFor, results));
+      if (stop) break;
+    }
+    // Persist: reload the queue (it may have changed while we were waiting on
+    // EFRIS) and merge only the fields the flush owns; completed entries stay for
+    // a day (see above).
+    const dayAgo = Date.now() - 86400000;
+    const fresh = loadQueue();
+    for (const e of fresh) {
+      const u = q.find(x => x.id === e.id); if (!u) continue;
+      for (const k of FLUSH_FIELDS) if (k in u) e[k] = u[k];
+    }
+    saveQueue(fresh.filter(e => e.status !== 'done' || Date.parse(e.doneAt || 0) > dayAgo));
+  } finally { _flushing = false; }
+  return { results };
+}
+
+// Flush button: secrets supplied now by the extension (efrisPassword + Manager token).
 app.post('/api/offline-queue/flush', rateLimit(20), async (req, res) => {
   const { config, accessToken } = req.body || {};
-  const q = loadQueue();
-  const pending = q.filter(e => e.status === 'pending');
+  // Only this caller's business: never send another business's queued sales with
+  // this caller's EFRIS credentials.
+  const tid = reqTenant(req);
+  const mine = e => !!config && String((e.cfgPublic || {}).tin || '') === String(config.tin || '') && String(e.tenantId || '') === tid;
+  const pending = loadQueue().filter(e => (e.status === 'pending' || needsWriteBack(e)) && mine(e));
   if (!pending.length) return res.json({ success: true, processed: 0, results: [] });
   if (!config || !config.efrisPassword) return res.status(400).json({ success: false, error: 'EFRIS password required to flush the offline queue' });
-  const results = [];
-  for (const entry of pending) {
-    // Merge in the caller's current Enabler settings so flush can also route to it.
-    const cfg = { ...entry.cfgPublic, efrisPassword: config.efrisPassword, enablerUrl: config.enablerUrl, enablerMode: config.enablerMode, efrisKeyPath: config.efrisKeyPath, efrisKeyPem: config.efrisKeyPem, efrisKeyPassphrase: config.efrisKeyPassphrase };
-    const targets = efrisEndpoints(cfg);
-    entry.attempts = (entry.attempts || 0) + 1;
-    try {
-      let r = null, netErr = null;
-      for (const t of targets) {
-        try { r = await performInvoiceSubmission(entry.invoice, cfgForTarget(cfg, t), t.url); netErr = null; break; }
-        catch (te) { if (isNetworkError(te)) { netErr = te; continue; } throw te; }
-      }
-      if (!r && netErr) throw netErr;
-      if (r.ok) {
-        entry.status = 'done'; entry.fdn = r.fdn;
-        // Best-effort write-back to the source Manager document.
-        if (entry.documentKey && entry.managerEndpoint && accessToken) {
-          try { await saveEfrisToManager(normEp(entry.managerEndpoint), accessToken, bareKey(entry.documentKey), r, cfg.vatRegistered); } catch(e) { console.log('offline write-back error: ' + e.message); }
-        }
-        results.push({ id: entry.id, reference: entry.reference, ok: true, fdn: r.fdn });
-      } else {
-        entry.lastError = 'URA ' + r.returnCode + ': ' + r.returnMessage;
-        results.push({ id: entry.id, reference: entry.reference, ok: false, error: entry.lastError });
-      }
-    } catch (e) {
-      entry.lastError = e.message;
-      results.push({ id: entry.id, reference: entry.reference, ok: false, error: e.message, network: isNetworkError(e) });
-      if (isNetworkError(e)) break; // still offline - stop, keep the rest queued
-    }
+  const extra = { efrisPassword: config.efrisPassword, enablerUrl: config.enablerUrl, enablerMode: config.enablerMode, efrisKeyPath: config.efrisKeyPath, efrisKeyPem: config.efrisKeyPem, efrisKeyPassphrase: config.efrisKeyPassphrase };
+  // A token filled from the vault goes only to the business's saved endpoint.
+  const out = await flushOfflineQueue(e => (mine(e) ? { cfg: extra, accessToken, fromVault: !!req.vaultFilled, managerEndpoint: req.vaultEndpoint || '' } : null));
+  if (out.busy) return res.json({ success: true, processed: 0, results: [], busy: true, remaining: pending.length });
+  res.json({ success: true, processed: out.results.length, results: out.results, remaining: loadQueue().filter(e => e.status === 'pending' && mine(e)).length });
+});
+
+// Automatic retry: every 3 minutes, re-submit queued documents using each
+// business's credentials from the vault, so a document queued while URA was
+// unreachable gets its FDN once the connection is back, without anyone pressing
+// Flush. Entries with no saved credentials wait for the Flush button.
+function offlineCredsFromVault(entry) {
+  if (!entry.tenantId) return null;
+  let t = null; try { t = vault.getTenant(entry.tenantId); } catch (_) { return null; }
+  if (!t || !t.efrisPassword) return null;
+  return { cfg: { efrisPassword: t.efrisPassword, efrisKeyPem: t.efrisPrivateKeyPem || '', efrisKeyPath: t.efrisPrivateKeyPath || '', efrisKeyPassphrase: t.efrisPassphrase || '',
+                  enablerUrl: t.enablerUrl, enablerMode: t.enablerMode, enablerDeviceNo: t.enablerDeviceNo }, accessToken: t.managerToken || '',
+           fromVault: true, managerEndpoint: t.managerEndpoint || '' };
+}
+// Schedule: a full retry every 3 minutes, plus a quick check every 30 seconds
+// that URA answers at all, so a sale goes out within ~30s of the connection
+// returning. The queue is a file in DATA_DIR, so it survives the relay being
+// closed: the first retry runs about a minute after the relay starts (once the
+// vault has unlocked).
+const RETRY_EVERY = 3 * 60000;
+const _retry = { nextAt: Date.now() + 60000, lastAt: 0, lastOutcome: '', online: null };
+async function autoRetryQueue(why) {
+  const pend = loadQueue().filter(e => (e.status === 'pending' || needsWriteBack(e)) && e.tenantId);
+  if (!pend.length) { _retry.nextAt = Date.now() + RETRY_EVERY; return { results: [], processed: 0 }; }
+  _retry.lastAt = Date.now();
+  const out = await flushOfflineQueue(offlineCredsFromVault);
+  if (out.busy) return out;
+  _retry.nextAt = Date.now() + RETRY_EVERY;
+  const ok = (out.results || []).filter(r => r.ok);
+  const net = (out.results || []).some(r => r.network);
+  // Summary lines go out per business (tagged with it); the connection line is
+  // about the relay, not any one business.
+  const base = reqCtx.getStore();
+  const user = (base && base.user) || null;
+  if (ok.length) {
+    _retry.lastOutcome = 'sent'; _retry.online = true;
+    const byTenant = new Map();
+    for (const r of ok) { const t = r.tenantId || ''; if (!byTenant.has(t)) byTenant.set(t, []); byTenant.get(t).push(r); }
+    for (const [t, list] of byTenant) reqCtx.run({ user, tenantId: t }, () => console.log('   Offline queue: ' + list.length + ' queued document(s) fiscalised automatically' + (why ? ' (' + why + ')' : '') + ': ' + list.map(r => r.reference + ' FDN ' + r.fdn).join(', ')));
   }
-  // Persist: drop completed entries, keep the rest with updated attempts/errors.
-  saveQueue(loadQueue().map(e => { const u = q.find(x => x.id === e.id); return u || e; }).filter(e => e.status !== 'done'));
-  res.json({ success: true, processed: results.length, results, remaining: loadQueue().filter(e => e.status === 'pending').length });
+  else if (net) { _retry.lastOutcome = 'offline'; _retry.online = false; reqCtx.run({ user, tenantId: '' }, () => console.log('   Offline queue: URA still unreachable, will retry in 3 minutes')); }
+  else if (!(out.results || []).length) _retry.lastOutcome = 'no-credentials';
+  else _retry.lastOutcome = 'error';
+  return out;
+}
+setInterval(async () => {
+  try {
+    const work = loadQueue().filter(e => (e.status === 'pending' || needsWriteBack(e)) && e.tenantId);
+    if (!work.length) return;
+    if (Date.now() >= _retry.nextAt) { await autoRetryQueue(''); return; }
+    const pend = work.filter(e => e.status === 'pending');
+    if (!pend.length) return;
+    const mode = ((pend[0].cfgPublic || {}).mode === 'production') ? 'production' : 'sandbox';
+    const up = await pingUrl(uraHost(mode), 3500);
+    const was = _retry.online; _retry.online = up;
+    if (up && was === false) { console.log('   Offline queue: URA is reachable again - sending ' + pend.length + ' queued document(s) now'); await autoRetryQueue('back online'); }
+  } catch (e) { console.log('   Offline queue auto-retry error: ' + e.message); }
+}, 30000).unref();
+
+app.post('/api/offline-queue/retry-now', rateLimit(20), async (req, res) => {
+  try {
+    const out = await autoRetryQueue('Try now');
+    if (out.busy) return res.json({ success: true, busy: true });
+    const results = out.results || [];
+    res.json({ success: true, sent: results.filter(r => r.ok).length, offline: results.some(r => r.network), processed: results.length,
+      pending: loadQueue().filter(queueView(req)).filter(e => e.status === 'pending').length });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -4314,9 +7554,7 @@ function saveSeries(data) {
 }
 
 function buildNumber(s, counter) {
-  const now = new Date();
-  const year  = String(now.getFullYear());
-  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const { year, month } = eatParts();   // Uganda time, whatever the server's zone
   const parts = [];
   for (const seg of (s.segments || [])) {
     if (seg === 'prefix'   && s.prefix)   parts.push(s.prefix);
@@ -4324,15 +7562,14 @@ function buildNumber(s, counter) {
     if (seg === 'project'  && s.project)  parts.push(s.project);
     if (seg === 'year')    parts.push(year);
     if (seg === 'month')   parts.push(month);
-    if (seg === 'counter') parts.push(String(counter).padStart(s.digits || 4, '0'));
+    if (seg === 'counter') parts.push(String(counter).padStart(Math.min(Math.max(parseInt(s.digits, 10) || 4, 1), 12), '0'));
   }
   return parts.join(s.separator === 'none' ? '' : (s.separator || '-'));
 }
 
 function resolveNext(s) {
-  const now = new Date();
-  const year  = String(now.getFullYear());
-  const ym    = year + '-' + String(now.getMonth() + 1).padStart(2, '0');
+  const { year, month } = eatParts();
+  const ym    = year + '-' + month;
   const startAt = parseInt(s.startAt) || 1;
   let counter = (s.lastCounter || 0) + 1;
   // When a reset period rolls over, restart at the series' starting number - NOT
@@ -4342,11 +7579,82 @@ function resolveNext(s) {
   return counter;
 }
 
+// A series belongs to the business that created it (tenantId). Older series with
+// no tenantId stay visible to owners and to admins of the requested business; an
+// admin who edits one claims it for that business.
+// perm: what the caller needs in the series' business ('sell' to use it, 'series' to change it).
+function seriesVisible(req, s, perm) {
+  const tid = reqTenant(req), user = req.auth;
+  if (s.tenantId) {
+    if (tid ? s.tenantId !== tid : !tenantIdsFor(user).includes(s.tenantId)) return false;
+    return auth.can(auth.permissionsFor(user, s.tenantId), perm || 'sell');
+  }
+  if (user && (user.owner || user.service)) return true;
+  return !!tid && auth.roleIn(user, tid) === 'admin';
+}
+function findSeries(req, series, perm) {
+  const idx = series.findIndex(x => x.id === req.params.id);
+  return idx >= 0 && seriesVisible(req, series[idx], perm) ? idx : -1;
+}
+
+// Next walk-in receipt number (PREFIX-YYMMDD-NNN) for the checked business, shared by
+// every browser and till: one counter on the relay, never below the highest number
+// already used today in the submission log or the offline queue.
+const RECEIPT_COUNTER_FILE = path.join(DATA_DIR, 'receipt_counters.json');
+app.post('/api/receipt-number/next', (req, res) => {
+  const tid = reqTenant(req) || 'default';
+  const prefix = String((req.body || {}).prefix || 'REC').replace(/[^A-Za-z0-9]/g, '').slice(0, 10) || 'REC';
+  const ymd = String((req.body || {}).ymd || eatToday().slice(2).replace(/-/g, ''));
+  if (!/^\d{6}$/.test(ymd)) return res.status(400).json({ success: false, error: 'ymd must be YYMMDD' });
+  const key = tid + '|' + prefix + '|' + ymd;
+  const rx = new RegExp('^' + prefix + '-' + ymd + '-(\\d+)$', 'i');
+  let max = 0;
+  const seen = ref => { const m = String(ref || '').match(rx); if (m) max = Math.max(max, parseInt(m[1], 10) || 0); };
+  for (const e of readSubmissionLog()) if (!e.tenantId || e.tenantId === tid) seen(e.reference);
+  try { for (const q of loadQueue()) seen(q && (q.reference || (q.invoice && q.invoice.Reference))); } catch (_) {}
+  let counters = {};
+  try { counters = JSON.parse(fs.readFileSync(RECEIPT_COUNTER_FILE, 'utf8')) || {}; } catch (_) {}
+  const n = Math.max(max, parseInt(counters[key], 10) || 0) + 1;
+  counters[key] = n;
+  for (const k of Object.keys(counters)) if (!k.endsWith('|' + ymd) && k.split('|')[2] < ymd) delete counters[k];   // keep today only
+  try { writeFileAtomic(RECEIPT_COUNTER_FILE, JSON.stringify(counters)); } catch (_) {}
+  res.json({ success: true, number: prefix + '-' + ymd + '-' + String(n).padStart(3, '0') });
+});
+
+// Goods > My Items for the checked business, kept on the relay so every computer
+// shows the same list (it used to live in one browser only). One file, keyed by
+// business. updatedAt lets a browser tell whether its copy is the newer one.
+const GOODS_CATALOG_FILE = path.join(DATA_DIR, 'goods_catalog.json');
+const GOODS_CATALOG_MAX = 5000;
+function readGoodsCatalogs() { try { return JSON.parse(fs.readFileSync(GOODS_CATALOG_FILE, 'utf8')) || {}; } catch (_) { return {}; } }
+app.get('/api/goods-catalog', (req, res) => {
+  const tid = reqTenant(req);
+  if (!tid) return res.status(400).json({ success: false, error: 'Choose a business first' });
+  const c = readGoodsCatalogs()[tid];
+  res.json({ success: true, items: (c && Array.isArray(c.items)) ? c.items : [], updatedAt: (c && c.updatedAt) || '' });
+});
+app.put('/api/goods-catalog', (req, res) => {
+  const tid = reqTenant(req);
+  if (!tid) return res.status(400).json({ success: false, error: 'Choose a business first' });
+  const b = req.body || {};
+  if (!Array.isArray(b.items)) return res.status(400).json({ success: false, error: 'items must be a list' });
+  if (b.items.length > GOODS_CATALOG_MAX) return res.status(400).json({ success: false, error: 'Too many items (most ' + GOODS_CATALOG_MAX + ')' });
+  if (b.items.some(i => !i || typeof i !== 'object' || Array.isArray(i))) return res.status(400).json({ success: false, error: 'Each item must be an object' });
+  const all = readGoodsCatalogs();
+  // Saved on another computer since this browser loaded it: hand back the newer list.
+  const cur = all[tid];
+  if (b.baseUpdatedAt !== undefined && cur && cur.updatedAt && String(b.baseUpdatedAt) !== String(cur.updatedAt) && !b.force) {
+    return res.status(409).json({ success: false, error: 'My Items was changed on another computer', items: cur.items || [], updatedAt: cur.updatedAt });
+  }
+  const updatedAt = new Date().toISOString();
+  all[tid] = { items: b.items, updatedAt, by: (req.auth && (req.auth.displayName || req.auth.name)) || '' };
+  try { writeFileAtomic(GOODS_CATALOG_FILE, JSON.stringify(all)); }
+  catch (e) { return res.status(500).json({ success: false, error: 'Could not save My Items: ' + e.message }); }
+  res.json({ success: true, updatedAt, count: b.items.length });
+});
+
 app.get('/api/number-series', (req, res) => {
-  const series = loadSeries();
-  const now = new Date();
-  const year = String(now.getFullYear());
-  const ym   = year + '-' + String(now.getMonth() + 1).padStart(2, '0');
+  const series = loadSeries().filter(s => seriesVisible(req, s));
   res.json(series.map(s => ({
     ...s,
     preview: buildNumber(s, resolveNext(s))
@@ -4355,14 +7663,13 @@ app.get('/api/number-series', (req, res) => {
 
 app.post('/api/number-series', (req, res) => {
   const series = loadSeries();
-  const now = new Date();
-  const year = String(now.getFullYear());
-  const ym   = year + '-' + String(now.getMonth() + 1).padStart(2, '0');
+  const { year, month } = eatParts();
+  const ym   = year + '-' + month;
   // Initialise lastReset to the CURRENT period so the reset rule doesn't fire on the
   // very first number and wipe out the configured starting number.
   const lastReset = req.body.resetOn === 'monthly' ? ym : (req.body.resetOn === 'yearly' ? year : '');
   const startAt = parseInt(req.body.startAt) || 1;
-  const s = { ...req.body, id: crypto.randomUUID(), startAt, lastCounter: startAt - 1, lastReset };
+  const s = { ...req.body, id: crypto.randomUUID(), startAt, lastCounter: startAt - 1, lastReset, tenantId: reqTenant(req) || undefined };
   series.push(s);
   saveSeries(series);
   res.json({ success: true, series: { ...s, preview: buildNumber(s, resolveNext(s)) } });
@@ -4370,35 +7677,38 @@ app.post('/api/number-series', (req, res) => {
 
 app.put('/api/number-series/:id', (req, res) => {
   const series = loadSeries();
-  const idx = series.findIndex(s => s.id === req.params.id);
+  const idx = findSeries(req, series, 'series');
   if (idx === -1) return res.status(404).json({ success: false, error: 'Not found' });
-  series[idx] = { ...series[idx], ...req.body, id: req.params.id, lastCounter: series[idx].lastCounter, lastReset: series[idx].lastReset };
+  const old = series[idx];
+  series[idx] = { ...old, ...req.body, id: req.params.id, lastCounter: old.lastCounter, lastReset: old.lastReset, tenantId: old.tenantId || reqTenant(req) || undefined };
   saveSeries(series);
   res.json({ success: true, series: { ...series[idx], preview: buildNumber(series[idx], resolveNext(series[idx])) } });
 });
 
 app.delete('/api/number-series/:id', (req, res) => {
   const series = loadSeries();
-  const filtered = series.filter(s => s.id !== req.params.id);
-  saveSeries(filtered);
+  const idx = findSeries(req, series, 'series');
+  if (idx === -1) return res.status(404).json({ success: false, error: 'Not found' });
+  series.splice(idx, 1);
+  saveSeries(series);
   res.json({ success: true });
 });
 
 app.post('/api/number-series/:id/preview', (req, res) => {
   const series = loadSeries();
-  const s = series.find(x => x.id === req.params.id);
-  if (!s) return res.status(404).json({ success: false, error: 'Not found' });
+  const idx = findSeries(req, series);
+  if (idx === -1) return res.status(404).json({ success: false, error: 'Not found' });
+  const s = series[idx];
   res.json({ success: true, number: buildNumber(s, resolveNext(s)) });
 });
 
 app.post('/api/number-series/:id/next', (req, res) => {
   const series = loadSeries();
-  const idx = series.findIndex(x => x.id === req.params.id);
+  const idx = findSeries(req, series);
   if (idx === -1) return res.status(404).json({ success: false, error: 'Not found' });
   const s = series[idx];
-  const now = new Date();
-  const year = String(now.getFullYear());
-  const ym   = year + '-' + String(now.getMonth() + 1).padStart(2, '0');
+  const { year, month } = eatParts();   // Uganda time
+  const ym   = year + '-' + month;
   const counter = resolveNext(s);
   const number = buildNumber(s, counter);
   series[idx].lastCounter = counter;
@@ -4422,53 +7732,157 @@ async function verifyManagerAccess(managerEndpoint, accessToken) {
   } catch (e) { return false; }
 }
 
-// Create/update a tenant's credentials (encrypted at rest). Requires a working
-// Manager token for the given endpoint (proves the caller owns that business).
+// ── Business setup (profile) ──
+// Everything the extension saves for a business except its secrets. Secret-looking
+// keys and private keys are dropped at any depth (the vault keeps the real ones);
+// placeholders are dropped too and put back from the vault on the way out.
+const PROFILE_MAX = 3 * 1024 * 1024;
+const PROFILE_SECRET_KEY = /^(efrisPassword|efrisKeyPem|efrisKeyPassphrase|accessToken|apiAccessToken|managerToken|efrisPrivateKeyPem|efrisPassphrase|token|tk)$|password|passphrase|secret|privatekey/i;
+const BAD_KEY = new Set(['__proto__', 'constructor', 'prototype']);
+function stripProfile(v, depth) {
+  if (depth > 8) return undefined;
+  if (v === null || typeof v === 'number' || typeof v === 'boolean') return v;
+  if (typeof v === 'string') return (v === VAULT_PLACEHOLDER || /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(v)) ? undefined : v;
+  if (Array.isArray(v)) return v.slice(0, 5000).map(x => { const c = stripProfile(x, depth + 1); return c === undefined ? null : c; });
+  if (typeof v === 'object') {
+    const o = {};
+    for (const k of Object.keys(v)) {
+      if (BAD_KEY.has(k) || PROFILE_SECRET_KEY.test(k)) continue;
+      const c = stripProfile(v[k], depth + 1);
+      if (c !== undefined) o[k] = c;
+    }
+    return o;
+  }
+  return undefined;
+}
+function cleanProfile(p) {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
+  const o = stripProfile(p, 0);
+  delete o.tenantId;   // the record's own id is used
+  if (typeof o.profileUpdatedAt !== 'string' || !o.profileUpdatedAt) o.profileUpdatedAt = new Date().toISOString();
+  return o;
+}
+// The profile as the extension stores it: secrets as placeholders. A business
+// saved before profiles existed gets one built from its vault record.
+function profileForClient(id, rec) {
+  const m = rec.meta || {};
+  const p = rec.profile ? { ...rec.profile } : {
+    tin: m.tin, deviceNo: m.deviceNo, legalName: m.businessName, tradeName: m.tradeName || m.businessName,
+    managerEndpoint: m.managerEndpoint, sandbox: m.mode !== 'production', vatReg: !!rec.vatRegistered, profileUpdatedAt: '',
+  };
+  const has = rec.has || {};
+  p.tenantId = id;
+  p.efrisPassword = has.efrisPassword ? VAULT_PLACEHOLDER : '';
+  p.efrisKeyPem = has.efrisPrivateKeyPem ? VAULT_PLACEHOLDER : '';
+  p.efrisKeyPassphrase = has.efrisPassphrase ? VAULT_PLACEHOLDER : '';
+  p.accessToken = has.managerToken ? VAULT_PLACEHOLDER : '';
+  return p;
+}
+
+// Create/update a tenant's credentials (encrypted at rest). Allowed for an owner,
+// or an admin of that business. A new business can be added by an owner or by
+// anyone who administers another business; its creator becomes its admin.
+// With a Manager token, it must also reach the given Manager endpoint.
 app.post('/api/tenant', async (req, res) => {
   const b = req.body || {};
   const id = String(b.id || b.tin || '').trim();
   if (!id) return res.status(400).json({ success: false, error: 'tenant id (or TIN) required' });
+  const user = req.auth;
+  const privileged = !!(user.owner || user.service);
+  let exists = false; try { exists = vault.listTenants().some(t => t.id === id); } catch (_) {}
+  const roleHere = auth.roleIn(user, id);
+  if (!privileged) {
+    if (exists || roleHere) { if (roleHere !== 'admin') return res.status(403).json({ success: false, error: 'You do not have access to this business' }); }
+    else if (!adminTenantIds(user).length) return res.status(403).json({ success: false, error: 'Your role cannot do this', permission: 'admin' });
+  }
+  // A new Manager address needs the token typed again (and verified against it),
+  // or the saved token would follow the address to another server.
+  if (exists && b.managerEndpoint && !b.managerToken) {
+    let saved = ''; try { saved = (vault.getTenant(id) || {}).managerEndpoint || ''; } catch (_) {}
+    if (saved && normEp(saved) !== normEp(b.managerEndpoint)) return res.status(400).json({ success: false, error: 'Enter the Manager access token again when you change the Manager address.' });
+  }
   if (b.managerEndpoint && b.managerToken) {
     const ok = await verifyManagerAccess(b.managerEndpoint, b.managerToken);
     if (!ok) return res.status(403).json({ success: false, error: 'Manager token cannot access that endpoint - not authorised to store credentials for this business.' });
   }
+  // The business setup (non-secret settings) the extension shows on every computer.
+  // Newest wins: a copy older than the one on the relay is refused, and the
+  // caller gets the relay's copy to load instead.
+  let profile;
+  if (b.profile !== undefined) {
+    profile = cleanProfile(b.profile);
+    if (!profile) return res.status(400).json({ success: false, error: 'The business setup is not valid.' });
+    if (JSON.stringify(profile).length > PROFILE_MAX) return res.status(413).json({ success: false, error: 'The business setup is too large (logo or signature image too big). Use a smaller image.' });
+    let cur = null; try { cur = vault.getProfile(id); } catch (_) {}
+    const curAt = (cur && cur.profile && cur.profile.profileUpdatedAt) || '';
+    if (curAt && String(profile.profileUpdatedAt) < curAt) {
+      return res.status(409).json({ success: false, conflict: true, error: 'These settings were changed on another computer after this one loaded them.', profile: profileForClient(id, cur) });
+    }
+  }
   try {
     const meta = vault.putTenant(id, {
+      profile,
       tin: b.tin, deviceNo: b.deviceNo, mode: b.mode, businessName: b.businessName,
       tradeName: b.tradeName, address: b.address, brn: b.brn, phone: b.phone, email: b.email,
-      vatRegistered: !!b.vatRegistered,
-      efrisPrivateKeyPem: b.efrisPrivateKeyPem, efrisPassphrase: b.efrisPassphrase,
+      vatRegistered: b.vatRegistered === undefined ? undefined : !!b.vatRegistered,
+      efrisPrivateKeyPem: b.efrisPrivateKeyPem, efrisPassphrase: b.efrisPassphrase, efrisPassword: b.efrisPassword,
       efrisPrivateKeyPath: b.efrisPrivateKeyPath,
       managerEndpoint: b.managerEndpoint, managerToken: b.managerToken,
       enablerUrl: b.enablerUrl, enablerMode: b.enablerMode, enablerDeviceNo: b.enablerDeviceNo,
     });
+    if (!exists && !privileged && !roleHere) auth.grantRole(user.id, id, 'admin');
+    if (!exists) console.log('   Business "' + (b.businessName || id) + '" added by ' + (user.name || 'service'));
+    if (profile) console.log('   Business setup of "' + (meta.tradeName || meta.businessName || id) + '" saved by ' + (user.name || 'service'));
     res.json({ success: true, tenant: meta });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
+// One business's setup for the extension: any role in that business may read it,
+// so a new browser, address or till gets the business without onboarding. Secrets
+// never leave the vault: each one is '__vault__' when saved, '' when not.
+app.get('/api/tenant/:id/profile', (req, res) => {
+  const id = String(req.params.id || '').trim();
+  if (!canUseTenant(req.auth, id)) return res.status(403).json({ success: false, error: 'You do not have access to this business' });
+  let rec = null;
+  try { rec = vault.getProfile(id); } catch (e) { return res.status(500).json({ success: false, error: e.message }); }
+  if (!rec) return res.status(404).json({ success: false, error: 'This business is not saved on EFRISConnect yet.' });
+  const profile = profileForClient(id, rec);
+  res.json({ success: true, profile, derived: !rec.profile, mgrBusiness: profile.mgrBusiness || '', updatedAt: profile.profileUpdatedAt || '', role: auth.roleIn(req.auth, id) });
+});
+
+// Only the businesses this user holds a role in (owners: all), with the role.
 app.get('/api/tenant', (req, res) => {
-  try { res.json({ success: true, tenants: vault.listTenants() }); }
-  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+  try {
+    const mine = new Set(tenantIdsFor(req.auth));
+    res.json({ success: true, tenants: vault.listTenants().filter(t => mine.has(t.id)).map(t => ({ ...t, role: auth.roleIn(req.auth, t.id) })) });
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 app.delete('/api/tenant/:id', (req, res) => {
-  try { vault.delTenant(req.params.id); res.json({ success: true }); }
+  const id = String(req.params.id || '');
+  if (auth.roleIn(req.auth, id) !== 'admin') return res.status(403).json({ success: false, error: 'You do not have access to this business' });
+  try {
+    vault.delTenant(id); auth.removeTenantRoles(id);
+    const cats = readGoodsCatalogs(); if (cats[id]) { delete cats[id]; writeFileAtomic(GOODS_CATALOG_FILE, JSON.stringify(cats)); }
+    res.json({ success: true });
+  }
   catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // ══════════════════════════════════════════════════════════════
 //  /extension ROUTE - serve EXTENSION_HTML
 // ══════════════════════════════════════════════════════════════
-// Inject API key into any HTML page we serve
-function injectApiKey(html) {
-  return html.replace('</head>', `<script>window.__API_KEY="${API_KEY}";</script></head>`);
+// Pages get the allowed Manager origins only. No key: every API call needs a
+// signed-in session (Authorization: Bearer), so a page is useless on its own.
+function injectPageConfig(html) {
+  const extra = JSON.stringify(EXTRA_ORIGINS).replace(/</g, '\\u003c');
+  const lan = JSON.stringify(LAN_URLS[0] || '').replace(/</g, '\\u003c');
+  return html.replace('</head>', `<script>window.__ALLOWED_ORIGINS=${extra};window.__LAN_URL=${lan};</script></head>`);
 }
 
 app.get('/extension', (req, res) => {
-  res.setHeader('X-Frame-Options', 'ALLOWALL');
-  res.setHeader('Content-Security-Policy', 'frame-ancestors *');
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(injectApiKey(EXTENSION_HTML));
+  res.send(injectPageConfig(EXTENSION_HTML));
 });
 
 // Root - an informational landing page, separate from the extension itself.
@@ -4483,6 +7897,17 @@ app.get('/', (req, res) => {
 // ── Static files and SPA fallback ────────────────────────────
 const FRONTEND = path.join(__dirname, '..', 'frontend');
 app.use(express.static(FRONTEND, { index: false }));
+
+// Offline PDF engine (html2pdf = jsPDF + html2canvas) for the receipt viewer's
+// "Save PDF" button. Served from the local relay with a long immutable cache so
+// it loads once; no internet/CDN needed. Must be before the SPA catch-all.
+app.get('/html2pdf.bundle.min.js', (req, res) => {
+  try {
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(fs.readFileSync(path.join(FRONTEND, 'html2pdf.bundle.min.js')));
+  } catch (e) { res.status(404).send('// html2pdf not available'); }
+});
 
 // Dedicated receipt viewer - must be before the SPA catch-all. Inject the offline
 // QR encoder from the local relay so the printed receipt needs NO internet/CDN.
@@ -4501,8 +7926,29 @@ app.get('/receipt', (req, res) => {
 // The branded Manager custom-theme HTML, served as plain text so it can be
 // copied and pasted into Manager → Settings → Themes.
 // The branded theme HTML with the offline QR encoder inlined (self-contained).
-function getBrandedThemeHtml() {
+// Only the document settings the theme uses, type-checked and length-capped
+// (they end up inside a script in Manager's theme).
+function themePrefs(p) {
+  p = (p && typeof p === 'object') ? p : {};
+  const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+  const out = { band: /^#[0-9a-f]{6}$/i.test(p.band || '') ? p.band : '#1f2937', footer: str(p.footer, 600), pay: {}, show: {}, paper: {}, seller: {},
+    nameMode: ['legal', 'trade', 'both'].includes(p.nameMode) ? p.nameMode : 'legal' };
+  // Seller details from the extension's EFRIS settings, for when Manager's
+  // Business Details are empty (the legal name and TIN are what URA requires).
+  const sel = p.seller || {};
+  ['legal', 'trade', 'tin', 'brn', 'address', 'phone', 'email'].forEach(k => { const v = str(sel[k], 200).trim(); if (v) out.seller[k] = v; });
+  const pay = p.pay || {};
+  ['bank', 'accName', 'accNo', 'momo', 'terms'].forEach(k => { const v = str(pay[k], 160); if (v) out.pay[k] = v; });
+  const show = p.show || {};
+  ['servedBy', 'signatures'].forEach(k => { if (typeof show[k] === 'boolean') out.show[k] = show[k]; });
+  const PAPERS = ['A4', 'A5', 'Letter', 'A6', '80mm', '58mm'], paper = p.paper || {};
+  ['receipt', 'invoice', 'credit'].forEach(k => { if (PAPERS.includes(paper[k])) out.paper[k] = paper[k]; });
+  return out;
+}
+function getBrandedThemeHtml(prefs) {
   let html = fs.readFileSync(path.join(FRONTEND, 'manager-theme.html'), 'utf8');
+  const js = 'var EFC_PREFS=' + JSON.stringify(themePrefs(prefs)).replace(/</g, '\\u003c') + ';';
+  html = html.replace('/*@PREFS@*/', () => js);
   try {
     const lib = fs.readFileSync(path.join(FRONTEND, 'qrcode.lib.js'), 'utf8');
     // Function replacement - a string replacement would interpret "$'" in the lib.
@@ -4514,7 +7960,8 @@ function getBrandedThemeHtml() {
 app.get('/branded-theme', (req, res) => {
   try {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.send(getBrandedThemeHtml());
+    let prefs = null; try { prefs = req.query.prefs ? JSON.parse(String(req.query.prefs)) : null; } catch (_) {}
+    res.send(getBrandedThemeHtml(prefs));
   } catch (e) { res.status(500).send('theme not found'); }
 });
 
@@ -4523,27 +7970,45 @@ app.get('/branded-theme', (req, res) => {
 // automatically. Manager's theme object shape isn't documented, so we try a few
 // field-name variants; pass themeKey to update an existing theme in place.
 app.post('/api/manager/install-theme', async (req, res) => {
-  const { managerEndpoint, accessToken, themeKey } = req.body || {};
+  const { managerEndpoint, accessToken, themeKey, prefs } = req.body || {};
   if (!managerEndpoint || !accessToken) return res.status(400).json({ success: false, error: 'managerEndpoint and accessToken required' });
   const ep = normEp(managerEndpoint);
-  let html; try { html = getBrandedThemeHtml(); } catch (e) { return res.status(500).json({ success: false, error: 'theme file missing' }); }
+  let html; try { html = getBrandedThemeHtml(prefs); } catch (e) { return res.status(500).json({ success: false, error: 'theme file missing' }); }
   const NAME = 'EFRISConnect';
   // Manager has used different field names for the theme body across builds. Send
   // ALL candidate content fields in one payload - Manager fills the one it knows
   // and ignores the rest, so we don't have to guess which build we're on.
   const body = { Name: NAME, Content: html, Template: html, Html: html, Theme: html, Body: html, Value: html };
-  const key = bareKey(themeKey || '');
-  const path = '/custom-theme-form' + (key ? '/' + key : '');
-  let newKey = key || null;
+  // No stored key (it was never captured): reuse the EFRISConnect theme that the
+  // Form Defaults already point at, instead of creating yet another one.
+  let key = bareKey(themeKey || '');
+  if (!key) { try { key = await findInstalledThemeKey(ep, accessToken, NAME); if (key) console.log('   Theme: reusing the EFRISConnect theme set in Form Defaults (' + key + ')'); } catch (_) {} }
+  let newKey = null, updated = false;
+  const gated = st => st === 401 || st === 403;
+  // Settings saves re-send the theme automatically. Skip the push when it is the
+  // same theme this relay last pushed (the Install button always pushes).
+  const themeHash = crypto.createHash('sha1').update(html).digest('hex');
+  if (key && !(req.body && req.body.setDefault) && _themePushed[ep + '|' + key] === themeHash) return res.json({ success: true, key, updated: false, unchanged: true });
   try {
-    const r = await managerCall(ep, accessToken, 'POST', path, body);
-    if (r.status === 401 || r.status === 403) {
-      return res.json({ success: false, gated: true, error: 'Manager rejected the theme API (HTTP ' + r.status + '). This access token lacks theme permission - use the copy-paste method.' });
+    // Update in place with PUT (Manager's update verb). A POST to the key's address
+    // creates a NEW theme, which is how a duplicate "EFRISConnect" appeared.
+    if (key) {
+      const u = await managerCall(ep, accessToken, 'PUT', '/custom-theme-form/' + key, body);
+      if (gated(u.status)) return res.json({ success: false, gated: true, error: 'Manager rejected the theme API (HTTP ' + u.status + '). This access token lacks theme permission - use the copy-paste method.' });
+      if (u.status >= 200 && u.status < 300) { newKey = key; updated = true; console.log('   Theme updated in Manager (' + key + ')'); }
+      else if (u.status !== 404) return res.json({ success: false, error: 'Manager did not accept the theme update (HTTP ' + u.status + '). Nothing was created. Use the copy-paste method.' });
+      // 404: the stored theme was deleted in Manager, so create a fresh one below.
     }
-    if (!(r.status >= 200 && r.status < 400)) {
-      return res.json({ success: false, error: 'Manager did not accept the theme (HTTP ' + r.status + '). Use the copy-paste method.' });
+    if (!updated) {
+      const r = await managerCall(ep, accessToken, 'POST', '/custom-theme-form', body);
+      if (gated(r.status)) return res.json({ success: false, gated: true, error: 'Manager rejected the theme API (HTTP ' + r.status + '). This access token lacks theme permission - use the copy-paste method.' });
+      if (!(r.status >= 200 && r.status < 400)) return res.json({ success: false, error: 'Manager did not accept the theme (HTTP ' + r.status + '). Use the copy-paste method.' });
+      newKey = (r.data && (r.data.key || r.data.Key || r.data.id)) || (typeof r.data === 'string' && /^[0-9a-f-]{36}$/i.test(r.data.trim()) ? r.data.trim() : null);
+      // Manager returns the new record's address in the Location header.
+      if (!newKey && r.headers) { const loc = r.headers.location || r.headers.Location || ''; const k = String(loc).split('?')[0].split('/').filter(Boolean).pop(); if (k && /^[0-9a-f-]{36}$/i.test(k)) newKey = k; }
+      console.log('   Theme created in Manager' + (newKey ? ' (' + newKey + ')' : '') + ' - HTTP ' + r.status);
+      if (!newKey) console.log('   Theme created, but Manager returned no key - the next install cannot update it in place. Location=' + ((r.headers && r.headers.location) || '-') + ' body=' + JSON.stringify(r.data || '').slice(0, 200));
     }
-    newKey = newKey || (r.data && (r.data.key || r.data.Key)) || null;
   } catch (e) {
     return res.json({ success: false, error: 'Could not reach Manager: ' + e.message + '. Use the copy-paste method.' });
   }
@@ -4554,8 +8019,26 @@ app.post('/api/manager/install-theme', async (req, res) => {
     try { defaults = await setThemeAsDefault(ep, accessToken, newKey); }
     catch (e) { defaults = { error: e.message }; }
   }
-  return res.json({ success: true, key: newKey, updated: !!key, defaults });
+  if (newKey) _themePushed[ep + '|' + newKey] = themeHash;
+  return res.json({ success: true, key: newKey, updated, defaults });
 });
+const _themePushed = {};
+
+// The key of the theme named `name` that a document type's Form Defaults use
+// (Manager has no theme list endpoint, so this is how an existing one is found).
+async function findInstalledThemeKey(ep, token, name) {
+  const forms = ['sales-invoice-form-defaults-form', 'receipt-form-defaults-form', 'credit-note-form-defaults-form'];
+  for (const f of forms) {
+    try {
+      const g = await managerCall(ep, token, 'GET', '/' + f, null);
+      const id = g && g.data && typeof g.data === 'object' && (g.data.CustomThemeId || g.data.ThemeKey || g.data.CustomThemeKey);
+      if (!id || !/^[0-9a-f-]{36}$/i.test(String(id))) continue;
+      const t = await managerCall(ep, token, 'GET', '/custom-theme-form/' + bareKey(id), null);
+      if (t.status === 200 && t.data && String(t.data.Name || '').trim() === name) return bareKey(id);
+    } catch (_) {}
+  }
+  return '';
+}
 
 // Set a custom theme as the DEFAULT on each document type's Form Defaults.
 // Manager's *-form/{key} POST replaces the record, so we GET the current form
@@ -4613,11 +8096,23 @@ app.get('*', (req, res) => {
     try {
       const html = fs.readFileSync(path.join(FRONTEND, 'index.html'), 'utf8');
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(injectApiKey(html));
+      res.send(injectPageConfig(html));
     } catch(e) {
       res.status(500).send('Frontend not found');
     }
+  } else {
+    res.status(404).json({ error: 'Not found' });
   }
+});
+
+// Last-resort error handler: Express's default page includes a stack trace with
+// server file paths. Return a short JSON error instead and log the detail.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  if (err && err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON body' });
+  if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'Request body too large' });
+  logger.error('Unhandled route error', { path: req.path, message: err && err.message });
+  res.status((err && err.status) || 500).json({ success: false, error: (err && err.expose) ? err.message : 'Internal error' });
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -4644,21 +8139,30 @@ function tryStartHTTPS() {
     if (sslOptions) {
       httpsServer = https.createServer(sslOptions, app);
       httpsServer.listen(HTTPS_PORT, BIND_HOST, () => { httpsUp = true; console.log('HTTPS running at https://localhost:' + HTTPS_PORT + '/extension  [' + src + ']'); console.log('This is the URL to use in Manager. http://localhost:' + PORT + ' now redirects here.'); });
-      httpsServer.on('error', e => console.log('HTTPS startup error: ' + e.message));
+      httpsServer.on('error', e => portError(e, HTTPS_PORT, 'HTTPS'));
+      if (MANAGER_HTTPS_PORT) startManagerHttps(sslOptions);
       return;
     }
     // 2. Fallback (dev only): openssl-generated self-signed cert - UNTRUSTED, so
     //    Manager will reject it. Fine for a browser you click through; not for the
     //    embedded extension iframe. Prefer Setup-Https above.
-    const { execSync } = require('child_process');
+    const { execFileSync } = require('child_process');
     const os = require('os');
     try {
-      execSync('openssl version', { stdio: 'ignore' });
-      const tmpDir = os.tmpdir();
-      const keyFile  = path.join(tmpDir, 'efris_key.pem');
-      const certFile = path.join(tmpDir, 'efris_cert.pem');
-      execSync('openssl req -x509 -newkey rsa:2048 -keyout "' + keyFile + '" -out "' + certFile + '" -days 365 -nodes -subj "/CN=localhost" -addext "subjectAltName=IP:127.0.0.1,DNS:localhost"', { stdio: 'ignore' });
-      const sslOptions2 = { key: fs.readFileSync(keyFile), cert: fs.readFileSync(certFile) };
+      execFileSync('openssl', ['version'], { stdio: 'ignore' });
+      // Generate into a private, single-use folder and remove it once the pair is
+      // in memory, so no unencrypted key is left behind in the shared temp dir.
+      // Named "selfsigned-localhost" so it is never mistaken for the EFRIS key.
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'efrisconnect-https-'));
+      const keyFile  = path.join(tmpDir, 'selfsigned-localhost-key.pem');
+      const certFile = path.join(tmpDir, 'selfsigned-localhost-cert.pem');
+      let sslOptions2;
+      try {
+        execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-keyout', keyFile, '-out', certFile, '-days', '365', '-nodes', '-subj', '/CN=localhost', '-addext', 'subjectAltName=IP:127.0.0.1,DNS:localhost'], { stdio: 'ignore' });
+        sslOptions2 = { key: fs.readFileSync(keyFile), cert: fs.readFileSync(certFile) };
+      } finally {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch(_) {}
+      }
       httpsServer = https.createServer(sslOptions2, app);
       httpsServer.listen(HTTPS_PORT, BIND_HOST, () => { httpsUp = true; console.log('HTTPS running (self-signed, untrusted) at https://localhost:' + HTTPS_PORT + '/extension'); });
       httpsServer.on('error', e => console.log('HTTPS startup error: ' + e.message));
@@ -4671,15 +8175,101 @@ function tryStartHTTPS() {
   }
 }
 
+// A port already taken almost always means EFRISConnect is already running.
+function portError(e, port, what) {
+  if (e && e.code === 'EADDRINUSE') {
+    console.log('[ERROR] Port ' + port + ' is already in use - EFRISConnect is probably already running (check the taskbar or the Windows service). Close the other copy, then start again.');
+    setTimeout(() => process.exit(1), 300);
+  } else console.log('[ERROR] ' + what + ' startup error: ' + (e && e.message));
+}
+// Shop network: Manager Server over HTTPS for the tills, with the relay's certificate.
+// A failure here (port taken) leaves the relay itself running.
+function startManagerHttps(tls) {
+  try {
+    const srv = require('./manager-proxy').startManagerProxy({ tls, port: MANAGER_HTTPS_PORT, bindHost: BIND_HOST,
+      targetPort: +MANAGER_PORTS[0], log: m => console.log('   ' + m) });
+    srv.on('error', e => console.log('[ERROR] Manager over HTTPS could not start on port ' + MANAGER_HTTPS_PORT + ': ' +
+      (e.code === 'EADDRINUSE' ? 'the port is in use. Set MANAGER_HTTPS_PORT to a free port.' : e.message)));
+    srv.listen(MANAGER_HTTPS_PORT, BIND_HOST, () => console.log('Manager over HTTPS for tills: https://' + require('os').hostname().toLowerCase() + ':' + MANAGER_HTTPS_PORT + '  (Manager Server on port ' + MANAGER_PORTS[0] + ')'));
+  } catch (e) { console.log('[ERROR] Manager over HTTPS: ' + e.message); }
+}
+// Shop network: write the till kit (public certificate, trust/remove scripts,
+// README with the addresses) into the data folder. Never throws.
+function writeLanTillKit() {
+  try {
+    const os = require('os');
+    const kit = tillKit.writeTillKit(DATA_DIR, { hostname: os.hostname(), urls: LAN_URLS,
+      managerUrls: (MANAGER_HTTPS_PORT ? lanManagerOrigins(EXTRA_HOSTS, [String(MANAGER_HTTPS_PORT)]).filter(o => o.startsWith('https:'))
+        : lanManagerOrigins(EXTRA_HOSTS, MANAGER_PORTS).filter(o => o.startsWith('http:'))).slice(0, 3) });
+    if (kit.error) console.log('   Till kit: ' + kit.error);
+    else console.log('   Till kit (copy this folder to each till): ' + kit.dir);
+    return kit;
+  } catch (e) { console.log('   Till kit could not be written: ' + e.message); return { error: e.message }; }
+}
+function relayUrls() {
+  const local = (httpsUp ? 'https://localhost:' + HTTPS_PORT : 'http://localhost:' + PORT) + '/extension';
+  // Shop network mode: the PC-name address first (it is the Manager button URL), then the rest.
+  if (LAN_MODE && LAN_URLS.length) return { local, lan: LAN_URLS[0], lanAll: LAN_URLS, button: LAN_URLS[0] };
+  let lan = '';
+  if (!/^(127\.|localhost|::1)/.test(String(BIND_HOST))) {
+    const os = require('os');
+    for (const list of Object.values(os.networkInterfaces())) for (const a of list || []) if (a.family === 'IPv4' && !a.internal && !lan) lan = (httpsUp ? 'https://' : 'http://') + a.address + ':' + (httpsUp ? HTTPS_PORT : PORT) + '/extension';
+  }
+  return { local, lan };
+}
+
+// A relay reachable from other computers must check the Host header and use
+// HTTPS (its own certificate, or a TLS reverse proxy named in TRUST_PROXY):
+// passwords and session tokens cross the network. Returns the problem, or ''.
+function networkBindProblem(o) {
+  if (LOOPBACK_HOST.test(String(o.bindHost || ''))) return '';
+  const missing = [];
+  if (!o.allowedHosts || !o.allowedHosts.length) missing.push('ALLOWED_HOSTS=<the name other computers use to reach this relay>');
+  if (!o.https && !o.trustProxy) missing.push('HTTPS (run the HTTPS setup to create https.pfx in the data folder, or put the relay behind a TLS reverse proxy and set TRUST_PROXY)');
+  return missing.length ? 'BIND_HOST=' + o.bindHost + ' makes EFRIS Connect reachable from other computers, but this is missing: ' + missing.join('; and ') + '. Set it and start again, or remove BIND_HOST to use this computer only.' : '';
+}
+
 // ── Start HTTP server (only when run directly, not during tests) ──────────
-if (require.main === module) {
-  app.listen(PORT, BIND_HOST, () => {
+const bindProblem = require.main === module ? networkBindProblem({ bindHost: BIND_HOST, allowedHosts: EXTRA_HOSTS, trustProxy: !!process.env.TRUST_PROXY,
+  https: ['https.pfx', 'https_cert.pem'].some(n => fs.existsSync(path.join(DATA_DIR, n))) }) : '';
+if (bindProblem) { console.log('[ERROR] ' + bindProblem); setTimeout(() => process.exit(1), 300); }
+else if (require.main === module) {
+  // First run: no account yet. A one-time code lets the owner be created from
+  // another computer; on this PC no code is needed.
+  let setupCode = null;
+  try { const sc = auth.ensureSetupCode(); if (sc) setupCode = sc.code; if (sc) console.log('   No account yet. Open EFRIS Connect in Manager on this PC to create the owner account' + (sc.file ? ' (from another computer, use the setup code shown below; it is also saved in ' + sc.file + ')' : '') + '.'); }
+  catch (e) { console.log('   ⚠ Could not prepare the setup code: ' + e.message); }
+  // Log retention: remove day log files older than LOG_RETENTION_DAYS (default 90), now and daily.
+  const pruneLogs = () => {
+    try {
+      const keep = logTools.retentionDays();
+      const n = logTools.prune(logger.LOG_DIR, keep);
+      logger.info('Log retention: removed ' + n + ' log file(s) older than ' + keep + ' days');
+    } catch (_) {}
+  };
+  pruneLogs();
+  setInterval(pruneLogs, 24 * 3600000).unref();
+  const httpServer = app.listen(PORT, BIND_HOST, () => {
+    // Status block + hotkeys once HTTPS has had a moment to start.
+    setTimeout(() => consoleUi.ready({
+      urls: relayUrls(),
+      inflight: () => _inflight,
+      status: () => {
+        let modes = []; try { modes = [...new Set(vault.listTenants().map(t => (t.mode || 'sandbox').toUpperCase()))]; } catch (_) {}
+        const conn = (_connCache && _connCache.data) || {};
+        let queue = 0; try { queue = loadQueue().filter(e => e.status === 'pending').length; } catch (_) {}
+        return { version: APP_VERSION, mode: modes.join(' + '), vault: vault.isUnlocked(), ura: (_retry.online !== null ? _retry.online : (conn.ura === undefined ? null : conn.ura)),
+          enabler: conn.enabler, queue, setupCode: (setupCode && !auth.hasUsers()) ? setupCode : '' };
+      },
+    }), 1500);
     console.log('=======================================================');
-    console.log('Uganda EFRIS Connect + Goods Configurator');
-    console.log('Tukei Hope Initiative | EMC/CBO/025');
+    console.log('  EFRISConnect ' + APP_VERSION);
+    console.log('  URA EFRIS e-receipts and e-invoices for Manager.io');
+    console.log('  Free and open source, by The Tukei Hope Initiative (EMC/CBO/025)');
     console.log('=======================================================');
     console.log('HTTP running on port ' + PORT + ' (will redirect to HTTPS once it is up)');
     tryStartHTTPS();
+    if (LAN_MODE) writeLanTillKit();
     setTimeout(() => {
       if (!httpsUp) {
         console.log('-------------------------------------------------------');
@@ -4690,8 +8280,15 @@ if (require.main === module) {
       }
     }, 800);
   });
+  httpServer.on('error', e => portError(e, PORT, 'HTTP'));
 }
 
 module.exports = app;
 // Exposed for regression tests (decrypt paths). Not used at runtime.
-module.exports._test = { efrisDecodeJson, aesDecryptStr, aesEncryptB64, aesAlgo };
+module.exports._auth = auth;
+module.exports._vault = vault;
+module.exports._activity = activity;
+module.exports._mailer = mailer;
+module.exports._consoleUi = consoleUi;
+module.exports._routePerms = ROUTE_PERMS.map(r => ({ method: r.method, path: r.path, perm: r.perm }));
+module.exports._test = { lanManagerOrigins, lanRelayUrls, managerPorts, EXTRA_ORIGINS, LAN_URLS, FRAME_ANCESTORS, writeLanTillKit, learnVaultSecrets, networkBindProblem, isLocalRequest, routePerm, efrisDecodeJson, aesDecryptStr, aesEncryptB64, aesAlgo, buildT109, goodsStockOf, t106Kind, cnItem, eatToday, eatParts, uraUrl, uraHost, buildT108, lineDiscount, lookupCommodityTax, commodityTaxRule };

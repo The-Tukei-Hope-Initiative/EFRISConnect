@@ -6,7 +6,7 @@ set -e
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BACKEND="$DIR/backend"
 NODE="$(command -v node || true)"
-if [ -z "$NODE" ]; then echo "Node.js not found on PATH. Install Node 18+ first."; exit 1; fi
+if [ -z "$NODE" ]; then echo "Node.js not found on PATH. Install Node 20+ first."; exit 1; fi
 
 OS="$(uname -s)"
 if [ "$OS" = "Linux" ]; then

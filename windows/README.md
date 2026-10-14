@@ -9,10 +9,13 @@ run it is in **one file: `EFRISConnect.bat`**. Double-click it and pick from the
 3) Start automatically at logon
 4) Install as Windows service     (server/always-on - admin)
 5) Trust a server's certificate   (LAN till only - admin)
-6) Uninstall auto-start / service
+6) Uninstall auto-start / service / LAN firewall rules
+7) Reset owner password           (lost password - admin)
+8) Start for shop network (LAN)   (server PC that tills reach)
+9) Start Manager Server for the shop network
 ```
 
-The admin steps (2, 4, 5) relaunch themselves elevated - you don't need to open an
+The admin steps (2, 4, 5, 7 and the firewall rules of 6, 8, 9) relaunch themselves elevated - you don't need to open an
 admin prompt yourself. **Node.js LTS** (https://nodejs.org) must be installed first.
 
 ---
@@ -35,7 +38,8 @@ redirects you to `https://localhost:5443`. Use the HTTPS URL everywhere in Manag
 1. Double-click **`EFRISConnect.bat`** -> option **2) First-time HTTPS setup**.
    It generates ONE locally-trusted certificate covering `localhost`, `127.0.0.1`,
    this machine's hostname and its LAN IP(s), installs it into the machine's Trusted
-   Root store, and writes `https.pfx` / `https_cert.cer` into `backend\data`.
+   Root store, and writes `https.pfx` / `https_cert.cer` into the data folder
+   (`%ProgramData%\EFRISConnect\data`).
    100% offline - no internet, no OpenSSL, valid 10 years.
 2. Back in the menu -> option **1) Start EFRIS Connect**. Watch for
    `HTTPS running at https://localhost:5443`.
@@ -51,12 +55,17 @@ service) instead of leaving the console window open.
 
 ## LAN / multi-till setup
 
+The full step-by-step (Manager Server Edition, till kit, firewall) is in
+`docs/self-hosting.md` -> "Shop network (LAN)". In short: option 2 once, option 9
+(Manager Server), option 8 (relay for the shop network), then run
+`Trust EFRISConnect server.bat` from `%ProgramData%\EFRISConnect\data\till-kit` on each till.
+
 Run the relay on **one** machine - the "fiscalisation host":
 
 1. On the host: option **4) Install as Windows service** (starts at boot, restarts
    on crash, and also sets up + trusts the HTTPS cert in the same elevated step).
    If other machines must reach it, set `BIND_HOST=0.0.0.0` before starting.
-2. On each till/POS PC: copy the host's `backend\data\https_cert.cer` next to
+2. On each till/POS PC: copy the host's `%ProgramData%\EFRISConnect\data\https_cert.cer` next to
    `EFRISConnect.bat`, run option **5) Trust a server's certificate**, then point
    Manager at **`https://SERVER-NAME:5443/extension`**.
 3. Install URA's **Offline Mode Enabler** on the **host only** (not every till) and
@@ -79,4 +88,5 @@ using the same secure EFRIS protocol.
   once HTTPS is up, and serves as the first-run fallback before the cert exists).
 - The EFRIS private key path is set inside `EFRISConnect.bat` (option 1); edit it to
   match your setup. The cloud edition instead uses the `EFRIS_PRIVATE_KEY_B64` secret.
-- The offline queue is stored in `backend/data/offline_queue.json` (never committed).
+- Runtime data (credential vault, offline queue, logs, HTTPS certificate) lives in
+  `%ProgramData%\EFRISConnect\data`, outside the program folder (never committed).

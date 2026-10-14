@@ -46,7 +46,10 @@ svc.on('error', (e) => console.error('  Service error:', e));
 // fully offline. Skipped gracefully if PowerShell/cert setup isn't available.
 try {
   const { execSync } = require('child_process');
-  const dataDir = path.join(__dirname, '..', 'backend', 'data');
+  // Same data folder the relay uses (backend/paths.js). Created and restricted
+  // here, as the installing user, so both this user and the SYSTEM service keep access.
+  const paths = require(path.join(__dirname, '..', 'backend', 'paths.js'));
+  const dataDir = paths.DATA_DIR;
   const ps = path.join(__dirname, 'setup-https.ps1');
   console.log('  Setting up local HTTPS certificate (trusted, offline)…');
   execSync('powershell -NoProfile -ExecutionPolicy Bypass -File "' + ps + '" -DataDir "' + dataDir + '"', { stdio: 'inherit' });

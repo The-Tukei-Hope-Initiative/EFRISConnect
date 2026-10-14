@@ -1,6 +1,6 @@
 {
   "name": "efrisconnect",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "EFRISConnect - URA EFRIS receipting and goods configuration for Manager.io",
   "license": "MIT",
   "author": "The Tukei Hope Initiative <outreach@tukeihopeinitiative.org>",
@@ -18,9 +18,10 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "nodemailer": "^10.0.12"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }

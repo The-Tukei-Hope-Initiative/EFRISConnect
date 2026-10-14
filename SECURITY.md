@@ -31,22 +31,41 @@ a call to Manager or EFRIS.
 
 ## Storage (encryption at rest)
 
-Secrets are stored server-side in `backend/data/credentials_vault.json`,
-encrypted with **AES-256-GCM** (a random 12-byte IV per value, an authentication
+Secrets are stored server-side in `credentials_vault.json` in the relay's data
+folder, encrypted with **AES-256-GCM** (a random 12-byte IV per value, an authentication
 tag, versioned `v1:` prefix). Non-secret metadata (TIN, device number, Manager
 endpoint, flags) is stored in clear so the UI can list businesses without
 decrypting anything.
 
+**Where the data folder is.** On Windows: `%ProgramData%\EFRISConnect\data`
+(usually `C:\ProgramData\EFRISConnect\data`), outside the program folder, so
+folder syncing (OneDrive, Google Drive), git and re-installs never touch it. The
+relay restricts it to the installing user, SYSTEM and Administrators. Older
+installs that kept data in `backend\data` are moved there automatically on first
+start. On macOS/Linux and in containers the folder is `backend/data/`.
+`DATA_DIR_OVERRIDE` (and `VAULT_DIR` for the vault alone) set it explicitly.
+
 The encryption key (the "master key") is resolved in this order:
 1. `VAULT_MASTER_KEY` environment variable (base64 of 32 bytes). **Required for
    any shared or cloud deployment.**
-2. Fallback for a single self-hosted taxpayer: a per-install random key generated
-   once and stored at `backend/data/.vault_master` with `0600` permissions
-   (owner-only). This is fine for one person on their own machine; it is **not**
-   appropriate for a shared/multi-user server - set `VAULT_MASTER_KEY` there.
+2. Windows: a per-install random key protected with **DPAPI** (machine scope)
+   and stored as `.vault_master.dpapi`. It can only be unlocked on the computer
+   that created it, so a copied data folder (backup, sync, USB) does not open
+   anywhere else. A plain `.vault_master` from older versions is converted on
+   first use and deleted.
+3. macOS/Linux: a per-install random key in `.vault_master` with `0600`
+   permissions (owner-only).
 
-Both `credentials_vault.json` and `.vault_master` are git-ignored and are written
-with `0600` permissions.
+Options 2 and 3 suit one taxpayer on their own machine; they are **not**
+appropriate for a shared/multi-user server - set `VAULT_MASTER_KEY` there. If the
+vault holds secrets but no master key can be found, the relay refuses to create a
+new one (that would make the stored secrets unreadable) and logs how to recover.
+
+What this does not protect against: a program running as the same Windows user
+while the relay runs, or an administrator of the machine. The relay must decrypt
+secrets to use them, so anything with that level of access can too.
+
+`credentials_vault.json` and the key files are git-ignored.
 
 ## Logging
 
@@ -55,14 +74,20 @@ access tokens, and private-key material are stripped from error messages and
 diagnostic output before anything is written. Logs record operational events
 (which EFRIS interface was called, return codes) - not credential values.
 
-## Backup
+## Backup and moving to another computer
 
-Nothing is backed up automatically by the application. Note that **Manager.io's
-own backup does NOT cover EFRISConnect** - it backs up your Manager accounting
-data only. EFRISConnect is a separate app, so its `backend/data/` (the vault,
-the local master key, and logs) must be backed up separately by you.
+**Manager.io's own backup does not cover EFRISConnect's credentials** - it backs up
+your Manager accounting data, including the fiscal details EFRISConnect writes
+into it (FDN, QR and verification codes). On Windows the credential vault is
+locked to the computer it was created on, so a copied data folder will not open
+elsewhere; that is deliberate.
 
-Treat `backend/data/` as highly sensitive and encrypt those backups. If you set
+To move to another computer, run the setup wizard there and re-enter the
+credentials from their sources: TIN, device number and password (URA EFRIS
+portal), the private key `.pem` file, and a new Manager access token. **Keep your
+own safe copy of the `.pem` file** - URA cannot show it to you again.
+
+If you back up the data folder anyway, treat it as highly sensitive. If you set
 `VAULT_MASTER_KEY` via environment, keep it out of your code backups (it is the
 key to the vault); store it in a secrets manager, not alongside the vault file.
 
@@ -86,8 +111,8 @@ returns stored secrets to the browser.
 
 Removing a business from the app deletes its entry from
 `credentials_vault.json`. To remove everything, stop the relay and delete
-`backend/data/credentials_vault.json` (and `.vault_master` if you want to discard
-the local master key). Deletion is immediate and permanent.
+`credentials_vault.json` from the data folder (and `.vault_master.dpapi` /
+`.vault_master` if you want to discard the local master key). Deletion is immediate and permanent.
 
 ## Local HTTPS certificate
 
@@ -98,11 +123,11 @@ to any EFRIS or Manager credential and secures only local TLS.
 - On Windows, `setup-https.ps1` generates the cert and a PFX. The PFX password is
   a **random per-install value** (not a shared constant); the password file is
   restricted to the current user. The private key's real protection is file-system
-  permissions on `backend/data/`.
+  permissions on the data folder.
 - On macOS/Linux you provide a cert/key pair (see docs/self-hosting.md); protect
   the key file with `0600`.
-- The generated cert, key, PFX, and password file live in `backend/data/` and are
-  git-ignored - they are never committed or published.
+- The generated cert, key, PFX, and password file live in the data folder
+  (outside the program folder on Windows) - they are never committed or published.
 
 Because this only protects a local self-signed certificate, an attacker who can
 read these files already has local file-system access; the certificate password
