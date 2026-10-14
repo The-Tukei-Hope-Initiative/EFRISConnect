@@ -21,11 +21,9 @@ backend/keys/
 # Local working files
 tash*
 
-# Non-shipping files: internal docs, tests, scratch - keep local, don't push
+# Non-shipping files: internal docs, scratch - keep local, don't push
 TEST_PLAN.md
 /index.html
-backend/__tests__/
-**/*.test.js
 scratch*
 *.scratch
 docs/
@@ -33,6 +31,7 @@ docs/
 !docs/
 docs/*
 !docs/self-hosting.md
+!docs/efris-compliance.md
 
 # Runtime/local data - never commit (may contain real business data or secrets)
 backend/data/offline_queue.json
@@ -47,17 +46,17 @@ backend/daemon/
 /git
 /node
 
-# Backup: filled container-group (contains secrets) + any service-account keys
-backup/manager-group.yaml
-backup/*service-account*.json
-backup/*sa*.json
-backup/*.conf
-backup/rclone.conf
 # Any rclone config anywhere - never commit (it can carry cloud credentials)
 **/rclone.conf
 
 # Credential vault (encrypted secrets + local master key) - never commit
 backend/data/credentials_vault.json
 backend/data/.vault_master
+backend/data/.vault_master.dpapi
+backend/data/.acl_v1
 backend/data/uom_synced.json
+backend/data/base_currency.json
 backend/data/goods_search_cache_*.json
+
+# Installer build output (installer/build.ps1)
+/build/

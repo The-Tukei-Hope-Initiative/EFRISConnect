@@ -9,24 +9,86 @@
 //
 // Master key resolution:
 //   1. VAULT_MASTER_KEY env (base64 of 32 bytes) - REQUIRED in cloud/multi-tenant.
-//   2. Self-hosted fallback: a per-install random key persisted at
-//      backend/data/.vault_master (gitignored, 0600). Good enough for a single
-//      taxpayer on their own machine; NOT for shared cloud.
+//   2. Windows: a random key protected with DPAPI (machine scope) in
+//      .vault_master.dpapi - it only decrypts on this computer, so a copied data
+//      folder (sync, backup, USB) is useless elsewhere. A plain .vault_master from
+//      older versions is converted on first use and then deleted.
+//   3. Other platforms: a random key in .vault_master (0600). Good enough for a
+//      single taxpayer on their own machine; NOT for shared cloud.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
+const paths = require('./paths');
 
-// Where the vault + local master key live. Defaults to backend/data for a
-// self-hoster. On a cloud/container host, set VAULT_DIR to a mounted persistent
+// Where the vault + local master key live: the relay's data folder (see
+// paths.js). On a cloud/container host, set VAULT_DIR to a mounted persistent
 // volume so credentials survive redeploys - and mount it OUTSIDE backend/data so
 // the bundled read-only commodity catalog is not hidden by the mount.
-const DATA_DIR = process.env.VAULT_DIR || path.join(__dirname, 'data');
+const DATA_DIR = process.env.VAULT_DIR || paths.DATA_DIR;
 const FILE = path.join(DATA_DIR, 'credentials_vault.json');
 const MASTER_FILE = path.join(DATA_DIR, '.vault_master');
+const MASTER_DPAPI = path.join(DATA_DIR, '.vault_master.dpapi');
+
+// Windows DPAPI. Native module first (@primno/dpapi, milliseconds); PowerShell as
+// the fallback when the module is missing (it can take minutes to start on a busy
+// PC). Same scope (LocalMachine) and no entropy, so either can read the other's data.
+let _native = null;
+try { if (process.platform === 'win32') _native = require('@primno/dpapi').Dpapi; } catch (_) { _native = null; }
+let dpapiVia = '';
+function dpapi(op, b64) {
+  if (_native) {
+    try {
+      const inp = Buffer.from(String(b64).trim(), 'base64');
+      const out = op === 'Protect' ? _native.protectData(inp, null, 'LocalMachine') : _native.unprotectData(inp, null, 'LocalMachine');
+      dpapiVia = 'native';
+      return Buffer.from(out).toString('base64');
+    } catch (e) { console.log('   Vault: native DPAPI failed (' + e.message + '), using PowerShell'); }
+  }
+  dpapiVia = 'PowerShell';
+  return dpapiPS(op, b64);
+}
+// The key travels over stdin, never on the command line where other processes could see it.
+function dpapiPS(op, b64) {
+  const ps = 'Add-Type -AssemblyName System.Security; ' +
+    '$b=[Convert]::FromBase64String([Console]::In.ReadToEnd().Trim()); ' +
+    '$r=[Security.Cryptography.ProtectedData]::' + op + '($b,$null,[Security.Cryptography.DataProtectionScope]::LocalMachine); ' +
+    '[Convert]::ToBase64String($r)';
+  const run = ms => execFileSync(path.join(paths.SYS32, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', ps],
+    { input: b64, encoding: 'utf8', windowsHide: true, timeout: ms }).trim();
+  // PowerShell can take over a minute to start on a busy or freshly booted PC; that
+  // is a slow start, not a wrong key, so give it longer and try once more.
+  try { return run(90000); }
+  catch (e) { if (!/ETIMEDOUT|timed out/i.test(String(e && (e.code || e.message)))) throw e; console.log('   Vault: Windows was slow to unlock the key, trying again...'); return run(180000); }
+}
+function vaultHasSecrets() {
+  try { const all = JSON.parse(fs.readFileSync(FILE, 'utf8')); return Object.values(all).some(r => r && SECRET.some(k => r[k])); } catch (_) { return false; }
+}
+function saveMasterKey(k) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (process.platform === 'win32') {
+    const blob = dpapi('Protect', k.toString('base64'));
+    fs.writeFileSync(MASTER_DPAPI, blob, { mode: 0o600 });
+    // Prove it opens again before anything relies on it.
+    if (Buffer.from(dpapi('Unprotect', blob), 'base64').compare(k) !== 0) throw new Error('DPAPI round-trip check failed');
+  } else {
+    fs.writeFileSync(MASTER_FILE, k, { mode: 0o600 });
+  }
+}
 
 let _mk = null;
+// True while warm() is unlocking the DPAPI key in the background. Requests must
+// not start a second, blocking PowerShell meanwhile (execFileSync would freeze
+// every route for up to minutes); they get a "try again shortly" error instead.
+let _warming = false;
+function lockedError() {
+  const e = new Error('The credential vault is still unlocking (Windows is slow to start PowerShell). Try again in a few seconds.');
+  e.code = 'VAULT_LOCKED'; e.status = 503; e.expose = true;
+  return e;
+}
 function masterKey() {
   if (_mk) return _mk;
+  if (_warming) throw lockedError();
   const b64 = process.env.VAULT_MASTER_KEY || '';
   if (b64) {
     const k = Buffer.from(b64, 'base64');
@@ -36,10 +98,40 @@ function masterKey() {
     // vault incorrectly (or per-replica), causing silent data loss.
     throw new Error('VAULT_MASTER_KEY is set but invalid - it must be base64 of exactly 32 bytes.');
   }
-  try { const k = fs.readFileSync(MASTER_FILE); if (k.length === 32) { _mk = k; return _mk; } } catch (_) {}
-  _mk = crypto.randomBytes(32);
-  try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(MASTER_FILE, _mk, { mode: 0o600 }); } catch (_) {}
-  console.log('   ⚠ No VAULT_MASTER_KEY set - generated a local master key at backend/data/.vault_master (fine for a single self-hosted taxpayer; set VAULT_MASTER_KEY for cloud).');
+  // DPAPI-protected key (Windows).
+  if (process.platform === 'win32' && fs.existsSync(MASTER_DPAPI)) {
+    let k;
+    try { k = Buffer.from(dpapi('Unprotect', fs.readFileSync(MASTER_DPAPI, 'utf8')), 'base64'); }
+    catch (e) {
+      if (/ETIMEDOUT|timed out/i.test(String(e && (e.code || e.message)))) throw new Error('Windows took too long to unlock the vault key (PowerShell did not answer). Nothing is wrong with your credentials: close EFRIS Connect and start it again. Detail: ' + e.message);
+      throw new Error('The vault master key could not be unlocked on this computer (it was created on another machine or Windows was reinstalled). Re-enter your credentials in Settings after moving ' + MASTER_DPAPI + ' and credentials_vault.json aside. Detail: ' + e.message);
+    }
+    if (k.length !== 32) throw new Error('The vault master key in ' + MASTER_DPAPI + ' is damaged.');
+    _mk = k; return _mk;
+  }
+  // Plain key file (older versions, or non-Windows).
+  try {
+    const k = fs.readFileSync(MASTER_FILE);
+    if (k.length === 32) {
+      _mk = k;
+      if (process.platform === 'win32') {
+        try { saveMasterKey(k); fs.rmSync(MASTER_FILE, { force: true }); console.log('   Vault master key is now protected with Windows DPAPI (this computer only).'); }
+        catch (e) { console.log('   ⚠ Could not protect the vault master key with DPAPI, keeping the plain key file: ' + e.message); }
+      }
+      return _mk;
+    }
+  } catch (_) {}
+  // No key anywhere. A vault that already holds secrets would be unreadable with a
+  // new key, so stop instead of silently replacing it.
+  if (vaultHasSecrets()) throw new Error('The vault holds encrypted credentials but its master key is missing (' + DATA_DIR + '). Restore the .vault_master file, or move credentials_vault.json aside and re-enter your credentials.');
+  const k = crypto.randomBytes(32);
+  try { saveMasterKey(k); }
+  catch (e) {
+    console.log('   ⚠ DPAPI unavailable (' + e.message + ') - storing the master key as a plain file.');
+    fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(MASTER_FILE, k, { mode: 0o600 });
+  }
+  console.log('   Generated a new vault master key in ' + DATA_DIR + (process.platform === 'win32' ? ' (protected with Windows DPAPI)' : '') + '. Set VAULT_MASTER_KEY instead for cloud/multi-server use.');
+  _mk = k;
   return _mk;
 }
 
@@ -62,25 +154,60 @@ function dec(blob) {
   } catch (e) {
     // Surface the reason (wrong master key or a corrupted/tampered value) instead
     // of silently returning empty, which is hard to diagnose later.
-    console.log('   ⚠ Vault decryption failed (wrong VAULT_MASTER_KEY or corrupted entry): ' + e.message);
+    console.log('   ⚠ Vault could not be read: ' + e.message);
     return '';
   }
 }
 
 function loadAll() { try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch (_) { return {}; } }
-function saveAll(o) { try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(FILE, JSON.stringify(o, null, 2), { mode: 0o600 }); } catch (e) { console.log('vault write error: ' + e.message); } }
+// For read-modify-write: a vault file that exists but does not parse must not be
+// replaced by a vault holding only the tenant being saved (every other business's
+// credentials would be lost). Refuse and leave the file for repair.
+function loadAllForWrite() {
+  let raw;
+  try { raw = fs.readFileSync(FILE, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return {}; throw e; }
+  if (!raw.trim()) return {};
+  try { return JSON.parse(raw); }
+  catch (e) {
+    console.log('   ⚠ Vault file ' + FILE + ' is damaged (' + e.message + ') - not overwriting it. Restore it from a backup or move it aside.');
+    throw new Error('The credential vault file is damaged and was not changed. Restore credentials_vault.json from a backup or move it aside.');
+  }
+}
+// Atomic write: a crash mid-write leaves the old file intact, never a half file.
+function saveAll(o) {
+  const tmp = FILE + '.' + process.pid + '.tmp';
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(o, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, FILE);
+  } catch (e) { try { fs.rmSync(tmp, { force: true }); } catch (_) {} console.log('vault write error: ' + e.message); throw e; }
+}
 
 // Fields that MUST be encrypted at rest. Everything else is non-secret metadata.
-const SECRET = ['efrisPrivateKeyPem', 'efrisPassphrase', 'managerToken'];
+const SECRET = ['efrisPrivateKeyPem', 'efrisPassphrase', 'efrisPassword', 'managerToken'];
 
 // Non-secret view for listing/UI - never includes decrypted secrets.
 function meta(id, r) {
   r = r || loadAll()[id] || {};
   return {
-    id, tin: r.tin || '', deviceNo: r.deviceNo || '', businessName: r.businessName || '',
+    id, tin: r.tin || '', deviceNo: r.deviceNo || '', businessName: r.businessName || '', tradeName: r.tradeName || '',
     managerEndpoint: r.managerEndpoint || '', mode: r.mode || 'sandbox',
     hasEfrisKey: !!(r.efrisPrivateKeyPem || r.efrisPrivateKeyPath),
-    hasManagerToken: !!r.managerToken, updatedAt: r.updatedAt || '',
+    hasEfrisPassword: !!r.efrisPassword, hasManagerToken: !!r.managerToken, hasEnabler: !!r.enablerUrl, updatedAt: r.updatedAt || '',
+    profileUpdatedAt: (r.profile && typeof r.profile === 'object' && r.profile.profileUpdatedAt) || '',
+  };
+}
+
+// The business setup the extension shows (non-secret settings, kept in `profile`)
+// plus which secrets the vault holds, without decrypting anything. null when the
+// business is not in the vault.
+function getProfile(id) {
+  const r = loadAll()[id];
+  if (!r) return null;
+  return {
+    profile: (r.profile && typeof r.profile === 'object') ? r.profile : null,
+    has: { efrisPassword: !!r.efrisPassword, efrisPrivateKeyPem: !!r.efrisPrivateKeyPem, efrisPassphrase: !!r.efrisPassphrase, managerToken: !!r.managerToken },
+    meta: meta(id, r), vatRegistered: !!r.vatRegistered,
   };
 }
 
@@ -88,7 +215,7 @@ function meta(id, r) {
 // secret, or omit a field to leave it unchanged.
 function putTenant(id, rec) {
   if (!id) throw new Error('tenant id required');
-  const all = loadAll();
+  const all = loadAllForWrite();
   const out = { ...(all[id] || {}) };
   for (const k of Object.keys(rec || {})) {
     if (rec[k] === undefined) continue;
@@ -101,12 +228,24 @@ function putTenant(id, rec) {
 }
 
 // Full decrypted creds for SERVER-SIDE use only (never send to the client).
+// Optional listener told each business's decrypted secrets when it is read, so the
+// activity log can mask those exact values (it never stores or shows them).
+let _secretSink = null;
+function setSecretSink(fn) { _secretSink = typeof fn === 'function' ? fn : null; }
 function getTenant(id) {
+  const t = _getTenant(id);
+  if (t && _secretSink) { try { _secretSink(t); } catch (_) {} }
+  return t;
+}
+function _getTenant(id) {
   const r = loadAll()[id];
   if (!r) return null;
+  // dec() swallows errors, so check the lock here: otherwise a request during the
+  // background unlock would get a tenant with every secret silently blank.
+  if (!_mk && _warming && SECRET.some(k => r[k])) throw lockedError();
   return {
     id, tin: r.tin || '', deviceNo: r.deviceNo || '', mode: r.mode || 'sandbox',
-    efrisPrivateKeyPem: dec(r.efrisPrivateKeyPem), efrisPassphrase: dec(r.efrisPassphrase),
+    efrisPrivateKeyPem: dec(r.efrisPrivateKeyPem), efrisPassphrase: dec(r.efrisPassphrase), efrisPassword: dec(r.efrisPassword),
     efrisPrivateKeyPath: r.efrisPrivateKeyPath || '',
     managerEndpoint: r.managerEndpoint || '', managerToken: dec(r.managerToken),
     enablerUrl: r.enablerUrl || '', enablerMode: r.enablerMode || 'off', enablerDeviceNo: r.enablerDeviceNo || '',
@@ -116,6 +255,90 @@ function getTenant(id) {
 }
 
 function listTenants() { const all = loadAll(); return Object.keys(all).map(id => meta(id, all[id])); }
-function delTenant(id) { const all = loadAll(); delete all[id]; saveAll(all); }
+function delTenant(id) { const all = loadAllForWrite(); delete all[id]; saveAll(all); }
 
-module.exports = { putTenant, getTenant, meta, listTenants, delTenant, _enc: enc, _dec: dec };
+// Unlock the DPAPI-protected master key in the background at startup. The first
+// PowerShell after a reboot or a long idle can take minutes (antivirus scan, .NET
+// load); doing it here, asynchronously, means no request waits on it. Until it
+// finishes, requests that need the key get a "try again shortly" error; if it
+// fails, masterKey() unlocks the key itself on the next request.
+function warm() {
+  if (_mk || process.env.VAULT_MASTER_KEY || process.platform !== 'win32' || !fs.existsSync(MASTER_DPAPI)) return;
+  // Native DPAPI answers in milliseconds: unlock now, no background PowerShell needed.
+  if (_native) {
+    const t0 = Date.now();
+    try {
+      const k = Buffer.from(dpapi('Unprotect', fs.readFileSync(MASTER_DPAPI, 'utf8')), 'base64');
+      if (k.length === 32 && dpapiVia === 'native') { _mk = k; console.log('   Vault: key unlocked (native, ' + (Date.now() - t0) + ' ms).'); return; }
+      if (k.length === 32) { _mk = k; console.log('   Vault: key unlocked (PowerShell, ' + Math.round((Date.now() - t0) / 1000) + ' s).'); return; }
+    } catch (_) { /* fall through to the background PowerShell unlock */ }
+  }
+  const { execFile } = require('child_process');
+  const ps = 'Add-Type -AssemblyName System.Security; ' +
+    '$b=[Convert]::FromBase64String([Console]::In.ReadToEnd().Trim()); ' +
+    '$r=[Security.Cryptography.ProtectedData]::Unprotect($b,$null,[Security.Cryptography.DataProtectionScope]::LocalMachine); ' +
+    '[Convert]::ToBase64String($r)';
+  const t0 = Date.now();
+  _warming = true;
+  const child = execFile(path.join(paths.SYS32, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', ps],
+    { encoding: 'utf8', windowsHide: true, timeout: 600000 }, (err, out) => {
+      _warming = false;
+      if (_mk) return;
+      if (err) { console.log('   Vault: background unlock did not finish (' + (err.code || err.message) + '); it will be retried when needed.'); return; }
+      const k = Buffer.from(String(out || '').trim(), 'base64');
+      if (k.length === 32) { _mk = k; const s = Math.round((Date.now() - t0) / 1000); console.log('   Vault: key unlocked (PowerShell, ' + s + ' s).'); }
+    });
+  try { child.stdin.end(fs.readFileSync(MASTER_DPAPI, 'utf8')); } catch (_) { _warming = false; try { child.kill(); } catch (__) {} }
+}
+
+function isUnlocked() { return !!(_mk || process.env.VAULT_MASTER_KEY); }
+
+// ── Relay-wide records ──
+// Settings that belong to the relay, not to one business (the outgoing email
+// server). Kept in their own file so they never show up as a business. Same
+// encryption: the fields named in `secrets` are AES-GCM encrypted at rest.
+const RELAY_FILE = path.join(DATA_DIR, 'relay_vault.json');
+function loadRelayAll(forWrite) {
+  let raw;
+  try { raw = fs.readFileSync(RELAY_FILE, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return {}; if (forWrite) throw e; return {}; }
+  if (!raw.trim()) return {};
+  try { return JSON.parse(raw); }
+  catch (e) {
+    if (!forWrite) return {};
+    throw new Error('The relay settings file ' + RELAY_FILE + ' is damaged and was not changed. Restore it from a backup or move it aside.');
+  }
+}
+// Decrypted record (server-side only), or null when none is saved.
+function getRelay(name, secrets) {
+  const r = loadRelayAll(false)[name];
+  if (!r) return null;
+  if (!_mk && _warming && (secrets || []).some(k => r[k])) throw lockedError();
+  const out = { ...r };
+  for (const k of secrets || []) out[k] = dec(r[k]);
+  return out;
+}
+// Merge into a record. A secret field: a value encrypts it, '' clears it,
+// undefined leaves it. rec === null removes the record.
+function putRelay(name, rec, secrets) {
+  const all = loadRelayAll(true);
+  if (rec === null) { delete all[name]; }
+  else {
+    const out = { ...(all[name] || {}) };
+    for (const k of Object.keys(rec)) {
+      if (rec[k] === undefined) continue;
+      out[k] = (secrets || []).includes(k) ? (rec[k] ? enc(rec[k]) : '') : rec[k];
+    }
+    out.updatedAt = new Date().toISOString();
+    all[name] = out;
+  }
+  const tmp = RELAY_FILE + '.' + process.pid + '.tmp';
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(all, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, RELAY_FILE);
+  } catch (e) { try { fs.rmSync(tmp, { force: true }); } catch (_) {} throw e; }
+}
+// True when the record has a non-empty value in that (secret) field, without decrypting.
+function relayHas(name, field) { const r = loadRelayAll(false)[name]; return !!(r && r[field]); }
+
+module.exports = { putTenant, getTenant, getProfile, setSecretSink, meta, listTenants, delTenant, warm, isUnlocked, getRelay, putRelay, relayHas, RELAY_FILE, _enc: enc, _dec: dec };

@@ -11,7 +11,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Build the Subject Alternative Name list: DNS names + IP addresses.
-$dns = @('localhost', $env:COMPUTERNAME) + ($ExtraNames | Where-Object { $_ -notmatch '^\d+\.\d+\.\d+\.\d+$' })
+# hostname.local: the name tills use where the router has no DNS entry for this PC (mDNS).
+$dns = @('localhost', $env:COMPUTERNAME, "$($env:COMPUTERNAME).local") + ($ExtraNames | Where-Object { $_ -notmatch '^\d+\.\d+\.\d+\.\d+$' })
 $ips = @('127.0.0.1')
 try {
   $ips += (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
@@ -47,11 +48,18 @@ $pwd = ConvertTo-SecureString $pfxPass -AsPlainText -Force
 Export-PfxCertificate -Cert $cert -FilePath (Join-Path $DataDir "https.pfx") -Password $pwd | Out-Null
 $passFile = Join-Path $DataDir "https_pfx_pass.txt"
 $pfxPass | Out-File -FilePath $passFile -Encoding ascii -NoNewline
-try { icacls $passFile /inheritance:r /grant:r "$($env:USERNAME):(R,W)" | Out-Null } catch {}
+# SYSTEM too: the installed relay runs as a startup task under that account.
+try { icacls $passFile /inheritance:r /grant:r "$($env:USERNAME):(R,W)" "*S-1-5-18:(R)" | Out-Null } catch {}
 # Public cert (no private key) - copy this to LAN till PCs to trust the server there.
 Export-Certificate -Cert $cert -FilePath (Join-Path $DataDir "https_cert.cer") | Out-Null
 
 Write-Host ""
 Write-Host "Done. Relay will serve HTTPS on localhost AND this machine's LAN address."
-Write-Host "For LAN tills: copy backend\data\https_cert.cer to each PC, then run"
-Write-Host "windows\EFRISConnect.bat -> option 5 (Trust a server's certificate) there."
+Write-Host ""
+Write-Host "Certificate for LAN tills (public part only, no key):"
+Write-Host "  $DataDir\https_cert.cer"
+Write-Host "Start the relay with windows\EFRISConnect.bat -> option 8 (Start for shop network)."
+Write-Host "It then writes a till kit to $DataDir\till-kit : copy that folder to each till"
+Write-Host "and run 'Trust EFRISConnect server.bat' there (or launcher option 5 with the .cer)."
+Write-Host "The certificate covers this PC's names and current addresses. If the IP address"
+Write-Host "changes, tills can keep using https://$($env:COMPUTERNAME):5443/extension, or run this setup again."
