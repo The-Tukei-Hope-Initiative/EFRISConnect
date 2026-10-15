@@ -15,6 +15,9 @@ enterprises formalise and become tax compliant.
 There is no hosted service. You install EFRISConnect on your own computer or shop
 server, and your credentials stay there.
 
+**Status:** tested on Windows so far, and for use in the URA EFRIS sandbox until
+URA approves live use. See [Project status](#project-status).
+
 ---
 
 ## Who it is for
@@ -90,7 +93,7 @@ server, and your credentials stay there.
 - **Manager.io** Desktop or Server Edition, and a Manager API access token for the
   business.
 - **Windows 10 or 11** (64-bit) for the installer. macOS and Linux work with the
-  manual install.
+  manual install, but have not been tested yet (see [Project status](#project-status)).
 - **Node.js 20 or newer** for the manual install. The Windows installer includes
   its own Node.js.
 
@@ -145,6 +148,10 @@ Manager only accepts an `https://` address here.
 
 ## First-run setup
 
+Installing for a business for the first time? Follow the
+[first installation checklist](docs/first-install-checklist.md): what to collect
+from URA, the install, Manager, tills, testing, and common errors with fixes.
+
 1. Open EFRISConnect from the Manager button on the computer that runs the relay.
 2. Create the owner account. From another computer you need the one-time setup
    code, which the relay writes to `EFRIS Connect setup code.txt` in its data folder.
@@ -181,6 +188,16 @@ browser.
 Sales still work with the internet off: they are recorded in Manager and sent to
 URA when the connection returns. Full steps:
 [docs/self-hosting.md](docs/self-hosting.md#shop-network-lan).
+
+## Project status
+
+- **Tested on Windows only so far:** Manager Desktop on one PC, and Manager Server
+  Edition with tills on a shop network. macOS and Linux are supported through the
+  manual install and the `unix/` scripts, but have not been tested yet. Reports
+  from macOS and Linux users are welcome.
+- **Not yet approved for live use:** for now, use EFRISConnect in the URA EFRIS
+  sandbox only. Live (production) use needs URA's EFRIS approval for each
+  business first.
 
 ## Testing and going live
 
