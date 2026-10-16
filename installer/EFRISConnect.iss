@@ -147,7 +147,7 @@ begin
   ManagerPage.Values[0] := FindManagerServer;
 
   PortPage := CreateInputQueryPage(ManagerPage.ID,
-    'Manager Server port', 'Tills reach Manager at http://' + Lowercase(GetComputerNameString) + ':PORT',
+    'Manager Server port', 'Tills reach Manager encrypted at https://' + Lowercase(GetComputerNameString) + ':PORT+1',
     'Use the port Manager Server listens on. 5000 is the usual one.');
   PortPage.Add('Port:', False);
   PortPage.Values[0] := '5000';

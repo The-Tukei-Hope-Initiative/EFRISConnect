@@ -1,188 +1,261 @@
 # EFRISConnect
 
-**URA EFRIS compliance for Manager.io, built for Ugandan small businesses.**
+**URA EFRIS e-receipts and e-invoices for Manager.io, built for Ugandan small businesses.**
 
-Open source (MIT) and free to use. A project of
-[The Tukei Hope Initiative](https://tukeihopeinitiative.org/)'s Economic
-Empowerment programme, helping Ugandan micro and small enterprises formalise
-and become tax compliant.
+EFRISConnect connects [Manager.io](https://www.manager.io/) accounting software to
+URA EFRIS (the Uganda Revenue Authority's electronic fiscal receipting and invoicing
+system). It is a small relay (Node.js) that runs on your own computer, plus a page
+that opens inside Manager from a custom button.
 
-EFRISConnect is a small self-hostable web app (a Node.js relay + a browser UI)
-that bridges [Manager.io](https://www.manager.io/) and URA EFRIS. It runs on
-**Windows, macOS, and Linux** - anywhere Node.js runs.
+It is free and open source (MIT). It is a project of
+[The Tukei Hope Initiative](https://tukeihopeinitiative.org/) (EMC/CBO/025, Entebbe,
+Uganda), through its Economic Empowerment programme, which helps micro and small
+enterprises formalise and become tax compliant.
 
----
+There is no hosted service. You install EFRISConnect on your own computer or shop
+server, and your credentials stay there.
 
-## What it does
-
-- Fiscalise receipts and invoices to URA EFRIS directly from your Manager.io
-  documents; the FDN, verification code, and QR are written back onto the record.
-- Configure goods and services against URA's commodity classification and units.
-- Print branded fiscal receipts/invoices carrying the QR and fiscal document number.
-- Multi-currency, offline queueing, credit notes.
-- **Goods and Services Configurator mode:** if you turn EFRIS off, the extension
-  becomes a pure goods/services configurator for Manager (classify items against
-  URA commodity codes and units, branded receipts) without any fiscalisation - useful
-  for businesses not yet on EFRIS, or for preparing your catalogue first.
-- **Offline resilience:** if the connection to URA drops mid-sale, receipts are
-  queued and submitted automatically once it returns. For true offline fiscal
-  document numbers, EFRISConnect can also work with URA's separate Offline Mode
-  Enabler (optional; see "Offline Enabler" in docs/self-hosting.md).
-
-## What is open source, and what is paid
-
-- **Open source (this repository):** the entire application - the relay
-  (`backend/`), the UI (`frontend/`), and the data files. MIT licensed. You can
-  read, run, modify, and redistribute all of it, for free, with no account and
-  without contacting anyone.
-- **Optional paid services:** The Initiative offers optional paid training and
-  setup. This is never required - everything needed to install and run
-  EFRISConnect yourself is in this repository and documented below.
-
-EFRISConnect is a self-hosted application: you run it on your own machine or
-server. It does not bypass URA - a business must still be registered and
-provisioned by URA (device, thumbprint, digital keys) for both sandbox and
-production.
+**Status:** tested on Windows so far, and for use in the URA EFRIS sandbox until
+URA approves live use. See [Project status](#project-status).
 
 ---
 
-## Testing and going live
+## Who it is for
 
-EFRISConnect is under active testing. **If you are helping test (including URA
-VAT testers), use a test setup only:**
+- Businesses in Uganda that keep their books in Manager.io (Desktop or Server
+  Edition) and must issue EFRIS receipts and invoices.
+- Shops with one computer, and shops with a server PC and several tills on the
+  same network.
+- Businesses not yet on EFRIS that want to prepare their items against URA's
+  commodity codes and units first (turn EFRIS off in Settings).
 
-- A **URA EFRIS sandbox** account, device, and digital keys - never production
-  credentials.
-- A **separate Manager.io test business**, not your live company file.
-- **Test/dummy data only** - do not fiscalise real sales or real customer data.
+## Features
 
-Keep **Sandbox mode ON** in the app until you have verified everything end to
-end. **Going live is a separate URA step:** it needs its own production device,
-thumbprint registration, and digital keys, and URA must approve/activate you for
-live e-invoicing. Only switch to production credentials once URA has activated
-you and your testing is complete.
+**Sales documents (URA interface T109)**
+- Issue a receipt, or submit an existing Manager sales invoice or receipt, to EFRIS.
+  The fiscal document number (FDN), verification code and QR code are written back
+  to the Manager record.
+- Buyer types B2B, B2C, foreign and B2G. Buyer TIN check with URA.
+- VAT standard rated, zero rated and exempt. Discount lines.
+- Multi-currency, with the day's exchange rate.
+- Bulk submission of several documents.
+- Reprints are marked ORIGINAL the first time, then COPY 1, COPY 2 and so on.
 
----
+**Credit and debit notes**
+- Credit notes (T110) against an issued invoice or receipt, with URA approval
+  status, withdraw and cancel.
+- Debit notes.
 
-## Self-hosting (Windows, macOS, Linux)
+**Documents**
+- Find and reopen issued documents (view, print, download).
+- Submission history, connection status, and reconciliation of Manager against URA.
 
-You need **Node.js 20+** and a **URA-provisioned EFRIS device**. No cloud
-account, no payment, and no contact with The Tukei Hope Initiative.
+**Goods and stock**
+- My Items: your item list, stored on the relay per business and shared by every
+  computer that uses it.
+- Search URA's registered goods and the commodity code tree.
+- Register goods with URA (T130, Admin only).
+- Stock in and stock adjustments (T131), mirrored in Manager.
+- Reconcile goods between Manager and EFRIS.
 
-> **URA prerequisites (obtained from URA, not from EFRISConnect).**
-> Before using EFRISConnect you must already be set up on URA EFRIS:
-> 1. Be registered for EFRIS / e-invoicing with URA.
-> 2. Have a **registered device** on the EFRIS portal, with the device
->    (thumbprint) registration completed, giving you a Device Number (DSN).
-> 3. Have **generated your EFRIS digital keys** (the private key/PEM) for that
->    device.
->
-> This applies to **both sandbox and production**. Sandbox uses a URA test
-> account, device, and keys. **Going live (production) is a separate URA step**:
-> it needs its own production device, thumbprint registration, and digital keys,
-> and URA must approve/activate you for live e-invoicing. EFRISConnect uses
-> whatever credentials and keys URA issues for the mode you are in; it does not
-> register your device or grant go-live approval - only URA does that.
+**Manager integration**
+- Creates the tax codes and custom fields EFRISConnect needs in Manager.
+- Receipt themes for Manager that print the EFRIS QR code and fiscal details.
+- Customers: look up, create, and record EFRIS buyer details.
 
-### 1. Install Node.js
-Install Node.js 20 or newer from https://nodejs.org (LTS is fine). Verify:
-```
-node --version
-```
+**Works when URA is unreachable**
+- If URA cannot be reached, the sale is still recorded in Manager and waits in the
+  offline queue. It is sent to URA automatically when the connection returns.
+- Optional: URA's separate Offline Mode Enabler, for fiscal numbers with no internet
+  at all (see [docs/self-hosting.md](docs/self-hosting.md#offline-enabler-optional)).
 
-### 2. Get the code
+**Users and administration**
+- Sign-in is required. Roles per business: Admin, Accountant and Cashier.
+- Several businesses on one relay. Switch business, or delete one.
+- Settings > Email: an SMTP server for security alerts and emailed one-time codes.
+- Settings > Logs: activity log (kept 90 days), export, and a support bundle with
+  secrets masked.
+- Settings > Diagnostics and a readiness audit.
+
+**Shop network**
+- One server PC runs EFRISConnect and Manager Server Edition. Tills open Manager
+  and EFRISConnect over HTTPS on the shop's own network. See
+  [Shop network summary](#shop-network-summary).
+
+## Requirements
+
+- **URA EFRIS registration** for the business, obtained from URA, not from
+  EFRISConnect:
+  1. Registration for EFRIS / e-invoicing.
+  2. A registered device on the EFRIS portal (device number) with the
+     thumbprint registration done.
+  3. The EFRIS private key (`.pem`) for that device, and its passphrase if it has one.
+- **Manager.io** Desktop or Server Edition, and a Manager API access token for the
+  business.
+- **Windows 10 or 11** (64-bit) for the installer. macOS and Linux work with the
+  manual install, but have not been tested yet (see [Project status](#project-status)).
+- **Node.js 20 or newer** for the manual install. The Windows installer includes
+  its own Node.js.
+
+## Install
+
+### Windows installer (recommended)
+
+Download `EFRISConnect-Setup-<version>.exe` from this repository's
+[Releases](https://github.com/The-Tukei-Hope-Initiative/EFRISConnect/releases) page
+and run it. The first page asks how the computer is used:
+
+| Choice | What it does |
+|---|---|
+| **This computer only** | Manager Desktop on one PC. Installs the relay (this computer only), creates and trusts the HTTPS certificate, starts the relay with Windows, and adds a tray icon. |
+| **Shop server** | The same, plus it listens on the shop network, opens the firewall on Private networks only, and can start Manager Server when you sign in to Windows. |
+| **Till** | Trusts the shop server's certificate and adds a "Manager (shop)" desktop shortcut. Nothing runs on the till. |
+
+The installer is not code-signed yet, so Windows SmartScreen may warn on first run.
+Details: [installer/README.md](installer/README.md).
+
+### Manual install (Windows, macOS, Linux)
+
+Install Node.js 20 or newer from https://nodejs.org, then:
+
 ```
 git clone https://github.com/The-Tukei-Hope-Initiative/EFRISConnect.git
 cd EFRISConnect/backend
 npm install
 ```
 
-### 3. Run it
-- **macOS / Linux:**
-  ```
-  ./start.sh
-  ```
-  (or `node server.js` from the `backend` folder)
-- **Windows:** double-click `windows\EFRISConnect.bat`, or run `node server.js`
-  in the `backend` folder from a terminal.
+- **Windows:** double-click `windows\EFRISConnect.bat`. Run option **2** (HTTPS
+  setup) once, then option **1** to start. See [windows/README.md](windows/README.md).
+- **macOS / Linux:** run `unix/setup-https.sh` once, then `./start.sh`. See
+  [unix/README.md](unix/README.md) and [docs/self-hosting.md](docs/self-hosting.md).
 
-The app serves at **http://localhost:3000** (and, once the local HTTPS cert is
-set up, **https://localhost:5443/extension**).
+The relay serves `https://localhost:5443/extension` once the certificate exists.
+Before that it serves `http://localhost:3000`.
 
-### 4. Local HTTPS (recommended)
-Manager custom buttons load over HTTPS. Generate a locally-trusted certificate:
-- **Windows:** `windows\EFRISConnect.bat` -> option for HTTPS setup.
-- **macOS / Linux:** see `docs/self-hosting.md` for the `mkcert`/openssl steps
-  (a one-line script generates a self-signed cert for `localhost`).
+## Connect it in Manager
 
-### 5. Connect it in Manager.io
-In Manager: **Settings -> Custom Buttons -> New Custom Button**
-- Label: `EFRISConnect`
+In Manager: **Settings > Custom Buttons > New Custom Button**.
+
+- Name: `EFRISConnect`
 - Source: `Url`
-- Address: `https://localhost:5443/extension` (your own instance)
-- Placements (add the ones you need):
-  - **Fiscalise receipts / invoices / credit notes:** `/receipts`,
-    `/sales-invoices` (button on the list pages) and `/receipt-form`,
-    `/sales-invoice-form` (button on a single open document, which opens that
-    exact record ready to fiscalise). Credit notes are raised from inside the
-    extension against an existing invoice/receipt, so they use these same
-    placements - no separate credit-note placement is needed.
-  - **Goods / services configuration:** `/inventory-items`,
-    `/non-inventory-items` (item list pages) and `/inventory-item-form`,
-    `/non-inventory-item-form` (a single item, to configure/register it).
+- URL: `https://localhost:5443/extension` (on a shop network:
+  `https://SERVER-NAME:5443/extension`)
+- Add one button for each placement you want: the Receipts and Sales Invoices
+  lists, the single receipt and sales invoice pages, and the inventory and
+  non-inventory item pages.
 
-### 6. First-run setup (in the app)
-Enter your business details, EFRIS device credentials (TIN, device number,
-password, private key), and your Manager API access token. **Keep Sandbox mode
-ON** and rehearse with test data until you are satisfied, before switching to
-production. See [SECURITY.md](SECURITY.md) for exactly how these credentials are
-stored.
+Manager only accepts an `https://` address here.
 
-Full step-by-step notes, including the macOS/Linux HTTPS steps, are in
-[`docs/self-hosting.md`](docs/self-hosting.md).
+## First-run setup
 
----
+Installing for the first time? Follow the
+[installation checklist](docs/first-install-checklist.md): what you need from URA,
+the install, Manager, tills, testing, and common errors with fixes.
 
-## Which version you are running
+1. Open EFRISConnect from the Manager button on the computer that runs the relay.
+2. Create the owner account. From another computer you need the one-time setup
+   code, which the relay writes to `EFRIS Connect setup code.txt` in its data folder.
+3. Save the recovery code shown after the account is created. It resets a
+   forgotten password. Five wrong passwords lock an account for 15 minutes.
+4. Enter the business details, the EFRIS credentials (TIN, device number, private
+   key) and the Manager endpoint and access token.
+5. Keep **Sandbox mode** on and test with sandbox credentials and test data.
+6. Add users (Admin, Accountant, Cashier) under Settings > Users.
 
-Every release is tagged in this repository. The [`VERSION`](VERSION) file records
-the release (e.g. `1.0.5`), and each release is published as a matching Git tag /
-GitHub Release here (e.g. `v1.0.5`). The running app shows its version in the footer
-and at `GET /api/version`, so you can check out that tag and confirm you are running
-exactly the published code, nothing added.
+On a single PC with Manager Desktop, the owner can turn on **single-user mode**
+(Settings > Users). EFRISConnect then opens without sign-in on that computer only.
+It is not available in shop network mode.
+
+If the owner loses both the password and the recovery code, use launcher option
+**7**, the tray icon's "Reset owner password", or `unix/reset-owner.sh`.
+
+## Shop network summary
+
+One PC (the server) runs EFRISConnect and Manager Server Edition. Tills use a
+browser.
+
+1. Server: install with **Shop server**, or use the launcher (option 2 once,
+   option 9 to start Manager Server, option 8 to start the relay for the network).
+2. Manager Server listens on the server only (`127.0.0.1:5000`). EFRISConnect
+   passes it on to the tills encrypted at `https://SERVER-NAME:5001`, with the same
+   certificate.
+3. Set every EFRISConnect button in Manager to `https://SERVER-NAME:5443/extension`.
+4. Each till trusts the server certificate once, from the till kit
+   (`C:\ProgramData\EFRISConnect\data\till-kit`) or with the installer's **Till** mode.
+5. The firewall rules apply to Private networks only, so the shop network must be
+   set to Private in Windows.
+
+Sales still work with the internet off: they are recorded in Manager and sent to
+URA when the connection returns. Full steps:
+[docs/self-hosting.md](docs/self-hosting.md#shop-network-lan).
+
+## Project status
+
+- **Tested on Windows only so far:** Manager Desktop on one PC, and Manager Server
+  Edition with tills on a shop network. macOS and Linux are supported through the
+  manual install and the `unix/` scripts, but have not been tested yet. Reports
+  from macOS and Linux users are welcome.
+- **Not yet approved for live use:** for now, use EFRISConnect in the URA EFRIS
+  sandbox only. Live (production) use needs URA's EFRIS approval for each
+  business first.
+
+## Testing and going live
+
+- Develop and test only in the **URA EFRIS sandbox**, with a sandbox account,
+  device and key, a separate Manager test business, and test data.
+- Live (production) use requires the business to pass URA's EFRIS approval
+  (UAT). Production uses its own device registration and keys issued by URA.
+- Turn off Sandbox mode only after URA has approved you. Production submissions
+  are live tax records.
+
+EFRISConnect does not register devices or grant approval. Only URA does that.
+
+## Updating
+
+- **Installer:** run the new Setup. It stops the relay, replaces the program files,
+  and keeps the data folder, the certificate (tills stay trusted) and the mode.
+- **Manual install:** stop the relay, run `git pull`, run `npm install` in
+  `backend`, and start it again. On Windows the data folder is outside the code
+  folder, so an update does not touch it.
+
+The running version is shown in the app footer and at `GET /api/version`. The
+`VERSION` file and the matching Git tag (for example `v1.0.7`) identify each release.
 
 ## Security
 
-Credentials never live in the browser; the relay encrypts them at rest with
-AES-256-GCM. On a **desktop/single self-hosted** install the relay runs on your
-own machine and the encryption key is stored locally, protected by file
-permissions (so encryption mainly guards the file from casual copying, not from
-someone with full access to that machine). On a **shared or cloud** server, set
-`VAULT_MASTER_KEY` so the key is one you control. Full details - what is
-transmitted, stored, encrypted, logged, backed up, and how to delete it - are in
-**[SECURITY.md](SECURITY.md)**.
+- Credentials (EFRIS password, private key, Manager token) stay on the relay,
+  encrypted with AES-256-GCM. The browser never receives them.
+- On Windows the encryption key is protected with DPAPI (machine scope), so a
+  copied data folder does not open on another computer.
+- Sign-in with roles and lockout. A relay reachable from other computers must use
+  HTTPS and a Host allowlist, or it refuses to start.
+
+Full details, including backup and deletion: [SECURITY.md](SECURITY.md).
 
 ## Project structure
 
 ```
-backend/    Node.js/Express relay (server.js), EFRIS crypto, data files, vault.js
-frontend/   Browser UI (index.html), printable receipt (receipt.html), theme
-windows/    Optional Windows launcher + local-HTTPS helper scripts
-docs/        Self-hosting and setup notes
-start.sh    macOS/Linux launcher
+backend/    Relay (server.js), sign-in, vault, email, logs, Manager HTTPS front, tests
+frontend/   The extension page (index.html), printable receipt, Manager receipt theme
+windows/    Launcher (EFRISConnect.bat), HTTPS, shop network, tray and installer helpers
+installer/  Inno Setup script and build script for the Windows installer
+unix/       macOS / Linux scripts (HTTPS, shop network, service, owner reset)
+docs/       Self-hosting and shop network guide
+start.sh    macOS / Linux launcher
 ```
+
+## Support and contributing
+
+- Bugs and feature requests: open an issue in this repository.
+- Pull requests are welcome. Run the tests first: `cd backend && npm test`.
+- Security issues: report privately (see [SECURITY.md](SECURITY.md#reporting-a-vulnerability)).
+- The Initiative offers optional paid training and setup. Nothing in this
+  repository requires it.
+
+EFRISConnect is given away free so that the smallest businesses can become tax
+compliant. Donations, partnerships, or sponsoring the setup of a business that
+cannot afford it keep it free: **outreach@tukeihopeinitiative.org**
 
 ## License
 
-[MIT](LICENSE) - free to use, modify, and share.
-Copyright (c) 2026 The Tukei Hope Initiative.
-
-## Support this work
-
-EFRISConnect is built and given away free so that Uganda's smallest businesses
-can become tax compliant without paying for software they cannot afford. If it
-has helped you, please consider giving back - a donation of any size, a
-partnership, or sponsoring the setup of a business that cannot afford it keeps
-this tool free for the next person.
-
-**Donate or partner with us: outreach@tukeihopeinitiative.org**
+[MIT](LICENSE). Copyright (c) 2026 The Tukei Hope Initiative.

@@ -5,8 +5,8 @@ One `EFRISConnect-Setup-<version>.exe` for three kinds of computer. The first pa
 | Choice | What Setup does |
 |---|---|
 | **This computer only** | Installs the relay with its own Node.js, creates and trusts the HTTPS certificate, and adds the "EFRISConnect Relay" startup task (localhost only). Adds the tray icon. |
-| **Shop server** | Same, plus: listens on the shop network, opens TCP 5443 (and the Manager Server port) on Private networks only, and optionally starts Manager Server at sign-in. Prints the Manager button URL and the till kit location. |
-| **Till** | Trusts the server's `https_cert.cer` from the till kit and puts a "Manager (shop)" shortcut on the desktop. Nothing runs on the till. |
+| **Shop server** | Same, plus: listens on the shop network, opens TCP 5443 and Manager's HTTPS port (Manager Server port + 1, default 5001) on Private networks only, and optionally starts Manager Server at sign-in, bound to 127.0.0.1. Tills reach Manager through the relay at `https://SERVER-NAME:5001`. Prints the Manager button URL and the till kit location. |
+| **Till** | Trusts the server's `https_cert.cer` from the till kit and puts a "Manager (shop)" shortcut to `https://SERVER-NAME:5001` on the desktop. Nothing runs on the till. |
 
 ## Build
 

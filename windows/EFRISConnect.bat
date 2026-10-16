@@ -13,6 +13,7 @@ REM    6) Uninstall auto-start / service / shop-network firewall rules
 REM    7) Reset owner password (lost password and recovery code, admin)
 REM    8) Start for shop network (LAN)  <- server PC that tills reach
 REM    9) Start Manager Server for the shop network (Manager Server Edition)
+REM   10) Change the Manager Server port (used by 8 and 9)
 REM
 REM  The admin steps (2, 4, 5, 7, and the firewall rules of 6, 8, 9)
 REM  relaunch this file elevated on their own - you don't need to open
@@ -76,7 +77,9 @@ REM ------------------------------------------------------------
 :do_start
 title EFRIS Connect
 REM EFRIS private key (Desktop/Server editions). Edit this path to match your setup.
-if not defined EFRIS_PRIVATE_KEY set "EFRIS_PRIVATE_KEY=F:\EFRIS_Keys\efris_private_v2.pem"
+REM EFRIS private key: usually set per business in Settings > EFRIS Credentials. A key
+REM file path saved in the data folder (efris-key-path.txt) is used when present.
+if not defined EFRIS_PRIVATE_KEY if exist "%DATADIR%\efris-key-path.txt" set /p EFRIS_PRIVATE_KEY=<"%DATADIR%\efris-key-path.txt"
 REM Single-PC Desktop: bind loopback only so the relay is not exposed on the network.
 REM For a Server/LAN box other machines must reach, set BIND_HOST=0.0.0.0 before running.
 if not defined BIND_HOST set "BIND_HOST=127.0.0.1"
@@ -329,7 +332,9 @@ if defined NEEDFW (
   echo   Allowing tills through Windows Firewall - Private networks only. Approve the admin prompt.
   powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList 'lan-firewall %MGRHTTPS%' -Verb RunAs -Wait"
 )
-if not defined EFRIS_PRIVATE_KEY set "EFRIS_PRIVATE_KEY=F:\EFRIS_Keys\efris_private_v2.pem"
+REM EFRIS private key: usually set per business in Settings > EFRIS Credentials. A key
+REM file path saved in the data folder (efris-key-path.txt) is used when present.
+if not defined EFRIS_PRIVATE_KEY if exist "%DATADIR%\efris-key-path.txt" set /p EFRIS_PRIVATE_KEY=<"%DATADIR%\efris-key-path.txt"
 set "BIND_HOST=0.0.0.0"
 set "LAN_MODE=1"
 set "MANAGER_PORTS=%MGRPORT%"

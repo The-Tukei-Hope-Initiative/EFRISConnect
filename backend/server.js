@@ -17,7 +17,7 @@ if (require.main === module) consoleUi.install(logger.LOG_DIR, { context: activi
 else { activity.setDir(logger.LOG_DIR); activity.setContextGetter(activityContext); }
 logger.setContextGetter(activityContext);   // error-log entries name their business too
 const vault   = require('./vault');   // encrypted per-tenant credential store
-const mailer  = require('./mailer');  // outgoing email: sign-in codes and security alerts (Settings > Email)
+const mailer  = require('./mailer');  // outgoing email: password-reset codes and security alerts (Settings > Email)
 // Mask the exact vault secrets in the activity log whenever a business is read.
 try { vault.setSecretSink(t => activity.noteSecrets([t.efrisPassword, t.efrisPassphrase, t.managerToken])); } catch (_) {}
 try { vault.warm(); } catch (_) {}     // unlock the vault key in the background, not on the first request
@@ -978,11 +978,6 @@ function _managerCallOnce(endpoint, token, method, docPath, body, _redirectsLeft
       // Manager (MANAGER_INSECURE_TLS=1) - never silently.
       ...(isHttps && process.env.MANAGER_INSECURE_TLS === '1' ? { rejectUnauthorized: false } : {})
     };
-    // Optional shared secret so an upstream WAF rule can distinguish this
-    // backend's traffic from generic internet scanning and skip its bot check
-    // only for requests carrying it. Unset by default - additive, never required.
-    // Sent over https only, so the secret never crosses the network in clear text.
-    if (process.env.CLOUDFLARE_SKIP_SECRET && isHttps) opts.headers['X-Backend-Secret'] = process.env.CLOUDFLARE_SKIP_SECRET;
     if (extraHeaders) Object.assign(opts.headers, extraHeaders);
     if (bodyStr) opts.headers['Content-Length'] = Buffer.byteLength(bodyStr);
     const req = lib.request(opts, res => {

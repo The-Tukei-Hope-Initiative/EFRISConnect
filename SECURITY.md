@@ -1,199 +1,206 @@
 # Security and credential handling
 
-This document describes exactly how EFRISConnect handles sensitive data:
-Manager API access tokens, EFRIS passwords, EFRIS private keys, and key
-passphrases. It reflects the behaviour of the code in this repository
-(`backend/vault.js`, `backend/server.js`). If you find a discrepancy, please
-open an issue.
+This document describes how EFRISConnect handles sensitive data. It reflects the
+code in this repository (`backend/vault.js`, `backend/auth.js`,
+`backend/server.js`, `backend/paths.js`). If you find a difference, please report it.
 
 ## What is sensitive
 
-- **Manager API access token** - grants access to your Manager.io business.
-- **EFRIS password** - your URA EFRIS portal password.
-- **EFRIS private key (PEM)** and its **passphrase** - used to decrypt the EFRIS
-  session key so submissions can be signed.
+- **Manager API access token**: access to your Manager.io business.
+- **EFRIS password**, **EFRIS private key (PEM)** and its **passphrase**: used to
+  sign and decrypt EFRIS traffic for your device.
+- **User passwords**, **recovery codes**, **setup and reset codes**.
+- **SMTP password** (Settings > Email).
 
 ## Where it runs
 
-EFRISConnect is a relay you host yourself. The **browser UI never holds the
-EFRIS private key or the Manager token**: it refers to a saved business by an
-id, and the server decrypts the secret into memory only for the moment it makes
-a call to Manager or EFRIS.
+EFRISConnect is a relay you run yourself, on one computer or on a shop server.
+There is no hosted service and nothing is sent to The Tukei Hope Initiative.
+
+The browser page never receives the EFRIS private key, the EFRIS password or the
+saved Manager token. It refers to a saved business by an id. The relay decrypts a
+secret into memory only for the call to Manager or URA that needs it.
+
+## Sign-in and roles
+
+- Every API request needs a signed-in user, except health, version and the
+  sign-in routes themselves.
+- The first account is the **owner**, created on first run. On the relay's own
+  computer no code is needed. From another computer a one-time **setup code** is
+  needed (valid 24 hours, written to `EFRIS Connect setup code.txt` in the data
+  folder, which only administrators and the relay can read).
+- Roles are set per business: **Admin** (everything), **Accountant** (adds credit
+  and debit notes, reports, stock, number series, the full log, reconcile) and
+  **Cashier** (sell, customers, read goods, offline queue, own log entries). A
+  route not listed in the permission table is admin only.
+- Passwords are stored as scrypt hashes, at least 8 characters. Five wrong
+  passwords lock the account for 15 minutes. Sign-in routes are rate limited.
+- Each account gets a **recovery code** to reset a forgotten password. If the owner
+  loses both, an administrator on the server can create a one-time reset code
+  (launcher option 7, the tray menu, or `unix/reset-owner.sh`).
+- With Settings > Email configured, users can get an emailed one-time code (valid
+  30 minutes, one use) to set a new password, and owners get security alerts.
+- Sessions: only a SHA-256 hash of each session token is stored. A session ends
+  after 8 hours idle and at most 12 hours (30 days with "remember this computer").
+- **Single-user mode** (owner only, for Manager Desktop on one PC) skips sign-in
+  for requests from the relay's own computer. It is refused while the relay is
+  reachable from other computers, and turned off at start if that changes.
+- `INTERNAL_API_KEY`, when set, allows automation (tests, scripts) with an
+  `X-API-KEY` header. If it is not set, there is no such key.
 
 ## Transmission
 
-- Browser <-> your relay: over HTTP on `localhost` for a local install, or HTTPS
-  when you enable the local certificate (recommended) or put the relay behind
-  TLS. Because you host the relay, credentials are not sent to any third party.
-- Relay <-> Manager.io and Relay <-> URA EFRIS: HTTPS to the endpoints you
-  configure. EFRIS payloads are additionally AES-encrypted and signed per URA's
-  interface specification.
+- Browser to relay: HTTPS on port 5443 once the certificate exists. Plain
+  `http://localhost:3000` serves only until then, and later redirects browsers to
+  HTTPS.
+- Relay to Manager and relay to URA EFRIS: HTTPS to the endpoints you configure.
+  EFRIS payloads are also encrypted and signed as URA's interface requires.
+- The Manager token is accepted only in a request header, never in a URL.
 
 ## Storage (encryption at rest)
 
-Secrets are stored server-side in `credentials_vault.json` in the relay's data
-folder, encrypted with **AES-256-GCM** (a random 12-byte IV per value, an authentication
-tag, versioned `v1:` prefix). Non-secret metadata (TIN, device number, Manager
-endpoint, flags) is stored in clear so the UI can list businesses without
-decrypting anything.
+Secrets are stored in `credentials_vault.json` in the data folder, encrypted with
+**AES-256-GCM** (random 12-byte IV per value, authentication tag, versioned
+prefix). Non-secret details (TIN, device number, Manager endpoint, flags) are
+stored in clear so businesses can be listed without decrypting anything. User
+accounts are in `users.json` (hashes only) and sessions in `sessions.json`.
 
-**Where the data folder is.** On Windows: `%ProgramData%\EFRISConnect\data`
-(usually `C:\ProgramData\EFRISConnect\data`), outside the program folder, so
-folder syncing (OneDrive, Google Drive), git and re-installs never touch it. The
-relay restricts it to the installing user, SYSTEM and Administrators. Older
-installs that kept data in `backend\data` are moved there automatically on first
-start. On macOS/Linux and in containers the folder is `backend/data/`.
-`DATA_DIR_OVERRIDE` (and `VAULT_DIR` for the vault alone) set it explicitly.
+**Data folder.** On Windows: `C:\ProgramData\EFRISConnect\data`, outside the
+program folder, so OneDrive or Google Drive syncing, git and reinstalls do not
+touch it. It is restricted to the installing user, SYSTEM and Administrators.
+Older installs that kept data in `backend\data` are moved there on first start.
+On macOS and Linux the folder is `backend/data/`. `DATA_DIR_OVERRIDE` (and
+`VAULT_DIR` for the vault alone) set it explicitly.
 
-The encryption key (the "master key") is resolved in this order:
-1. `VAULT_MASTER_KEY` environment variable (base64 of 32 bytes). **Required for
-   any shared or cloud deployment.**
-2. Windows: a per-install random key protected with **DPAPI** (machine scope)
-   and stored as `.vault_master.dpapi`. It can only be unlocked on the computer
-   that created it, so a copied data folder (backup, sync, USB) does not open
-   anywhere else. A plain `.vault_master` from older versions is converted on
-   first use and deleted.
-3. macOS/Linux: a per-install random key in `.vault_master` with `0600`
-   permissions (owner-only).
+**Master key.** The vault key is found in this order:
+1. `VAULT_MASTER_KEY` environment variable (base64 of 32 bytes). Use it for any
+   relay you host for others or run in a container.
+2. Windows: a random key protected with **DPAPI, machine scope**, in
+   `.vault_master.dpapi`. It only unlocks on the computer that created it, so a
+   copied data folder (backup, sync, USB) does not open elsewhere. Machine scope
+   also lets the installed relay start as SYSTEM before anyone signs in. A plain
+   `.vault_master` from older versions is converted on first use and deleted.
+3. macOS and Linux: a random key in `.vault_master` with `0600` permissions.
 
-Options 2 and 3 suit one taxpayer on their own machine; they are **not**
-appropriate for a shared/multi-user server - set `VAULT_MASTER_KEY` there. If the
-vault holds secrets but no master key can be found, the relay refuses to create a
-new one (that would make the stored secrets unreadable) and logs how to recover.
+If the vault holds secrets but no master key can be found, the relay does not
+create a new one (that would make the stored secrets unreadable) and logs how to
+recover.
 
-What this does not protect against: a program running as the same Windows user
-while the relay runs, or an administrator of the machine. The relay must decrypt
-secrets to use them, so anything with that level of access can too.
+What this does not protect against: an administrator of the machine, or a program
+running with the relay's rights. The relay must decrypt secrets to use them, so
+anything with that access can too.
 
-`credentials_vault.json` and the key files are git-ignored.
-
-## Logging
-
-The relay redacts secrets from its logs: EFRIS passwords, key passphrases,
-access tokens, and private-key material are stripped from error messages and
-diagnostic output before anything is written. Logs record operational events
-(which EFRIS interface was called, return codes) - not credential values.
-
-## Backup and moving to another computer
-
-**Manager.io's own backup does not cover EFRISConnect's credentials** - it backs up
-your Manager accounting data, including the fiscal details EFRISConnect writes
-into it (FDN, QR and verification codes). On Windows the credential vault is
-locked to the computer it was created on, so a copied data folder will not open
-elsewhere; that is deliberate.
-
-To move to another computer, run the setup wizard there and re-enter the
-credentials from their sources: TIN, device number and password (URA EFRIS
-portal), the private key `.pem` file, and a new Manager access token. **Keep your
-own safe copy of the `.pem` file** - URA cannot show it to you again.
-
-If you back up the data folder anyway, treat it as highly sensitive. If you set
-`VAULT_MASTER_KEY` via environment, keep it out of your code backups (it is the
-key to the vault); store it in a secrets manager, not alongside the vault file.
+`credentials_vault.json`, the key files and the data folder are git-ignored.
 
 ### Generating a VAULT_MASTER_KEY
-It must be base64 of exactly 32 random bytes. Generate one with either:
+
+It must be base64 of exactly 32 random bytes:
 ```
 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 openssl rand -base64 32
 ```
-Set the output as the `VAULT_MASTER_KEY` environment variable (see the env-var
-instructions in docs/self-hosting.md).
+Keep it out of backups of the vault itself. Store it in a password manager or
+secrets store.
 
-## Access
+## Logging
 
-Only the relay process reads the vault, and only to decrypt a secret into memory
-for a single outbound call. Server API endpoints that accept credentials are
-protected by the relay's own API key when configured. There is no endpoint that
-returns stored secrets to the browser.
+- The relay console, the activity log (Settings > Logs) and the error log mask
+  secrets before anything is written: passwords, passphrases, tokens, keys and
+  known vault values. Values under secret-looking field names are dropped.
+- Logs do contain operational data: customer names, TINs, amounts, document
+  numbers. Treat them as sensitive.
+- Day log files are kept 90 days by default (`LOG_RETENTION_DAYS`, at least 7).
+- Admins can export logs and download a support bundle. Both are masked again on
+  export. A non-owner admin sees only the businesses they administer.
+- Email recipients appear in the activity log by sign-in name, not by address.
+
+## Backup and moving to another computer
+
+Manager's own backup does not include EFRISConnect's credentials. It does include
+the fiscal details EFRISConnect writes into Manager (FDN, QR and verification code).
+
+On Windows the vault is locked to the computer that created it, by design. To move
+to another computer, set up EFRISConnect there and enter the credentials again from
+their sources: TIN, device number and password (URA EFRIS portal), the private key
+`.pem` file, and a new Manager access token. **Keep your own safe copy of the
+`.pem` file.**
+
+If you back up the data folder anyway, treat it as highly sensitive.
 
 ## Deletion
 
-Removing a business from the app deletes its entry from
-`credentials_vault.json`. To remove everything, stop the relay and delete
-`credentials_vault.json` from the data folder (and `.vault_master.dpapi` /
-`.vault_master` if you want to discard the local master key). Deletion is immediate and permanent.
+- Settings > Switch Business > delete removes that business's credentials from the
+  vault, its user roles and its My Items list.
+- To remove everything, stop the relay and delete the data folder. The Windows
+  uninstaller asks whether to delete it (default: keep).
+- Deletion is immediate and permanent.
 
-## Local HTTPS certificate
+## HTTPS certificate
 
-To serve `https://localhost:5443` for the Manager button, the app uses a
-**self-signed certificate for localhost/LAN only**. This certificate is unrelated
-to any EFRIS or Manager credential and secures only local TLS.
+The relay uses a self-signed certificate for this computer's names and addresses
+(`localhost`, the PC name, `PCNAME.local`, its private IP addresses). It is not
+related to any EFRIS or Manager credential.
 
-- On Windows, `setup-https.ps1` generates the cert and a PFX. The PFX password is
-  a **random per-install value** (not a shared constant); the password file is
-  restricted to the current user. The private key's real protection is file-system
-  permissions on the data folder.
-- On macOS/Linux you provide a cert/key pair (see docs/self-hosting.md); protect
-  the key file with `0600`.
-- The generated cert, key, PFX, and password file live in the data folder
-  (outside the program folder on Windows) - they are never committed or published.
-
-Because this only protects a local self-signed certificate, an attacker who can
-read these files already has local file-system access; the certificate password
-is therefore not a meaningful additional secret. No public CA key material is
-involved.
-
-## Testing vs production
-
-Keep **Sandbox mode ON** while evaluating the software. Do not enter production
-EFRIS credentials until you have verified the install against URA's sandbox with
-test data. Production submissions are live and legally binding.
-
-## Security design notes and limitations
-
-Being transparent about the trade-offs of a self-hostable, largely single-tenant
-tool:
-
-- **Manager TLS verification is ON by default.** Calls to Manager verify the
-  server certificate (prevents MITM). It is skipped only if you explicitly set
-  `MANAGER_INSECURE_TLS=1` for a self-signed Manager - never silently.
-- **Request bodies are capped** (5 MB) to limit oversized-payload abuse.
-- **CORS is open (`*`)** because the extension is loaded cross-origin from
-  Manager, whose origin varies (a random localhost port on Desktop, or a cloud
-  domain). Authentication is by header token / operator API key, not cookies, so
-  classic CSRF does not apply. Sensitive relay endpoints require the operator
-  API key (`INTERNAL_API_KEY`).
-- **Credentials should be sent in headers/body, not query strings.** Some GET
-  diagnostics accept `ep`/`tk` as query params for convenience; on a shared
-  server prefer headers and disable query-string access logging.
-- **Sessions and decrypted keys live only in memory** and are gone on restart.
-  On a shared/multi-tenant host, isolate the process and set `VAULT_MASTER_KEY`.
-- **The vault master key on disk** (`.vault_master`, `0600`) is unavoidable for a
-  single self-hoster - the process must read it to decrypt. It protects against
-  casual file copying, not against full compromise of that machine. Use
-  `VAULT_MASTER_KEY` (kept outside the repo/backups) for anything shared.
-- **Rate limiting is per-IP and in-memory** - adequate for a single-tenant
-  self-host; put a proper gateway/WAF in front for a public multi-tenant deployment.
-- **Logs record operational data** (customer name, TIN, amounts, references) but
-  redact secrets. Treat log files as sensitive; rotate and protect them.
-- **On-disk caches** (e.g. the goods catalog) are stored unencrypted and
-  git-ignored; they contain product/pricing data, not credentials.
-- **`deviceMAC`** sent to EFRIS is a fixed constant required by the interface,
-  not a secret.
+- Windows: `windows/setup-https.ps1` (launcher option 2, or the installer) creates
+  it, trusts it on this computer, and writes `https.pfx`, `https_cert.cer` and a
+  random per-install PFX password file into the data folder.
+- macOS and Linux: `unix/setup-https.sh` or your own cert/key pair (see
+  [docs/self-hosting.md](docs/self-hosting.md)). Protect the key file with `0600`.
+- The **till kit** given to tills holds only the public certificate and two
+  scripts to trust or remove it. The kit writer refuses any file that contains a
+  private key.
 
 ## Network exposure
 
-The relay is designed to run **locally** (a desktop/server on the same machine or
-LAN as the till), not to be published directly on the public internet. If you do
-expose it, restrict access with a firewall / security-group rule to
-localhost/trusted networks only, and put it behind proper TLS and a gateway.
+By default the relay listens on `127.0.0.1` only.
 
-## Deployment checklist (shared / multi-tenant / cloud)
+When it listens on a network address (`BIND_HOST`), it refuses to start unless:
+- `ALLOWED_HOSTS` lists the names other computers use (Host header allowlist, which
+  also blocks DNS rebinding), and
+- HTTPS is set up, or the relay sits behind a TLS reverse proxy named in
+  `TRUST_PROXY`.
 
-For anything beyond a single self-hosted taxpayer:
+Shop network (LAN) mode, set by launcher option 8, `unix/start-lan.sh` or the
+**Shop server** install:
+- Tills reach the relay at `https://SERVER-NAME:5443`.
+- Manager Server listens on `127.0.0.1` only. The relay serves it to the tills
+  over HTTPS on Manager's port + 1 (default 5001) with the same certificate, so
+  Manager passwords and business data are encrypted on the shop network. Plain
+  `http://` on that port is redirected to `https://`.
+- Windows firewall rules are added for the **Private** network profile only.
 
-- [ ] Set `VAULT_MASTER_KEY` (do not rely on the local `.vault_master` file).
-- [ ] Set `INTERNAL_API_KEY` explicitly (do not use the random per-process key).
-- [ ] Restrict network access to authorised IPs (firewall / security group).
-- [ ] Disable query-string credential params in your reverse-proxy access logs.
-- [ ] Run behind a WAF / gateway for real rate limiting (the built-in limiter is
-      in-memory and per-IP).
-- [ ] Rotate logs regularly and encrypt them at rest.
-- [ ] Use a proper CA-issued TLS certificate (not self-signed); keep
-      `MANAGER_INSECURE_TLS` unset.
+Do not publish the relay directly on the public internet.
+
+## Other design notes
+
+- **Manager TLS verification is on.** It is skipped only if you set
+  `MANAGER_INSECURE_TLS=1` for a Manager with a self-signed certificate.
+- **CORS and framing are limited** to loopback origins, `ALLOWED_ORIGINS` /
+  `MANAGER_ORIGINS`, and in LAN mode the Manager Server addresses. A Content
+  Security Policy restricts what the pages load.
+- **Request bodies are capped** at 5 MB.
+- **Rate limiting is per IP and in memory.** It suits a shop or a single computer.
+- **On-disk caches** (for example the goods catalogue) are not encrypted. They hold
+  product and price data, not credentials.
+- **`deviceMAC`** sent to EFRIS is a fixed value the interface requires, not a secret.
+
+## Checklist for a relay reachable from other computers
+
+- [ ] HTTPS with the relay's certificate, or a TLS reverse proxy and `TRUST_PROXY`.
+- [ ] `ALLOWED_HOSTS` set to the exact names used.
+- [ ] `VAULT_MASTER_KEY` set when the relay is not on a single Windows computer.
+- [ ] A persistent, access-restricted data folder.
+- [ ] Firewall limited to the shop network or trusted addresses.
+- [ ] Single-user mode off (the relay enforces this).
+- [ ] `MANAGER_INSECURE_TLS` unset.
+
+## Testing vs production
+
+Keep **Sandbox mode** on while evaluating. Use URA's EFRIS sandbox with test data
+only. Live use requires the business to pass URA's EFRIS approval (UAT).
+Production submissions are live tax records.
 
 ## Reporting a vulnerability
 
 Please report security issues privately to **outreach@tukeihopeinitiative.org**
-rather than opening a public issue, so we can address them before disclosure.
+rather than opening a public issue, so they can be fixed before disclosure.

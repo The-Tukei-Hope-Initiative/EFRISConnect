@@ -1,24 +1,29 @@
 # Self-hosting EFRISConnect
 
-EFRISConnect runs on Windows, macOS, and Linux. It is a Node.js relay plus a
-browser UI. Everything below is free and needs no account or contact with
-anyone.
+EFRISConnect runs on Windows, macOS and Linux. It is a Node.js relay plus a page
+that opens inside Manager. Everything here is free and needs no account with
+anyone except URA.
+
+On Windows, the installer is the easiest route: see
+[../installer/README.md](../installer/README.md). This guide covers the manual
+install and the shop network in detail.
 
 ## Requirements
-- Node.js 20 or newer (https://nodejs.org)
-- A Manager.io API access token for the business you are fiscalising
-- A **URA-provisioned EFRIS device** - this is obtained from URA, not from
-  EFRISConnect. You must already have:
-  - EFRIS / e-invoicing registration with URA.
-  - A registered device with completed device/thumbprint registration, giving
-    you a Device Number (DSN).
-  - Your generated EFRIS digital keys (private key PEM, and passphrase if set).
-  This applies to both sandbox and production; going live (production) is a
-  separate URA step with its own device and keys, and URA must approve/activate
-  you for live e-invoicing. EFRISConnect uses the TIN, DSN, password, and keys
-  URA issues; it does not register the device or grant go-live approval.
+
+- Node.js 20 or newer (https://nodejs.org). The Windows installer bundles its own.
+- Manager.io Desktop or Server Edition, and a Manager API access token for the
+  business.
+- EFRIS registration from URA:
+  - EFRIS / e-invoicing registration.
+  - A registered device (device number) with the thumbprint registration done.
+  - The EFRIS private key (`.pem`) for that device, and its passphrase if set.
+
+Test in the URA EFRIS sandbox with test data only. Live use requires the business
+to pass URA's EFRIS approval (UAT) and uses its own production device and keys.
+EFRISConnect does not register devices or grant approval.
 
 ## Install
+
 ```
 git clone https://github.com/The-Tukei-Hope-Initiative/EFRISConnect.git
 cd EFRISConnect/backend
@@ -26,222 +31,260 @@ npm install
 ```
 
 ## Run
-- macOS / Linux: `./start.sh` (from the repo root) or `node server.js` (from `backend/`)
-- Windows: `windows\EFRISConnect.bat`, or `node server.js` from `backend\`
 
-The relay listens on http://localhost:3000 and, once a certificate is present,
-https://localhost:5443/extension.
+- macOS / Linux: `./start.sh` from the repository root, or `node server.js` from
+  `backend/`.
+- Windows: `windows\EFRISConnect.bat` option 1, or `node server.js` from `backend\`.
+
+The relay listens on `127.0.0.1` only. It serves `https://localhost:5443/extension`
+once a certificate exists, and `http://localhost:3000` before that.
 
 ## Local HTTPS
 
-Manager custom buttons load over HTTPS, so a locally-trusted certificate makes
-the in-Manager experience seamless.
+Manager needs an `https://` address for the custom button.
 
 ### Windows
-Run `windows\EFRISConnect.bat` and choose the HTTPS-setup option. It creates a
-self-signed certificate covering `localhost`, this machine's hostname, and its
-LAN IPs, trusts it on the machine, and writes the PFX the relay uses.
+
+`windows\EFRISConnect.bat` option **2** (or the installer) creates a self-signed
+certificate for `localhost`, `127.0.0.1`, the PC name, `PCNAME.local` and its IP
+addresses, trusts it on this computer, and writes `https.pfx` and
+`https_cert.cer` to `C:\ProgramData\EFRISConnect\data`.
 
 ### macOS / Linux
-The relay looks in `backend/data/` for either `https.pfx` (+ `https_pfx_pass.txt`)
-or a PEM pair named exactly **`https_cert.pem`** and **`https_key.pem`**. So
-generate a cert/key, then copy them into `backend/data/` under those two names.
-(If no cert is found the relay serves plain HTTP, so HTTPS is optional for a quick
-trial.)
 
-Option A - mkcert (easiest; trust is automatic):
+The relay looks in `backend/data/` for `https.pfx` (with `https_pfx_pass.txt`),
+or a PEM pair named `https_cert.pem` and `https_key.pem`.
+
+Option A, `unix/setup-https.sh`: creates the PEM pair for `localhost`, the computer
+name, `name.local` and its private IP addresses. Then trust the certificate:
+- macOS: `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain backend/data/https_cert.pem`
+- Debian / Ubuntu: `sudo cp backend/data/https_cert.pem /usr/local/share/ca-certificates/efrisconnect.crt && sudo update-ca-certificates`.
+  Chrome and Firefox may keep their own certificate stores: import it there too.
+
+Option B, mkcert (trust is automatic):
 ```
-mkcert -install               # trusts mkcert's local CA in your OS/browser
-mkcert localhost 127.0.0.1    # creates localhost+1.pem and localhost+1-key.pem
+mkcert -install
+mkcert localhost 127.0.0.1
 cp localhost+1.pem     backend/data/https_cert.pem
 cp localhost+1-key.pem backend/data/https_key.pem
 ```
-No separate trust step - `mkcert -install` already did it. Restart the relay.
 
-Option B - openssl (self-signed; trust it manually):
-```
-openssl req -x509 -newkey rsa:2048 -nodes \
-  -keyout backend/data/https_key.pem -out backend/data/https_cert.pem \
-  -days 3650 -subj "/CN=localhost" \
-  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-```
-Then trust `backend/data/https_cert.pem` so the browser accepts it:
-- macOS: `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain backend/data/https_cert.pem`
-- Linux (Debian/Ubuntu): `sudo cp backend/data/https_cert.pem /usr/local/share/ca-certificates/efrisconnect.crt && sudo update-ca-certificates` (Chrome/Firefox keep their own stores - you may also import it in the browser's certificate settings).
+Restart the relay. The console shows `HTTPS running at https://localhost:5443/extension`.
 
-Restart the relay; the console shows `HTTPS running ... [trusted PEM (data/https_cert.pem)]`.
+## First run
 
-## Configure (first run, in the app)
-1. Open the app in your browser (or via the Manager custom button).
-2. Enter business details, EFRIS device credentials, and your Manager access token.
-3. Keep Sandbox mode ON. While testing, use a URA **sandbox** account, a
-   **separate Manager test business**, and **test data** only - never production
-   credentials or your live company file. Rehearse a few documents end to end
-   before switching to production (going live is a separate URA step).
+1. Open EFRISConnect from the Manager button (or the address above) on the
+   computer that runs the relay.
+2. Create the owner account. From another computer, enter the one-time setup code
+   from `EFRIS Connect setup code.txt` in the data folder (valid 24 hours).
+3. Save the recovery code.
+4. Enter the business details, EFRIS credentials (TIN, device number, private key)
+   and the Manager endpoint and access token. Auto-detect finds Manager Desktop's
+   port.
+5. Keep Sandbox mode on. Use a URA sandbox account, a separate Manager test
+   business and test data.
+6. Add users and their roles (Admin, Accountant, Cashier) in Settings > Users.
 
-## Environment variables (optional)
-- `PORT` - override the HTTP port (default 3000).
-- `VAULT_MASTER_KEY` - base64 of 32 random bytes; required for shared/cloud, not
-  needed for a single self-hosted machine (see SECURITY.md). Generate one with:
-  `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
-  (or `openssl rand -base64 32`).
-- `INTERNAL_API_KEY` - operator API key guarding sensitive relay endpoints. If
-  unset, a random one is generated per process.
-- `MANAGER_INSECURE_TLS=1` - skip Manager TLS certificate verification. Only for a
-  self-signed Manager; leave unset otherwise (verification is on by default).
+## Connect in Manager
 
-All of these are **optional** - a normal single-machine self-host needs none of
-them. Set one only if the note above says you need it.
+**Settings > Custom Buttons > New Custom Button**:
+- Name `EFRISConnect`, Source `Url`.
+- URL: `https://localhost:5443/extension` (shop network:
+  `https://SERVER-NAME:5443/extension`).
+- One button per placement: the Receipts and Sales Invoices lists, the single
+  receipt and sales invoice pages, and the inventory and non-inventory item pages.
+  Credit notes are raised inside EFRISConnect, so they need no separate button.
 
-### How to set an environment variable
-Set it in the same terminal/session that starts the relay, before `node server.js`:
+## Environment variables
 
-- **Windows (PowerShell):** `$env:MANAGER_INSECURE_TLS = "1"; node server.js`
-- **Windows (Command Prompt):** `set MANAGER_INSECURE_TLS=1` then `node server.js`
-- **macOS / Linux:** `MANAGER_INSECURE_TLS=1 node server.js`
+A single computer needs none of these.
 
-Or put them in a `.env` file next to `server.js` (see `.env.example`). To make one
-permanent, use your OS's environment settings or your service manager's config.
+| Variable | Purpose |
+|---|---|
+| `PORT` | HTTP port (default 3000). |
+| `HTTPS_PORT` | HTTPS port (default 5443). |
+| `BIND_HOST` | Interface to listen on (default `127.0.0.1`). Any other value requires `ALLOWED_HOSTS` and HTTPS or `TRUST_PROXY`. |
+| `ALLOWED_HOSTS` | Host names (besides localhost) the relay answers to, comma separated. |
+| `ALLOWED_ORIGINS` / `MANAGER_ORIGINS` | Other browser origins that may frame the extension and call the relay, for example a Manager Server on its own domain. |
+| `TRUST_PROXY` | Reverse proxy whose `X-Forwarded-For` is trusted (Express syntax). Default `loopback`. |
+| `VAULT_MASTER_KEY` | Base64 of 32 random bytes. Vault key instead of the local key file. See [../SECURITY.md](../SECURITY.md). |
+| `DATA_DIR_OVERRIDE` | Data folder location. |
+| `LAN_MODE`, `MANAGER_PORTS`, `MANAGER_HTTPS_PORT` | Shop network settings, see below. |
+| `LOG_RETENTION_DAYS` | Days of log files to keep (default 90, at least 7). |
+| `INTERNAL_API_KEY` | Enables an `X-API-KEY` header for automation (tests, scripts). Unset means no key. |
+| `EFRIS_PRIVATE_KEY` | Path to, or content of, a fallback EFRIS private key. The key in Settings is preferred. |
+| `MANAGER_INSECURE_TLS=1` | Skip certificate checks for a Manager with a self-signed certificate. Leave unset otherwise. |
 
-## Connect in Manager.io
-Settings -> Custom Buttons -> New Custom Button:
-- Label `EFRISConnect`, Source `Url`
-- Address: your instance, e.g. `https://localhost:5443/extension`
-- Placements, by purpose:
-  - Fiscalise receipts/invoices/credit notes: `/receipts`, `/sales-invoices`
-    (list pages) and `/receipt-form`, `/sales-invoice-form` (a single open
-    document, opened ready to fiscalise). Credit notes are raised inside the
-    extension against an existing invoice/receipt - no separate placement.
-  - Goods/services configuration: `/inventory-items`, `/non-inventory-items`
-    (item lists) and `/inventory-item-form`, `/non-inventory-item-form`
-    (a single item, to configure/register it).
+Set a variable in the same terminal before `node server.js`:
+- PowerShell: `$env:LOG_RETENTION_DAYS = "180"; node server.js`
+- Command Prompt: `set LOG_RETENTION_DAYS=180` then `node server.js`
+- macOS / Linux: `LOG_RETENTION_DAYS=180 node server.js`
+
+Or put them in a `.env` file (see `.env.example`), or in your service manager's
+configuration.
 
 ## Shop network (LAN)
-One PC in the shop (the **server PC**) runs EFRISConnect and Manager; the tills
-(laptops, other PCs) reach it over the shop's own Wi-Fi or cable network.
+
+One PC in the shop (the **server PC**) runs EFRISConnect and Manager Server
+Edition. The tills (laptops, other PCs) reach it over the shop's own Wi-Fi or
+cable network.
 
 ### Requirements
-- All PCs on the same **private** Wi-Fi/LAN (addresses 10.x, 172.16-31.x or
+
+- All PCs on the same **private** network (addresses 10.x, 172.16-31.x or
   192.168.x). Guest Wi-Fi that isolates devices does not work.
-- On the server PC, Windows must call that network **Private** (Settings ->
-  Network & internet -> the network -> Network profile type: Private). The
-  firewall rules EFRISConnect adds apply to Private networks only.
-- The HTTPS certificate on the server PC (launcher option 2, once). Tills only
-  connect over HTTPS.
+- On the server PC, Windows must call that network **Private** (Settings >
+  Network & internet > the network > Network profile type: Private). The firewall
+  rules EFRISConnect adds apply to Private networks only.
+- The HTTPS certificate on the server PC. Tills only connect over HTTPS.
 
-### Recommended: Manager Server Edition on the server PC
-Manager Desktop can only be used on its own PC. For Manager on the tills, use
-**Manager Server Edition** (`ManagerServer.exe`) on the server PC; tills open it in
-a browser and use the EFRISConnect buttons inside it.
+### How it fits together
 
-Manager Server uses the **same data folder as Manager Desktop** by default
-(`--path`, normally `Documents\Manager.io`). Never run Desktop and Server on the
-same data folder at the same time: close Manager Desktop first.
+| What | Where | Address for tills |
+|---|---|---|
+| Manager Server Edition | server PC, `127.0.0.1:5000` only | `https://SERVER-NAME:5001` (served by EFRISConnect) |
+| EFRISConnect | server PC, port 5443 | `https://SERVER-NAME:5443/extension` |
 
-**Server PC, once:**
-1. `windows\EFRISConnect.bat` -> **2) First-time HTTPS setup** (admin). The
-   certificate covers `localhost`, the PC name, `PCNAME.local` and its current
-   private IP addresses. Re-run it if the PC's IP address changes and tills use
-   the IP.
-2. `windows\EFRISConnect.bat` -> **9) Start Manager Server for the shop network**.
-   It asks once for the path to `ManagerServer.exe` and the port (default 5000),
-   adds a firewall rule "EFRISConnect Manager Server (LAN)" (TCP port, Private
-   profile only, one admin prompt) and starts
-   `ManagerServer.exe --urls http://*:5000`. The same by hand:
-   `"C:\path\to\ManagerServer.exe" --urls http://*:5000`. Default user:
-   `administrator`.
-3. `windows\EFRISConnect.bat` -> **8) Start for shop network (LAN)**. It checks
-   the certificate (else it tells you to run option 2 and stops), asks for
-   Manager Server's port (default 5000, remembered), adds the firewall rule
-   "EFRISConnect HTTPS (LAN)" (TCP 5443, Private profile only, one admin prompt the
+Manager Server only speaks plain HTTP. In shop network mode EFRISConnect also
+listens on Manager's port + 1 (default 5001) with the same certificate and passes
+each request to Manager Server on the server PC. Manager passwords and business
+data are therefore encrypted on the network. Plain `http://` on port 5001 is
+redirected to `https://`.
+
+### Server PC with the installer
+
+Run Setup and choose **Shop server**. Select `ManagerServer.exe` if it is
+installed on this PC (Setup then starts it when you sign in to Windows) and its
+port. Setup adds the firewall rules, starts the relay at Windows startup and
+prints the addresses. The till kit is in `C:\ProgramData\EFRISConnect\data\till-kit`.
+
+### Server PC with the launcher
+
+1. `windows\EFRISConnect.bat` option **2** (admin, once). The certificate covers
+   `localhost`, the PC name, `PCNAME.local` and the current IP addresses. Run it
+   again if the IP address changes and tills use the IP.
+2. Option **9**: start Manager Server. It asks once for the path to
+   `ManagerServer.exe` and the port (default 5000; option **10** changes it later),
+   then starts `ManagerServer.exe --urls http://127.0.0.1:5000`. If a data folder
+   is saved in `manager-server-data.txt` in the data folder, it adds
+   `--path "<folder>"`. Close Manager Desktop first: by default Manager Server uses
+   the same business data folder, and both must never have it open at once.
+3. Option **8**: start the relay for the shop network. It checks the certificate,
+   adds the firewall rules "EFRISConnect HTTPS (LAN)" (TCP 5443) and "EFRISConnect
+   Manager HTTPS (LAN)" (TCP 5001) on the Private profile (one admin prompt the
    first time), then starts the relay with `BIND_HOST=0.0.0.0`,
-   `ALLOWED_HOSTS=<pcname>,<pcname>.local,<private IPs>`, `LAN_MODE=1` and
-   `MANAGER_PORTS=<port>`, and prints the till addresses. Press **L** in the relay
-   window to see them again.
-4. In EFRISConnect (Settings -> System), the Manager endpoint stays on the server
-   PC: `http://127.0.0.1:5000/api2` (Auto-detect tries port 5000 first).
-5. In Manager Server -> Settings -> Custom Buttons, set every EFRISConnect button
-   URL to **`https://PCNAME:5443/extension`** (not `localhost`: the buttons are
-   shared by every browser that opens Manager). EFRISConnect's Home page and the
-   C key in the relay window show this exact URL in LAN mode.
-6. Copy the **till kit** folder, `%ProgramData%\EFRISConnect\data\till-kit`, to a
-   USB stick or a shared folder. It is written when option 8 starts and holds only
-   the public certificate (`https_cert.cer`), `Trust EFRISConnect server.bat`,
-   `Remove EFRISConnect trust.bat` and a `README.txt` with the addresses. No key,
+   `ALLOWED_HOSTS=<pcname>,<pcname>.local,<private IPs>`, `LAN_MODE=1`,
+   `MANAGER_PORTS=5000` and `MANAGER_HTTPS_PORT=5001`. It prints the till
+   addresses and warns if the network is set to Public.
+
+### Both ways, then
+
+1. In EFRISConnect (Settings > System), the Manager endpoint stays on the server
+   PC: `http://127.0.0.1:5000/api2`.
+2. In Manager Server > Settings > Custom Buttons, set every EFRISConnect button URL
+   to `https://SERVER-NAME:5443/extension`, not `localhost`: the buttons are shared
+   by every browser that opens Manager. EFRISConnect's Home page shows this URL in
+   shop network mode.
+3. Copy the **till kit** folder (`C:\ProgramData\EFRISConnect\data\till-kit`) to a
+   USB stick or a shared folder. It holds only the public certificate
+   (`https_cert.cer`), `Trust EFRISConnect server.bat`,
+   `Remove EFRISConnect trust.bat` and a `README.txt` with the addresses. No key and
    no password.
 
-**Each till, once:**
-1. Run `Trust EFRISConnect server.bat` from the till kit and approve the admin
-   prompt (or, with the EFRISConnect files on the till, launcher option **5**
-   and the path to `https_cert.cer`). Restart the browser.
-2. Open Manager Server in the browser: `http://PCNAME:5000` (or
-   `http://<server IP>:5000`). Its EFRISConnect buttons open
-   `https://PCNAME:5443/extension`.
+### Each till, once
+
+1. Run the installer and choose **Till** (it asks for `https_cert.cer` and the
+   server name, and adds a "Manager (shop)" desktop shortcut), or run
+   `Trust EFRISConnect server.bat` from the till kit and approve the admin prompt.
+   Restart the browser.
+2. Open Manager at `https://SERVER-NAME:5001`. Its EFRISConnect buttons open
+   `https://SERVER-NAME:5443/extension`.
 3. Sign in to EFRISConnect with the till's own user (for example a Cashier).
 
 Undo on a till: `Remove EFRISConnect trust.bat`, or as administrator
-`certutil -delstore Root "EFRISConnect Local HTTPS"`. On the server, option **6**
-also removes both firewall rules.
+`certutil -delstore Root "EFRISConnect Local HTTPS"`. On the server, launcher
+option **6** (or uninstalling) removes the firewall rules.
 
-### Fallback: browser only, no Manager on the tills
-Skip Manager Server. Tills trust the certificate as above and open
-`https://PCNAME:5443/extension` directly in Edge or Chrome, sign in as a cashier
-and issue receipts in EFRISConnect; EFRISConnect records them in Manager (Desktop
-or Server) on the server PC. Manager itself is used only on the server PC.
+### Browser only, no Manager on the tills
+
+Tills trust the certificate as above and open `https://SERVER-NAME:5443/extension`
+directly. A cashier signs in and issues receipts in EFRISConnect, which records
+them in Manager on the server PC.
 
 ### macOS / Linux server
-`unix/setup-https.sh` (covers the hostname, `.local` and private IPs), then
-`unix/start-lan.sh` (sets the same variables; `MANAGER_PORTS=8080 unix/start-lan.sh`
-for another Manager port). It makes no firewall changes: allow inbound TCP 5443
-(and Manager's port) from the LAN yourself; the script prints a hint. The till kit
-is written to `backend/data/till-kit`.
+
+Run `unix/setup-https.sh`, then `unix/start-lan.sh` (it sets the same variables;
+`MANAGER_PORTS=8080 unix/start-lan.sh` for another Manager port). It makes no
+firewall changes: allow inbound TCP 5443 and Manager's port + 1 from the shop
+network yourself. The till kit is written to `backend/data/till-kit`.
 
 ### With the internet off
-Works: signing in, Manager on the server PC (and on tills through Manager
-Server), issuing receipts (through the URA Offline Enabler if installed, else they
-wait in the offline queue and go to URA automatically when the internet returns).
 
-Needs the internet: checking a buyer's TIN with URA, credit-note approval status,
+Works: signing in, Manager on the server PC and through it on the tills, and
+issuing receipts. Sales are recorded in Manager and wait in the offline queue
+(or go through the URA Offline Mode Enabler if installed). They are sent to URA
+automatically when the internet returns.
+
+Needs the internet: checking a buyer's TIN with URA, credit note approval status,
 URA exchange rates and the URA tax rule of a commodity code.
 
-### Settings used (set by the launcher)
-- `LAN_MODE=1` - shop network mode: the Manager button URL becomes
-  `https://<first ALLOWED_HOSTS name>:5443/extension`, and Manager Server origins
-  (`http` and `https` on each `MANAGER_PORTS` port, for every `ALLOWED_HOSTS` name
-  and IP) may frame the extension and call the relay. The till kit is written at
-  start.
-- `MANAGER_PORTS` - Manager Server port(s), comma separated (default 5000).
-- `MANAGER_ORIGINS` - any other Manager origin, e.g. `https://books.example.com`
-  (also outside LAN mode; same effect as `ALLOWED_ORIGINS`).
+### Settings used in shop network mode
 
-## Offline Enabler (optional - Desktop / LAN only)
+- `LAN_MODE=1`: the Manager button URL becomes
+  `https://<first ALLOWED_HOSTS name>:5443/extension`; the Manager Server addresses
+  (each `ALLOWED_HOSTS` name and IP on each Manager port) may frame the extension;
+  the Manager HTTPS front starts; the till kit is written at start. Single-user
+  mode is not available.
+- `MANAGER_PORTS`: Manager Server port(s), comma separated (default 5000).
+- `MANAGER_HTTPS_PORT`: port of the Manager HTTPS front (default: first Manager
+  port + 1). `0` turns it off.
 
-EFRISConnect already queues documents when URA is unreachable and submits them
-automatically once the connection returns - so **most self-hosters do not need
-anything extra for offline resilience.**
+## Offline Enabler (optional)
+
+EFRISConnect already queues sales when URA is unreachable and sends them once the
+connection returns. Most shops need nothing more.
 
 URA also offers a separate **Offline Mode Enabler**: URA's own local application
-that generates fiscal document numbers while genuinely offline. It is **not part
-of EFRISConnect** - you obtain and install it from URA:
+that issues fiscal document numbers while offline. It is not part of EFRISConnect.
 
-- Download and install it from URA (see URA's "EFRIS Offline Mode Enabler
-  Installation Guide"). URA provides the Enabler for **Windows, macOS, and Linux** -
-  install the build for your operating system. It runs on the same machine or LAN
-  as EFRISConnect.
-- It has its **own device number**, separate from your normal EFRIS DSN.
-- It exposes a local API, typically
-  `http://localhost:9880/efristcs/ws/tcsapp/getInformation`.
+- Install it from URA (see URA's "EFRIS Offline Mode Enabler Installation Guide"),
+  on the same computer or shop network as the relay. On a shop network, install it
+  on the server only.
+- It has its own device number, separate from your normal EFRIS device.
+- Its local address is typically
+  `http://localhost:9880/efristcs/ws/tcsapp/getInformation`. Only local or
+  private network addresses are accepted.
 
-To use it, in EFRISConnect enable the Offline Enabler (onboarding step 3, or
-Settings) and enter its URL and device number. You can run it as a **fallback**
-(URA first, Enabler only when URA is down) or **always**. It applies to the
-Desktop / Server-LAN setup only, not a cloud host.
+In EFRISConnect, enable it in Settings > Offline Mode (or during first-run setup)
+with its address and device number. It can run as a **fallback** (URA first) or
+**always**.
 
-## Releases and versions
-The `VERSION` file records the current release, and each release is published as a
-matching Git tag / GitHub Release. Check out a tag to run or inspect that exact
-release.
+## Running on a server or in a container
+
+The relay is meant for one computer or a shop network. If you run it elsewhere,
+for example with `backend/Dockerfile` (`docker build -f backend/Dockerfile .` from
+the repository root), these are required once it binds a network address:
+
+- `ALLOWED_HOSTS` with the exact names clients use.
+- HTTPS: a certificate in the data folder, or a TLS reverse proxy in front with
+  `TRUST_PROXY` naming it.
+- `VAULT_MASTER_KEY`, kept outside the image and outside backups of the vault.
+- A persistent data folder: set `DATA_DIR_OVERRIDE` to a mounted volume (for
+  example `/data`) so the vault, users and logs survive a restart. Do not mount
+  over `backend/data` in the image: it holds the shipped commodity and unit files.
+
+Without `ALLOWED_HOSTS`, and HTTPS or `TRUST_PROXY`, the relay refuses to start on
+a network address. Do not expose it directly on the public internet.
+
+## Updating
+
+- Installer: run the new Setup. Data, certificate and mode are kept.
+- Manual: stop the relay, `git pull`, `npm install` in `backend`, start again.
+
+The `VERSION` file and the matching Git tag identify each release. The app shows
+its version in the footer and at `GET /api/version`.
 
 ## Security
-See [SECURITY.md](../SECURITY.md) for exactly how credentials are transmitted,
-stored, encrypted, logged, backed up, accessed, and deleted.
+
+See [../SECURITY.md](../SECURITY.md) for how credentials are transmitted, stored,
+encrypted, logged, backed up and deleted.

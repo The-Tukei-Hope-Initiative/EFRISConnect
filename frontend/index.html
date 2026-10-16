@@ -1902,7 +1902,7 @@
       <div id="sEfrisR" class="mt"></div>
     </div>
     <div class="card set-panel" data-panel="system"><div class="ct"><span class="ico-emoji"><span class="ico" data-icon="link"></span></span><svg class="ico-svg" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg> System <span class="ico info-tip" data-icon="info" style="cursor:pointer;" onclick="openHelp('systemInfo')" title="Help"></span></div>
-      <div class="fg"><label>Manager.io Endpoint</label><div style="display:flex;gap:6px;align-items:flex-start;"><input id="sMgr" style="flex:1;"/><button type="button" class="btn bo bsm" onclick="detectManagerEndpointSettings()" id="detectBtnSet" style="white-space:nowrap;margin-top:1px;"><span class="ico" data-icon="search"></span> Auto-detect</button></div><div id="detectResultSet" style="font-size:11px;margin-top:3px;"></div><div class="hint">Desktop edition uses a random port each launch - click Auto-detect, or paste <code>http://127.0.0.1:PORT/api2</code>. Server edition: fixed <code>https://your-domain/api2</code>.</div></div>
+      <div class="fg"><label>Manager.io Endpoint</label><div style="display:flex;gap:6px;align-items:flex-start;"><input id="sMgr" style="flex:1;"/><button type="button" class="btn bo bsm" onclick="detectManagerEndpointSettings()" id="detectBtnSet" style="white-space:nowrap;margin-top:1px;"><span class="ico" data-icon="search"></span> Auto-detect</button></div><div id="detectResultSet" style="font-size:11px;margin-top:3px;"></div><div class="hint">Desktop edition uses a random port each launch - click Auto-detect, or paste <code>http://127.0.0.1:PORT/api2</code>. Server Edition on this PC: <code>http://127.0.0.1:5000/api2</code> (or its port). Cloud edition: <code>https://your-domain/api2</code>.</div></div>
       <div class="fg"><label>Access Token</label>
         <div style="display:flex;gap:5px;"><input id="sTok" type="password" style="flex:1;"/><button type="button" class="btn bo bsm" style="width:auto;flex:0 0 auto;" onclick="togglePw('sTok',this)">Show</button></div>
       </div>
@@ -2018,7 +2018,7 @@
       </div>
     </div>
     <div class="card set-panel owner-only" data-panel="email" data-perm="admin"><div class="ct"><span class="ico" data-icon="mail"></span> Email</div>
-      <p style="font-size:12px;color:var(--gray);margin:0 0 10px;line-height:1.55;">EFRISConnect can email sign-in codes (Forgot password) and security alerts, for example when a password is changed, an account is locked or a new user is added. Alerts go to the owner and to the person concerned, if they have an email address. Only the owner can see this page.</p>
+      <p style="font-size:12px;color:var(--gray);margin:0 0 10px;line-height:1.55;">EFRISConnect can email password-reset codes (Forgot password) and security alerts, for example when a password is changed, an account is locked or a new user is added. Alerts go to the owner and to the person concerned, if they have an email address. Only the owner can see this page.</p>
       <div id="emlOwnerNote"></div>
       <div style="font-size:11px;font-weight:700;color:var(--txtl);text-transform:uppercase;letter-spacing:.4px;margin:2px 0 6px;" id="emlPresetLbl">Email provider</div>
       <div role="group" aria-labelledby="emlPresetLbl" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
@@ -8597,7 +8597,7 @@ async function authChangePassword(){
   if(d.token){ let rem=false; try{ rem=!!localStorage.getItem(AUTH_KEY); }catch(_){} authSetToken(d.token,rem); }
   efDialog({kind:'success',title:'Password changed',msg:'Your password has been changed. Use the new one next time you sign in.'});
 }
-// My account: the user's own email address (for alerts and emailed sign-in codes).
+// My account: the user's own email address (for alerts and emailed password-reset codes).
 async function authMyAccount(){
   const u=AUTH.user||{};
   const v=await efForm({title:'My account',ok:'Save',intro:'Your email address is used for security alerts and, if you forget your password, for a sign-in code. Leave it empty to remove it. Your current password is needed to change it.',fields:[
@@ -8747,7 +8747,7 @@ async function usrRename(id){
 }
 async function usrEditEmail(id){
   const u=usrFind(id); if(!u) return; const nm=u.displayName||u.name;
-  const v=await efForm({title:'Email address',ok:'Save',intro:'Email address of '+nm+', for security alerts and emailed sign-in codes. Leave it empty to remove it.',fields:[
+  const v=await efForm({title:'Email address',ok:'Save',intro:'Email address of '+nm+', for security alerts and emailed password-reset codes. Leave it empty to remove it.',fields:[
     {name:'email',label:'Email address',type:'email',autocomplete:'off',value:u.email||''}]});
   if(!v) return;
   const email=String(v.email||'').trim();
@@ -8839,7 +8839,7 @@ async function emlSave(e){
   if(ok) authMsg('emlMsg','Email settings saved. Send a test email to check them.','as');
 }
 async function emlTurnOff(){
-  if(!await efConfirm({title:'Turn email off',msg:'EFRISConnect will stop sending sign-in codes and security alerts. The saved settings, including the password, are removed.',ok:'Turn email off'})) return;
+  if(!await efConfirm({title:'Turn email off',msg:'EFRISConnect will stop sending password-reset codes and security alerts. The saved settings, including the password, are removed.',ok:'Turn email off'})) return;
   const d=await usrApi('/api/admin/email',{host:''});
   if(!d.success){ authMsg('emlMsg',esc(d.error||'Could not turn email off.')); return; }
   emlFill(d); authMsg('emlMsg','Email is off.','ai');

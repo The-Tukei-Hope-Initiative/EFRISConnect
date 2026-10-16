@@ -1,5 +1,5 @@
 'use strict';
-// ── Email: sign-in codes and security alerts ─────────────────────────────────
+// ── Email: password-reset codes and security alerts ─────────────────────────────────
 // One outgoing mail server (SMTP) for the whole relay, set by an owner in
 // Settings > Email. It is stored in the vault as a relay-wide record (not per
 // business); the password is encrypted there and never sent back to a browser.

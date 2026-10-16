@@ -45,8 +45,10 @@ echo "  Shop network mode"
 echo "  Tills open (after trusting the certificate once):"
 for h in $HOST $IPS; do echo "    https://$h:5443/extension"; done
 echo "  Manager custom button URL: https://$HOST:5443/extension"
+MGR_HTTPS=$(( ${MANAGER_PORTS%%,*} + 1 ))
+echo "  Manager for tills (encrypted): https://$HOST:$MGR_HTTPS"
 echo "  Till kit (certificate + README): $DATA/till-kit"
-echo "  Firewall: allow inbound TCP 5443 (and $MANAGER_PORTS for Manager Server)"
+echo "  Firewall: allow inbound TCP 5443 and $MGR_HTTPS (Manager over HTTPS)"
 echo "  from the LAN only, e.g. Linux: sudo ufw allow from 192.168.0.0/16 to any port 5443 proto tcp"
 echo "  macOS: System Settings > Network > Firewall (allow incoming for node)."
 echo "============================================================"
