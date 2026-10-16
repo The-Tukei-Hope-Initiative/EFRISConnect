@@ -148,9 +148,9 @@ Manager only accepts an `https://` address here.
 
 ## First-run setup
 
-Installing for a business for the first time? Follow the
-[first installation checklist](docs/first-install-checklist.md): what to collect
-from URA, the install, Manager, tills, testing, and common errors with fixes.
+Installing for the first time? Follow the
+[installation checklist](docs/first-install-checklist.md): what you need from URA,
+the install, Manager, tills, testing, and common errors with fixes.
 
 1. Open EFRISConnect from the Manager button on the computer that runs the relay.
 2. Create the owner account. From another computer you need the one-time setup
