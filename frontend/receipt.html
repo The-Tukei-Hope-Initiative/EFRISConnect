@@ -4,11 +4,16 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>EFRISConnect - Document</title>
+<link rel="icon" type="image/svg+xml" href="/efrisconnect-icon.svg">
 <!-- Fully offline: system fonts only, no CDN. The QR encoder is injected by the
      relay at the marker below (GET /receipt); html2pdf is served locally. -->
 <script>/*@QRLIB@*/</script>
 <script src="html2pdf.bundle.min.js"></script>
 <style>
+button,input,select,textarea{font-family:inherit;}
+/* Brand fonts, served by the relay (SIL Open Font License, see /fonts/OFL-NOTICE.txt). */
+@font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url(/fonts/Inter-400.woff2) format('woff2');}@font-face{font-family:'Inter';font-style:normal;font-weight:500;font-display:swap;src:url(/fonts/Inter-500.woff2) format('woff2');}@font-face{font-family:'Inter';font-style:normal;font-weight:600;font-display:swap;src:url(/fonts/Inter-600.woff2) format('woff2');}@font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url(/fonts/Inter-700.woff2) format('woff2');}@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:100 800;font-display:swap;src:url(/fonts/JetBrainsMono-latin.woff2) format('woff2');}
+
 :root {
   --band: #1f2937;          /* section band colour (Customize) */
   --ink: #111111;
@@ -16,13 +21,13 @@
   --rule: #111111;
   --hair: #d1d5db;
   --ui: #14532d;            /* toolbar accent */
-  --sans: 'Segoe UI', 'Public Sans', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
+  --sans: 'Inter', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
   --mono: 'Cascadia Mono', Consolas, 'Roboto Mono', ui-monospace, monospace;
   /* The document itself uses Arial / Courier New: the same letter widths as the
      PDF's built-in Helvetica / Courier, so Save PDF writes real text that lines up
      with the preview (URA's own PDFs are Helvetica-style vector text too). */
-  --doc: Arial, Helvetica, 'Liberation Sans', sans-serif;
-  --docmono: 'Courier New', Courier, monospace;
+  --doc: 'Inter', Arial, Helvetica, 'Liberation Sans', sans-serif;
+  --docmono: 'JetBrains Mono', 'Courier New', Courier, monospace;
 }
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { font-size: 13px; }
