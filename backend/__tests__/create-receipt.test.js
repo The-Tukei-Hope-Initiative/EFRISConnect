@@ -41,6 +41,25 @@ describe('create-receipt', () => {
     expect(mgr.posts('customer-form')).toHaveLength(0);   // existing customer reused
   });
 
+  test('(a2) a new customer is created with the buyer type, TIN and address; a known one gets its missing TIN', async () => {
+    mgr.lists['text-custom-fields'] = [{ key: 'cf-pay', name: 'Payment Method' }, { key: 'cf-tin', name: 'Buyer TIN' }, { key: 'cf-type', name: 'Customer Type' }];
+    let r = await createReceipt({ reference: 'R-B2B-1', customer: 'Aryami Consults Ltd', customerType: 'B2B', buyerTin: '1017307190',
+      customerAddress: 'Plot 1 Kampala Road', currency: 'UGX', paymentMethod: 'Cash', lines: [{ itemCode: 'SKU1', qty: 1, unitPrice: 5900 }] });
+    expect(r.body.success).toBe(true);
+    const made = mgr.posts('customer-form')[0];
+    expect(made).toMatchObject({ Name: 'Aryami Consults Ltd', BillingAddress: 'Plot 1 Kampala Road' });
+    expect(made.CustomFields2.Strings).toMatchObject({ 'cf-tin': '1017307190', 'cf-type': 'B2B' });
+    mgr.reset();
+    r = await createReceipt({ reference: 'R-B2B-2', customer: 'Jane Buyer', customerType: 'B2B', buyerTin: '1000000001',
+      currency: 'UGX', paymentMethod: 'Cash', lines: [{ itemCode: 'SKU1', qty: 1, unitPrice: 5900 }] });
+    expect(r.body.success).toBe(true);
+    const upd = mgr.posts('customer-form/cust-1')[0];
+    expect(upd).toMatchObject({ DueDateDays: 30 });                  // kept
+    expect(upd.CustomFields2.Strings).toMatchObject({ 'cf-tin': '1000000001' });
+    expect(upd.BillingAddress).toBeUndefined();                       // not given, not wiped
+    mgr.lists['text-custom-fields'] = [{ key: 'cf-pay', name: 'Payment Method' }];
+  });
+
   test('(b) USD sale into a UGX-only account is recorded in UGX at the exchange rate', async () => {
     const r = await createReceipt({ reference: 'R-USD-1', currency: 'USD', exchangeRate: 4000, paymentMethod: 'Cash',
       lines: [{ itemCode: 'SKU1', qty: 1, unitPrice: 0.58 }] });
@@ -108,5 +127,20 @@ describe('create-receipt', () => {
       await createReceipt({ reference: 'R-DATE-1', paymentMethod: 'Cash', lines: [{ qty: 1, unitPrice: 100 }] });
     } finally { spy.mockRestore(); }
     expect(mgr.posts('receipt-form')[0].Date).toBe('2026-10-09');
+  });
+});
+
+describe('line discounts', () => {
+  test('a discounted line reaches Manager as DiscountAmount with the discount column on', async () => {
+    const r = await createReceipt({ date: '2026-10-20', reference: 'R-DISC', currency: 'UGX', customer: 'Walk-in Customer',
+      lines: [{ itemCode: 'SKU1', itemName: 'Soda 500ml', qty: 2, unitPrice: 1500, discount: 500 }] });
+    expect(r.body.success).toBe(true);
+    const f = mgr.posts('receipt-form')[0];
+    expect(f).toMatchObject({ Discount: true, DiscountType: 'ExactAmount' });
+    expect(f.Lines[0]).toMatchObject({ Qty: 2, UnitPrice: 1500, DiscountAmount: 500 });
+  });
+  test('no discount: no discount column', async () => {
+    await createReceipt({ date: '2026-10-20', reference: 'R-NODISC', currency: 'UGX', customer: 'Walk-in Customer', lines: [{ itemCode: 'SKU1', qty: 1, unitPrice: 1500 }] });
+    expect(mgr.posts('receipt-form')[0].Discount).toBeUndefined();
   });
 });

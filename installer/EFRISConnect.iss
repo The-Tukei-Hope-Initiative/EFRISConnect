@@ -20,7 +20,8 @@ AppName=EFRISConnect
 AppVersion={#AppVersion}
 AppVerName=EFRISConnect {#AppVersion}
 AppPublisher=The Tukei Hope Initiative
-AppPublisherURL=https://github.com/The-Tukei-Hope-Initiative/EFRISConnect
+AppPublisherURL=https://tukeihopeinitiative.org/
+AppSupportURL=https://github.com/The-Tukei-Hope-Initiative/EFRISConnect
 DefaultDirName={autopf}\EFRISConnect
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
@@ -35,6 +36,12 @@ WizardStyle=modern
 LicenseFile={#StageDir}\LICENSE
 UninstallDisplayName=EFRISConnect
 SetupLogging=yes
+SetupIconFile=efrisconnect.ico
+; Branded pictures (made by make-wizard-images.ps1) at the modern wizard's sizes, sharp at 100-200%.
+WizardImageFile=wizard-large-100.bmp,wizard-large-125.bmp,wizard-large-150.bmp,wizard-large-175.bmp,wizard-large-200.bmp
+WizardSmallImageFile=wizard-small-100.bmp,wizard-small-125.bmp,wizard-small-150.bmp,wizard-small-175.bmp,wizard-small-200.bmp
+DisableWelcomePage=no
+UninstallDisplayIcon={app}\efrisconnect.ico
 ; The relay is stopped by our own code before files are replaced.
 CloseApplications=no
 
@@ -44,28 +51,51 @@ Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion c
 ; Till installs: only the helper that trusts the server certificate.
 Source: "{#StageDir}\windows\install-helper.ps1"; DestDir: "{app}\windows"; Flags: ignoreversion; Check: IsTill
 Source: "{#StageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion; Check: IsTill
+; The EFRISConnect icon, for the shortcuts, the tray and Apps & features (every mode).
+Source: "efrisconnect.ico"; DestDir: "{app}"; Flags: ignoreversion
+
+[Messages]
+WelcomeLabel1=Welcome to EFRISConnect
+WelcomeLabel2=EFRISConnect connects Manager.io to URA EFRIS. It fiscalises your receipts, invoices and credit notes, registers your goods with URA, keeps URA stock in step with Manager, and prints documents with the URA QR code.%n%nSales still work when the internet is down: they are saved and sent to URA later, or issued by the URA Offline Enabler.%n%nBefore you start: Manager open on this computer, and your URA EFRIS TIN, device number, password and private key.%n%nEFRISConnect - Free & Open Source (MIT licence). A project of The Tukei Hope Initiative - Community Based Organisation, Entebbe, Uganda. Registration No. EMC/CBO/025 | Your Hope, Our Mission.
+
+[Tasks]
+Name: "desktopicon"; Description: "A desktop shortcut to EFRISConnect"; Check: not IsTill
+Name: "trayicon"; Description: "The EFRISConnect icon next to the clock, from when you sign in to Windows"; Check: not IsTill
 
 [Registry]
 Root: HKLM; Subkey: "Software\EFRISConnect"; ValueType: string; ValueName: "InstallMode"; ValueData: "{code:ModeName}"; Flags: uninsdeletekey
 Root: HKLM; Subkey: "Software\EFRISConnect"; ValueType: string; ValueName: "Version"; ValueData: "{#AppVersion}"
 
 [Icons]
-Name: "{autoprograms}\EFRISConnect\EFRISConnect tray icon"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\tray.vbs"""; Check: not IsTill
-Name: "{commonstartup}\EFRISConnect tray icon"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\tray.vbs"""; Check: not IsTill
+Name: "{autoprograms}\EFRISConnect\EFRISConnect Relay"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\relay-window.vbs"""; IconFilename: "{app}\efrisconnect.ico"; Comment: "Status and activity of the EFRISConnect relay"; Check: not IsTill
+Name: "{autoprograms}\EFRISConnect\EFRISConnect tray icon"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\tray.vbs"""; IconFilename: "{app}\efrisconnect.ico"; AppUserModelID: "TukeiHope.EFRISConnect"; Check: not IsTill
+Name: "{commonstartup}\EFRISConnect tray icon"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\tray.vbs"""; IconFilename: "{app}\efrisconnect.ico"; Tasks: trayicon; Check: not IsTill
 
 [INI]
-Filename: "{autoprograms}\EFRISConnect\Open EFRISConnect.url"; Section: "InternetShortcut"; Key: "URL"; String: "https://localhost:5443/extension"; Check: not IsTill
+; Web shortcuts carry the EFRISConnect icon (IconFile + IconIndex in the .url file).
+Filename: "{autoprograms}\EFRISConnect\EFRISConnect.url"; Section: "InternetShortcut"; Key: "URL"; String: "https://localhost:5443/extension"; Check: not IsTill
+Filename: "{autoprograms}\EFRISConnect\EFRISConnect.url"; Section: "InternetShortcut"; Key: "IconFile"; String: "{app}\efrisconnect.ico"; Check: not IsTill
+Filename: "{autoprograms}\EFRISConnect\EFRISConnect.url"; Section: "InternetShortcut"; Key: "IconIndex"; String: "0"; Check: not IsTill
+Filename: "{commondesktop}\EFRISConnect.url"; Section: "InternetShortcut"; Key: "URL"; String: "https://localhost:5443/extension"; Tasks: desktopicon; Check: not IsTill
+Filename: "{commondesktop}\EFRISConnect.url"; Section: "InternetShortcut"; Key: "IconFile"; String: "{app}\efrisconnect.ico"; Tasks: desktopicon; Check: not IsTill
+Filename: "{commondesktop}\EFRISConnect.url"; Section: "InternetShortcut"; Key: "IconIndex"; String: "0"; Tasks: desktopicon; Check: not IsTill
 Filename: "{autoprograms}\EFRISConnect\Open Manager.url"; Section: "InternetShortcut"; Key: "URL"; String: "https://localhost:{code:MgrHttpsPort}"; Check: IsServer
 Filename: "{commondesktop}\Manager (shop).url"; Section: "InternetShortcut"; Key: "URL"; String: "{code:TillManagerUrl}"; Check: IsTill
 
+[InstallDelete]
+; The shortcut was renamed in 1.0.8.
+Type: files; Name: "{autoprograms}\EFRISConnect\Open EFRISConnect.url"
+
 [UninstallDelete]
 Type: files; Name: "{autoprograms}\EFRISConnect\Open EFRISConnect.url"
+Type: files; Name: "{autoprograms}\EFRISConnect\EFRISConnect.url"
+Type: files; Name: "{commondesktop}\EFRISConnect.url"
 Type: files; Name: "{autoprograms}\EFRISConnect\Open Manager.url"
 Type: files; Name: "{commondesktop}\Manager (shop).url"
 Type: dirifempty; Name: "{autoprograms}\EFRISConnect"
 
 [Run]
-Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\tray.vbs"""; Description: "Show the EFRISConnect icon next to the clock"; Flags: postinstall nowait runasoriginaluser; Check: not IsTill
+Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\tray.vbs"""; Description: "Show the EFRISConnect icon next to the clock"; Flags: postinstall nowait runasoriginaluser; Tasks: trayicon; Check: not IsTill
 Filename: "https://localhost:5443/extension"; Description: "Open EFRISConnect now to create the owner account"; Flags: postinstall shellexec nowait runasoriginaluser unchecked; Check: not IsTill
 Filename: "{code:TillManagerUrl}"; Description: "Open Manager on the shop server"; Flags: postinstall shellexec nowait runasoriginaluser; Check: IsTill
 
@@ -74,7 +104,8 @@ var
   ModePage: TInputOptionWizardPage;
   ManagerPage: TInputFileWizardPage;
   PortPage: TInputQueryWizardPage;
-  KeyPage: TInputFileWizardPage;
+  DataPage: TInputDirWizardPage;
+  CopyDataBox: TNewCheckBox;
   TillCertPage: TInputFileWizardPage;
   TillServerPage: TInputQueryWizardPage;
   SetupOk: Boolean;
@@ -123,9 +154,27 @@ begin
   Result := (N >= 1) and (N <= 65535);
 end;
 
-procedure InitializeWizard;
-var PrevMode: String;
+procedure OpenWebsite(Sender: TObject);
+var Code: Integer;
 begin
+  ShellExec('open', 'https://tukeihopeinitiative.org/', '', '', SW_SHOWNORMAL, ewNoWait, Code);
+end;
+
+procedure InitializeWizard;
+var PrevMode: String; SavedData: AnsiString; Site: TNewStaticText;
+begin
+  // The website as a link under the welcome text.
+  Site := TNewStaticText.Create(WizardForm);
+  Site.Parent := WizardForm.WelcomePage;
+  Site.Caption := 'The Tukei Hope Initiative (tukeihopeinitiative.org)';
+  Site.Cursor := crHand;
+  Site.Font.Color := clBlue;
+  Site.Font.Style := [fsUnderline];
+  Site.OnClick := @OpenWebsite;
+  WizardForm.AdjustLabelHeight(WizardForm.WelcomeLabel2);
+  Site.Left := WizardForm.WelcomeLabel2.Left;
+  Site.Top := WizardForm.WelcomeLabel2.Top + WizardForm.WelcomeLabel2.Height + ScaleY(8);
+
   ModePage := CreateInputOptionPage(wpLicense,
     'How will this computer be used?', 'You can run Setup again later to change this.',
     'Choose one, then click Next.', True, False);
@@ -152,11 +201,27 @@ begin
   PortPage.Add('Port:', False);
   PortPage.Values[0] := '5000';
 
-  KeyPage := CreateInputFilePage(PortPage.ID,
-    'EFRIS private key (optional)', 'The key URA issued for this business.',
-    'Select the .pem file to copy it into EFRISConnect''s protected data folder. ' +
-    'Leave it empty to set the key later in EFRISConnect Settings.');
-  KeyPage.Add('Private key (.pem):', 'Key files (*.pem;*.key)|*.pem;*.key|All files|*.*', '.pem');
+  // Manager Server's data in a local folder, not Documents (often synced by OneDrive).
+  DataPage := CreateInputDirPage(PortPage.ID,
+    'Manager Server data folder', 'Where Manager Server keeps the businesses.',
+    'Use a local folder on this computer. Avoid OneDrive or Google Drive folders: they sync the ' +
+    'business file while Manager Server writes to it. Back up with Manager''s own backup instead.',
+    False, '');
+  DataPage.Add('Data folder:');
+  DataPage.Values[0] := ExpandConstant('{commonappdata}\Manager.io');
+  if LoadStringFromFile(ExpandConstant('{commonappdata}\EFRISConnect\data\manager-server-data.txt'), SavedData) and (Trim(String(SavedData)) <> '') then
+    DataPage.Values[0] := Trim(String(SavedData));
+  CopyDataBox := TNewCheckBox.Create(DataPage);
+  CopyDataBox.Parent := DataPage.Surface;
+  CopyDataBox.Top := DataPage.Edits[0].Top + DataPage.Edits[0].Height + ScaleY(16);
+  CopyDataBox.Width := DataPage.SurfaceWidth;
+  CopyDataBox.Height := ScaleY(34);
+  CopyDataBox.Caption := 'Copy my current Manager data (Documents\Manager.io) into this folder if it is empty. ' +
+    'Close Manager first. The original is kept as a backup.';
+  CopyDataBox.Checked := True;
+
+  // No page for the EFRIS private key: it is pasted in EFRISConnect (Settings >
+  // EFRIS Credentials), where it is stored encrypted, never as a plain file.
 
   TillCertPage := CreateInputFilePage(ModePage.ID,
     'Shop server certificate', 'So this computer trusts the shop server.',
@@ -179,9 +244,30 @@ function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
   if (PageID = ManagerPage.ID) or (PageID = PortPage.ID) then Result := not IsServer
-  else if PageID = KeyPage.ID then Result := IsTill
+  else if PageID = DataPage.ID then Result := (not IsServer) or (Trim(ManagerPage.Values[0]) = '')
   else if (PageID = TillCertPage.ID) or (PageID = TillServerPage.ID) then Result := not IsTill
   else if PageID = wpSelectDir then Result := IsTill;
+end;
+
+function EnablerInstalled: Boolean;
+begin
+  Result := RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\TcsTomcat') and RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\TcsData');
+end;
+
+function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
+begin
+  Result := 'This computer:' + NewLine + Space;
+  if IsTill then Result := Result + 'Till (trusts the shop server, nothing runs here)'
+  else if IsServer then Result := Result + 'Shop server (other computers connect to it)'
+  else Result := Result + 'This computer only';
+  if MemoDirInfo <> '' then Result := Result + NewLine + NewLine + MemoDirInfo;
+  if MemoTasksInfo <> '' then Result := Result + NewLine + NewLine + MemoTasksInfo;
+  if not IsTill then begin
+    Result := Result + NewLine + NewLine + 'Starts with Windows:' + NewLine + Space + 'EFRISConnect runs in the background from start-up, so receipts work before anyone signs in.';
+    Result := Result + NewLine + NewLine + 'URA Offline Enabler:' + NewLine + Space;
+    if EnablerInstalled then Result := Result + 'found on this computer; it will start with Windows (its database first) and restart if it stops.'
+    else Result := Result + 'not found. Optional: install it from URA only if you must issue receipts with no internet at all.';
+  end;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -191,8 +277,11 @@ begin
     MsgBox('ManagerServer.exe was not found at that path.', mbError, MB_OK); Result := False;
   end else if (CurPageID = PortPage.ID) and not IsPort(PortPage.Values[0]) then begin
     MsgBox('Enter a port number between 1 and 65535.', mbError, MB_OK); Result := False;
-  end else if (CurPageID = KeyPage.ID) and (Trim(KeyPage.Values[0]) <> '') and not FileExists(KeyPage.Values[0]) then begin
-    MsgBox('The key file was not found.', mbError, MB_OK); Result := False;
+  end else if (CurPageID = DataPage.ID) and (Trim(DataPage.Values[0]) = '') then begin
+    MsgBox('Choose a folder for Manager Server''s data.', mbError, MB_OK); Result := False;
+  end else if (CurPageID = DataPage.ID) and ((Pos('onedrive', Lowercase(DataPage.Values[0])) > 0) or (Pos('google drive', Lowercase(DataPage.Values[0])) > 0)) then begin
+    Result := MsgBox('That folder looks like a OneDrive or Google Drive folder. Syncing it while Manager Server writes to it can damage the business file.' + #13#10#13#10 +
+      'Use it anyway?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
   end else if (CurPageID = TillCertPage.ID) and not FileExists(TillCertPage.Values[0]) then begin
     MsgBox('Select https_cert.cer from the shop server''s till kit.', mbError, MB_OK); Result := False;
   end else if CurPageID = TillServerPage.ID then begin
@@ -231,9 +320,11 @@ begin
               ' -User ' + Q(GetEnv('USERDOMAIN') + '\' + GetUserNameString);
       if IsServer then begin
         Args := Args + ' -ManagerPort ' + MgrPort('');
-        if Trim(ManagerPage.Values[0]) <> '' then Args := Args + ' -ManagerExe ' + Q(ManagerPage.Values[0]);
+        if Trim(ManagerPage.Values[0]) <> '' then begin
+          Args := Args + ' -ManagerExe ' + Q(ManagerPage.Values[0]) + ' -ManagerData ' + Q(DataPage.Values[0]);
+          if CopyDataBox.Checked then Args := Args + ' -CopyManagerData';
+        end;
       end;
-      if Trim(KeyPage.Values[0]) <> '' then Args := Args + ' -KeyFile ' + Q(KeyPage.Values[0]);
       SetupOk := Helper(Args);
     end;
     if not SetupOk then

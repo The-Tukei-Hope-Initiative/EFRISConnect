@@ -2,7 +2,8 @@
 # tray app (restart, reset owner). Every action is safe to repeat.
 #
 #   -Action setup   -Mode single|server [-ManagerExe <path>] [-ManagerPort 5000]
-#                   [-KeyFile <path.pem>] [-User DOMAIN\name]
+#                   [-ManagerData <folder> [-CopyManagerData]]
+#                   [-User DOMAIN\name]
 #       Data folder, HTTPS certificate (first time only), firewall rules (server),
 #       the "EFRISConnect Relay" startup task and, with -ManagerExe, the
 #       "EFRISConnect Manager Server" logon task. Starts the relay.
@@ -11,14 +12,17 @@
 #   -Action stop          Stops the relay and the tray icon (before an upgrade).
 #   -Action restart       Restarts the relay (tray menu).
 #   -Action reset-owner   One-time owner reset code, opened in Notepad (tray menu).
+#   -Action enabler-start | enabler-stop | enabler-restart
+#       The URA Offline Enabler's services, database first (tray menu).
 #   -Action uninstall [-RemoveCert] [-RemoveData]
 #       Removes the tasks and firewall rules; optionally the certificate and data.
 param(
-  [ValidateSet('setup', 'till', 'stop', 'restart', 'reset-owner', 'uninstall')][string]$Action = 'setup',
+  [ValidateSet('setup', 'till', 'stop', 'start', 'relay-stop', 'restart', 'reset-owner', 'enabler-start', 'enabler-stop', 'enabler-restart', 'uninstall')][string]$Action = 'setup',
   [ValidateSet('single', 'server')][string]$Mode = 'single',
   [string]$ManagerExe = '',
   [int]$ManagerPort = 5000,
-  [string]$KeyFile = '',
+  [string]$ManagerData = '',
+  [switch]$CopyManagerData,
   [string]$CertFile = '',
   [string]$User = '',
   [switch]$RemoveCert,
@@ -54,10 +58,10 @@ function Stop-Relay {
   foreach ($p in $mine) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }
 }
 
-# The tray icon of every signed-in user (it reads files from this install).
+# The tray icon and Relay window of every signed-in user (they read files from this install).
 function Stop-Tray {
   Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine -like "*$WinDir\tray.ps1*" } |
+    Where-Object { $_.CommandLine -and ($_.CommandLine -like "*$WinDir\tray.ps1*" -or $_.CommandLine -like "*$WinDir\relay-window.ps1*") } |
     ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }
 }
 
@@ -87,6 +91,50 @@ function Register-ManagerTask([string]$exe, [int]$port, [string]$who) {
   Register-ScheduledTask -TaskName $ManagerTask -Action $act -Trigger $trg -Principal $pri -Settings $set `
     -Description "Manager Server Edition for the shop network (port $port). Installed by EFRISConnect Setup." -Force | Out-Null
   Log "Logon task '$ManagerTask' registered for $who (http://127.0.0.1:$port, tills use https on port + 1)."
+}
+
+# Manager Server's business data in a local folder (not the user's Documents, which
+# is often synced by OneDrive). Saved for launcher option 9, the tray and the logon
+# task. With -CopyManagerData the user's current Manager data is copied in, only when
+# the folder is still empty and Manager Server is not running; the original stays as
+# a backup. The folder is limited to this user, SYSTEM and Administrators.
+function Set-ManagerData([string]$dir, [bool]$copy) {
+  if (!(Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+  if ($copy) {
+    $docs = [Environment]::GetFolderPath('MyDocuments')
+    $src = Join-Path $docs 'Manager.io'
+    $empty = -not (Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if (Get-Process -Name 'ManagerServer', 'ManagerDesktop', 'Manager' -ErrorAction SilentlyContinue) {
+      Log "Manager is running, so its data was not copied. Close Manager and Manager Server, then copy $src to $dir by hand."
+    } elseif (!(Test-Path $src)) {
+      Log "No Manager data found at $src - nothing copied."
+    } elseif (-not $empty) {
+      Log "$dir already has files - nothing copied (existing data kept)."
+    } else {
+      & robocopy.exe $src $dir /E /COPY:DAT /R:1 /W:1 /NFL /NDL /NP | Out-Null
+      if ($LASTEXITCODE -ge 8) { throw "Copying Manager data from $src failed (robocopy $LASTEXITCODE)." }
+      Log "Copied the Manager data from $src to $dir (the original is kept as a backup)."
+    }
+  }
+  if (!$User) { $User = "$env:USERDOMAIN\$env:USERNAME" }
+  $sid = (New-Object Security.Principal.NTAccount($User)).Translate([Security.Principal.SecurityIdentifier]).Value
+  & icacls.exe $dir /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+  & icacls.exe (Join-Path $dir '*') /reset /T /C /Q 2>$null | Out-Null
+  Write-Setting 'manager-server-data.txt' $dir
+  Log "Manager Server data folder: $dir"
+}
+
+# URA's Offline Enabler, when installed here: TcsData (its MySQL) must be up before
+# TcsTomcat (the Enabler), or the Enabler fails to load at boot. Make TcsTomcat depend
+# on TcsData, start both with Windows (Tomcat a little later), and restart either one
+# automatically if it stops unexpectedly.
+$EnablerServices = @('TcsData', 'TcsTomcat')
+function Set-EnablerServices {
+  if ((Get-Service -Name $EnablerServices -ErrorAction SilentlyContinue | Measure-Object).Count -ne 2) { return }
+  & sc.exe config TcsData start= auto | Out-Null
+  & sc.exe config TcsTomcat start= delayed-auto depend= Tcpip/TcsData | Out-Null
+  foreach ($s in $EnablerServices) { & sc.exe failure $s reset= 86400 actions= restart/60000/restart/60000/restart/120000 | Out-Null }
+  Log 'Offline Enabler services: start with Windows (database first), restart after a failure.'
 }
 
 switch ($Action) {
@@ -122,24 +170,20 @@ switch ($Action) {
     $pass = Join-Path $DataDir 'https_pfx_pass.txt'
     if (Test-Path $pass) { & icacls.exe $pass /grant '*S-1-5-18:R' | Out-Null }
 
-    if ($KeyFile) {
-      if (!(Test-Path $KeyFile)) { throw "EFRIS private key not found: $KeyFile" }
-      Copy-Item -LiteralPath $KeyFile -Destination (Join-Path $DataDir 'private_key.pem') -Force
-      Log 'EFRIS private key copied into the protected data folder (private_key.pem).'
-    }
-
     if ($Mode -eq 'server') {
       Write-Setting 'lan-manager-port.txt' "$ManagerPort"
       & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $WinDir 'lan.ps1') -Action firewall -ManagerHttpsPort ($ManagerPort + 1)
       if ($ManagerExe) {
         if (!(Test-Path $ManagerExe)) { throw "ManagerServer.exe not found: $ManagerExe" }
         Write-Setting 'manager-server-path.txt' $ManagerExe
+        if ($ManagerData) { Set-ManagerData $ManagerData $CopyManagerData.IsPresent }
         # Manager Server listens on this PC only; tills use the relay's encrypted front.
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $WinDir 'lan.ps1') -Action manager-unfirewall
         Register-ManagerTask $ManagerExe $ManagerPort $User
       }
     }
 
+    Set-EnablerServices
     Stop-Relay
     Register-RelayTask
     Start-ScheduledTask -TaskName $RelayTask
@@ -172,6 +216,34 @@ switch ($Action) {
     Stop-Relay
     Start-ScheduledTask -TaskName $RelayTask
     Log 'Relay restarted.'
+  }
+
+  # From the tray icon: start or stop the relay only (the icon stays).
+  'start' {
+    Start-ScheduledTask -TaskName $RelayTask
+    Log 'Relay started.'
+  }
+
+  'relay-stop' {
+    Stop-Relay
+    Log 'Relay stopped (tray icon kept).'
+  }
+
+  'enabler-start' {
+    Set-EnablerServices
+    foreach ($s in $EnablerServices) { Start-Service -Name $s; (Get-Service $s).WaitForStatus('Running', '00:01:30') }
+    Log 'Offline Enabler started.'
+  }
+
+  'enabler-stop' {
+    foreach ($s in @('TcsTomcat', 'TcsData')) { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue }
+    Log 'Offline Enabler stopped.'
+  }
+
+  'enabler-restart' {
+    foreach ($s in @('TcsTomcat', 'TcsData')) { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue }
+    foreach ($s in $EnablerServices) { Start-Service -Name $s; (Get-Service $s).WaitForStatus('Running', '00:01:30') }
+    Log 'Offline Enabler restarted.'
   }
 
   'reset-owner' {

@@ -17,6 +17,7 @@
 //      single taxpayer on their own machine; NOT for shared cloud.
 const fs = require('fs');
 const path = require('path');
+const { writeDurable, readJsonDurable } = require('./safe-file');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const paths = require('./paths');
@@ -159,28 +160,24 @@ function dec(blob) {
   }
 }
 
-function loadAll() { try { return JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch (_) { return {}; } }
-// For read-modify-write: a vault file that exists but does not parse must not be
-// replaced by a vault holding only the tenant being saved (every other business's
-// credentials would be lost). Refuse and leave the file for repair.
-function loadAllForWrite() {
-  let raw;
-  try { raw = fs.readFileSync(FILE, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return {}; throw e; }
-  if (!raw.trim()) return {};
-  try { return JSON.parse(raw); }
-  catch (e) {
-    console.log('   ⚠ Vault file ' + FILE + ' is damaged (' + e.message + ') - not overwriting it. Restore it from a backup or move it aside.');
-    throw new Error('The credential vault file is damaged and was not changed. Restore credentials_vault.json from a backup or move it aside.');
-  }
+// The vault files hold every business's EFRIS credentials: flushed to disk on
+// write, with a .bak copy that is put back if a power cut damages the file.
+function readVaultFile(file, forWrite, what) {
+  let r;
+  try { r = readJsonDurable(file, { backup: true, keepDamaged: true }); }
+  catch (e) { if (forWrite) throw e; return {}; }
+  if (r.state === 'ok' || r.state === 'restored') return r.value || {};
+  if (r.state !== 'damaged') return {};
+  if (!forWrite) return {};
+  // Refuse a read-modify-write: saving one business would drop all the others.
+  console.log('   ⚠ ' + what + ' ' + file + ' is damaged (' + (r.error ? r.error.message : 'unreadable') + ') - not overwriting it. Restore it from a backup or move it aside.');
+  throw new Error('The ' + what.toLowerCase() + ' ' + path.basename(file) + ' is damaged and was not changed. Restore it from a backup or move it aside.');
 }
-// Atomic write: a crash mid-write leaves the old file intact, never a half file.
+function loadAll() { return readVaultFile(FILE, false, 'Vault file'); }
+function loadAllForWrite() { return readVaultFile(FILE, true, 'Vault file'); }
 function saveAll(o) {
-  const tmp = FILE + '.' + process.pid + '.tmp';
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(tmp, JSON.stringify(o, null, 2), { mode: 0o600 });
-    fs.renameSync(tmp, FILE);
-  } catch (e) { try { fs.rmSync(tmp, { force: true }); } catch (_) {} console.log('vault write error: ' + e.message); throw e; }
+  try { writeDurable(FILE, JSON.stringify(o, null, 2), { mode: 0o600, backup: true }); }
+  catch (e) { console.log('vault write error: ' + e.message); throw e; }
 }
 
 // Fields that MUST be encrypted at rest. Everything else is non-secret metadata.
@@ -298,16 +295,7 @@ function isUnlocked() { return !!(_mk || process.env.VAULT_MASTER_KEY); }
 // server). Kept in their own file so they never show up as a business. Same
 // encryption: the fields named in `secrets` are AES-GCM encrypted at rest.
 const RELAY_FILE = path.join(DATA_DIR, 'relay_vault.json');
-function loadRelayAll(forWrite) {
-  let raw;
-  try { raw = fs.readFileSync(RELAY_FILE, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return {}; if (forWrite) throw e; return {}; }
-  if (!raw.trim()) return {};
-  try { return JSON.parse(raw); }
-  catch (e) {
-    if (!forWrite) return {};
-    throw new Error('The relay settings file ' + RELAY_FILE + ' is damaged and was not changed. Restore it from a backup or move it aside.');
-  }
-}
+function loadRelayAll(forWrite) { return readVaultFile(RELAY_FILE, !!forWrite, 'Relay settings file'); }
 // Decrypted record (server-side only), or null when none is saved.
 function getRelay(name, secrets) {
   const r = loadRelayAll(false)[name];
@@ -331,12 +319,7 @@ function putRelay(name, rec, secrets) {
     out.updatedAt = new Date().toISOString();
     all[name] = out;
   }
-  const tmp = RELAY_FILE + '.' + process.pid + '.tmp';
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(tmp, JSON.stringify(all, null, 2), { mode: 0o600 });
-    fs.renameSync(tmp, RELAY_FILE);
-  } catch (e) { try { fs.rmSync(tmp, { force: true }); } catch (_) {} throw e; }
+  writeDurable(RELAY_FILE, JSON.stringify(all, null, 2), { mode: 0o600, backup: true });
 }
 // True when the record has a non-empty value in that (secret) field, without decrypting.
 function relayHas(name, field) { const r = loadRelayAll(false)[name]; return !!(r && r[field]); }

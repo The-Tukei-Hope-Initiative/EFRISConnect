@@ -134,7 +134,7 @@ table.items .c { text-align: center; }
 .sigs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 40px; padding-top: 22px; font-size: 11.5px; break-inside: avoid; }
 .sigs div { border-top: 1px solid var(--rule); padding-top: 4px; }
 .sigs img { max-height: 40px; display: block; margin: -44px 0 4px; }
-.end { display: flex; justify-content: flex-end; gap: 10px; font-size: 10.5px; color: var(--muted); border-top: 1px solid var(--hair); padding-top: 8px; }
+.end { display: flex; justify-content: center; gap: 10px; font-size: 10.5px; color: var(--muted); border-top: 1px solid var(--hair); padding-top: 8px; }
 .wm { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
 .wm span { font-size: 150px; font-weight: 700; letter-spacing: 16px; color: rgba(17,17,17,.07); transform: rotate(-30deg); }
 
@@ -302,7 +302,8 @@ const D = {
   notes: qp('notes') || qp('description'), issuedBy: qp('issuedBy'), sigImg: stash(qp('sigImg'), 'efris_print_sig'),
   verCode: qp('verCode'), invId: qp('invId'), subDate: qp('subDate'), issuedTime: qp('issuedTime'), deviceNo: qp('deviceNo'), validationUrl: qp('validationUrl'),
   mode: qp('mode'), queued: qp('queued') === '1', copy: qp('copy') === '1', inMgr: qp('inMgr') === '1', mgrRef: qp('mgrRef'),
-  cashTendered: qp('cashTendered'), cashChange: qp('cashChange')
+  cashTendered: qp('cashTendered'), cashChange: qp('cashChange'),
+  oriFdn: qp('oriFdn'), cnReason: qp('cnReason'), viaEnabler: qp('viaEnabler') === '1', custNinBrn: qp('custNinBrn')
 };
 const DEMO = !_ps.has('bizName');
 if (DEMO) Object.assign(D, {
@@ -431,7 +432,7 @@ function bizTitle() {
 }
 function headerLines() {
   const h = P.header, out = [];
-  if (h.address && D.bizAddr) out.push(D.bizAddr);
+  if ((h.address || KIND !== 'receipt') && D.bizAddr) out.push(D.bizAddr);
   if (h.pobox && h.poboxText) out.push(h.poboxText);
   const c = [];
   if (h.phone && D.bizPhone) c.push(D.bizPhone);
@@ -441,6 +442,11 @@ function headerLines() {
   return out;
 }
 function docTitle() { return D.docType || 'Receipt'; }
+// URA's closing line and issuing mode (as on documents printed by EFRIS itself).
+// A VAT seller's paid sale is titled "Tax Invoice" even when printed as a receipt.
+function endLine() { return '*** END OF ' + (KIND === 'credit' ? 'CREDIT NOTE' : (KIND === 'invoice' || /invoice/i.test(docTitle())) ? 'e-INVOICE/TAX INVOICE' : 'e-RECEIPT') + ' ***'; }
+function issueMode() { return D.viaEnabler ? 'Offline' : 'Online'; }
+function docKind() { return showCopy() ? 'Copy' : 'Original'; }
 function buyerType() { return { b2c: 'B2C · Individual', b2b: 'B2B · Business', b2g: 'B2G · Government', foreign: 'Foreigner' }[D.custType] || 'B2C · Individual'; }
 function qrImg(cls) {
   const content = D.validationUrl || '';
@@ -490,16 +496,18 @@ function renderPage() {
   h += '<div class="grid2">';
   h += box('Section A · Seller', kv([['TIN', D.bizTin, 'strong'], D.bizBrn ? ['BRN', D.bizBrn] : null, ['Legal name', D.bizName], ['Device no.', D.deviceNo], S.servedBy && D.issuedBy ? ['Served by', D.issuedBy] : null]));
   h += FISCAL
-    ? box('Section B · URA information', kv([['FDN', D.fdn, 'strong mono'], ['Verification code', D.verCode, 'mono code'], ['Invoice ID', D.invId], ['Issued', (D.subDate || '') + (D.issuedTime ? ' ' + D.issuedTime : '')]]))
+    ? box('Section B · URA information', kv([['Document type', docKind(), 'strong'], ['FDN', D.fdn, 'strong mono'], ['Verification code', D.verCode, 'mono code'], ['Issued', (D.subDate || '') + (D.issuedTime ? ' ' + D.issuedTime : '')], ['Mode', issueMode()]]))
     : box('Section B · URA information', '<div class="notice">' + (D.queued ? 'Queued for EFRIS. The fiscal details print once URA confirms it.' : 'This document has not been submitted to URA EFRIS and has no Fiscal Document Number.') + '</div>');
   const buyer = [['Name', BUYER, 'strong'], ['Buyer type', buyerType()]];
   if (D.custTin) buyer.push(['TIN', D.custTin]);
+  if (D.custNinBrn) buyer.push(['NIN / BRN', D.custNinBrn]);
   if (D.passport) buyer.push(['Passport / ID', D.passport]);
   if (D.nationality) buyer.push(['Nationality', D.nationality]);
   if (D.custAddr) buyer.push(['Address', D.custAddr]);
   h += box('Section C · Buyer', kv(buyer));
   const doc = [[KIND === 'invoice' ? 'Invoice no.' : KIND === 'credit' ? 'Credit note no.' : 'Receipt no.', D.ref || '-', 'strong'], ['Date', D.date], ['Currency', CUR]];
   if (D.dueDate && KIND !== 'receipt') doc.push(['Due date', D.dueDate]);
+  if (KIND === 'credit') { doc.push(['Original invoice FDN', D.oriFdn || '-']); if (D.cnReason) doc.push(['Reason', D.cnReason]); }
   if (PAYS.length) doc.push(['Payment', PAYS.map(p => p.label + (p.amt != null ? ' ' + money(p.amt) : '')).join(', ')]);
   h += box('Document', kv(doc));
   h += '</div>';
@@ -555,6 +563,7 @@ function renderPage() {
       '<span style="color:var(--muted)">This document was submitted electronically to the Uganda Revenue Authority (URA) EFRIS and bears a valid Fiscal Document Number.</span></div></div>';
   }
   if (P.footer) h += '<div class="msg">' + esc(P.footer) + '</div>';
+  if (FISCAL) h += '<div class="end" style="font-weight:700;letter-spacing:.04em;justify-content:center;border-top:0;"><span>' + esc(endLine()) + '</span></div>';
   h += '<div class="end"><span>' + esc(genStamp()) + ' · ' + esc(printMark()) + '</span></div>';
   if (showCopy()) h += '<div class="wm"><span>COPY</span></div>';
   return h;
@@ -566,6 +575,7 @@ function renderSlip() {
     (D.bizTin ? '<div class="sl-b">TIN: ' + esc(D.bizTin) + '</div>' : '') + (D.bizBrn ? '<div>BRN: ' + esc(D.bizBrn) + '</div>' : '') + '</div>';
   h += '<div class="sl-c sl-b sl-band">' + esc(docTitle().toUpperCase()) + '</div>';
   h += '<div>' + srow(KIND === 'invoice' ? 'Invoice' : KIND === 'credit' ? 'Credit note' : 'Receipt', D.ref || '-') + srow('Date', D.date) +
+    (KIND === 'credit' ? srow('Original FDN', D.oriFdn || '-') + (D.cnReason ? srow('Reason', D.cnReason) : '') : '') +
     srow('Buyer', BUYER) + (D.custTin ? srow('Buyer TIN', D.custTin) : '') + (S.servedBy && D.issuedBy ? srow('Served by', D.issuedBy) : '') + '</div>';
   h += '<div class="sl-dash"></div>';
   LINES.forEach(l => {
@@ -592,9 +602,9 @@ function renderSlip() {
   h += '<div class="sl-dash"></div>';
   if (FISCAL) {
     h += '<div><div class="sl-c sl-b">*** URA EFRIS ***</div><div>FDN: <span class="sl-b">' + esc(D.fdn) + '</span></div><div>VERIFICATION CODE:</div><div class="sl-b sl-wrap">' + esc(D.verCode) + '</div>' +
-      (D.invId ? '<div class="sl-wrap">INVOICE ID: ' + esc(D.invId) + '</div>' : '') + (D.deviceNo ? '<div>DEVICE: ' + esc(D.deviceNo) + '</div>' : '') +
-      (D.subDate ? '<div>ISSUED: ' + esc(D.subDate + (D.issuedTime ? ' ' + D.issuedTime : '')) + '</div>' : '') + '</div>';
-    h += '<div class="sl-qr">' + qrImg('') + '</div><div class="sl-c">Verify at efris.ura.go.ug</div>';
+      '<div>DOCUMENT TYPE: ' + esc(docKind().toUpperCase()) + '</div>' + (D.deviceNo ? '<div>DEVICE: ' + esc(D.deviceNo) + '</div>' : '') +
+      (D.subDate ? '<div>ISSUED: ' + esc(D.subDate + (D.issuedTime ? ' ' + D.issuedTime : '')) + '</div>' : '') + '<div>MODE: ' + esc(issueMode().toUpperCase()) + '</div></div>';
+    h += '<div class="sl-qr">' + qrImg('') + '</div><div class="sl-c">Verify at efris.ura.go.ug</div><div class="sl-c sl-b">' + esc(endLine()) + '</div>';
   } else {
     h += '<div class="sl-c sl-b">' + (D.queued ? 'QUEUED FOR EFRIS' : 'NOT FISCALISED') + '</div>';
   }
@@ -848,6 +858,8 @@ el('paperSel').querySelectorAll('button').forEach(b => b.onclick = () => pickPap
   const local = loadLocal(); if (local) P = merge(DEF, local);
   applyPaper(choosePaper()); render();
   if (parent && parent !== window) send({ action: 'get-context', fdn: D.fdn, ref: D.ref });
+  // "Print straight away" (Settings): open the Print dialog once the page has laid out.
+  if (qp('autoprint') === '1') setTimeout(doPrint, 700);
 })();
 </script>
 </body>

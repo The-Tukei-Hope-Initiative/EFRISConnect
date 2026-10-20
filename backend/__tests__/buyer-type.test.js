@@ -17,5 +17,10 @@ describe('buyerType mapping', () => {
   test('Foreigner is 2 with passport and nationality', () => expect(typeOf({ CustomerType: 'foreign', PassportNum: 'P123', Nationality: 'Kenya' })).toMatchObject({ buyerType: '2', buyerPassportNum: 'P123', buyerTin: '' }));
   test('B2G is 3 with the government TIN', () => expect(typeOf({ CustomerType: 'b2g', CustomerTIN: '1000000003', CustomerName: 'Ministry of Works' })).toMatchObject({ buyerType: '3', buyerTin: '1000000003', buyerLegalName: 'Ministry of Works' }));
   test('a business can switch B2G back to 0 with config b2gBuyerType', () => expect(typeOf({ CustomerType: 'b2g', CustomerTIN: '1000000003' }, { ...cfg, b2gBuyerType: '0' }).buyerType).toBe('0'));
-  test('an invalid override is ignored', () => expect(typeOf({ CustomerType: 'b2g' }, { ...cfg, b2gBuyerType: '7' }).buyerType).toBe('3'));
+  test('an invalid override is ignored', () => expect(typeOf({ CustomerType: 'b2g', CustomerTIN: '1000000003' }, { ...cfg, b2gBuyerType: '7' }).buyerType).toBe('3'));
+  test('B2B or B2G without a TIN stops before URA', () => {
+    expect(() => typeOf({ CustomerType: 'b2b', CustomerName: 'ABC Ltd' })).toThrow(/business \(B2B\) buyer needs a TIN/);
+    expect(() => typeOf({ CustomerType: 'b2g' })).toThrow(/government \(B2G\) buyer needs a TIN/);
+  });
+  test('the buyer NIN or company registration number is sent when given', () => expect(typeOf({ CustomerType: 'b2c', CustomerNinBrn: 'CM1234567' }).buyerNinBrn).toBe('CM1234567'));
 });

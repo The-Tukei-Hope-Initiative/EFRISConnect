@@ -49,6 +49,10 @@ const RULES = [
     (m, p1, scheme, v) => (/^\*+$/.test(v) ? m : p1 + (scheme || '') + '***')],
   // Bearer <token> / Basic <creds> anywhere
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{6,}/gi, '$1 ***'],
+  // Personal details (Data Protection and Privacy Act): email addresses and
+  // Ugandan phone numbers never reach a log view, export or support bundle.
+  [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[email]'],
+  [/(?:\+?256[\s-]?|\b0)7\d{2}[\s-]?\d{3}[\s-]?\d{3}\b/g, '[phone]'],
   // JSON escaped inside a string: \"password\":\"x\"
   [new RegExp('(\\\\+"' + NAME + '\\\\+"\\s*:\\s*\\\\+")((?:(?!\\\\+").)*)', 'gi'), '$1***'],
   // JSON / object form, quoted name: "managerToken":"x", 'aesKey': 'x', "pwd": 123

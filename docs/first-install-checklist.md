@@ -80,9 +80,9 @@ when the internet returns.
       asks for administrator approval once.
 - [ ] "Windows protected your PC": click **More info > Run anyway** (the installer is
       not code-signed yet).
-- [ ] Choose the mode. Shop server: select `ManagerServer.exe` and the port (5000).
-      Optionally select the private key `.pem` (it is copied into the protected data
-      folder).
+- [ ] Choose the mode. Shop server: select `ManagerServer.exe`, the port (5000) and
+      Manager's data folder. Setup does not ask for the EFRIS private key: you paste
+      it into EFRISConnect in part E, where it is stored encrypted.
 - [ ] At the end, note the **Manager button URL** Setup shows:
   - one computer: `https://localhost:5443/extension`
   - shop network: `https://SERVER-NAME:5443/extension`

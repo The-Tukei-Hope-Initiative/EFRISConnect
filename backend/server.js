@@ -10,6 +10,10 @@ const path    = require('path');
 const fs      = require('fs');
 const logger  = require('./logger');
 const tillKit = require('./till-kit');   // shop network: what a till needs to trust this relay  // daily error/activity log for troubleshooting
+const enablerControl = require('./enabler-control');   // URA Offline Enabler services: status, start, stop
+const notificationsLib = require('./notifications');   // notification centre, read from the activity log
+const updateCheckLib = require('./update-check');      // daily check for a newer public release
+const { writeDurable, readJsonDurable } = require('./safe-file');   // power-cut-safe data files
 const consoleUi = require('./console-ui');  // timestamps, colours, status block, hotkeys
 const activity = require('./activity');     // console lines kept (masked) for Settings > Logs
 const logTools = require('./log-tools');    // log retention, date-range export, support bundle zip
@@ -334,7 +338,7 @@ const ROUTE_PERMS = [
   ['POST', '/manager/create-customer', 'customers'], ['POST', '/efris/verify-tin', 'customers'],
   // Cashier: read goods, units and the commodity tree
   ['POST', '/efris/search-goods', 'goods-read'], ['GET', '/goods/manager-items', 'goods-read'], ['GET', '/goods/manager-item-detail', 'goods-read'],
-  ['GET', '/manager/items-list', 'goods-read'], ['POST', '/efris/measure-units', 'goods-read'],
+  ['GET', '/manager/items-list', 'goods-read'], ['POST', '/efris/measure-units', 'goods-read'], ['POST', '/efris/excise-duties', 'goods-read'], ['POST', '/efris/branches', 'goods-read'], ['GET', '/efris/login-flags', 'goods-read'],
   ['GET', '/segments', 'goods-read'], ['GET', '/segments/:segCode/families', 'goods-read'], ['GET', '/segments/:segCode/families/:famCode/classes', 'goods-read'],
   ['GET', '/segments/:segCode/families/:famCode/classes/:clsCode/commodities', 'goods-read'],
   ['GET', '/commodity/search', 'goods-read'], ['GET', '/commodity/:code', 'goods-read'], ['POST', '/efris/commodity-tax', 'goods-read'],
@@ -344,9 +348,9 @@ const ROUTE_PERMS = [
   ['GET', '/submission-log', 'log-own'], ['GET', '/submission-log/by-fdn/:fdn', 'log-own'],
   // Accountant: credit and debit notes
   ['POST', '/efris/credit-note', 'credit'], ['POST', '/efris/credit-notes/status', 'credit'], ['POST', '/efris/credit-notes/void', 'credit'],
-  ['POST', '/efris/credit-notes/cancel', 'credit'], ['POST', '/efris/debit-note', 'credit'], ['POST', '/manager/create-credit-note', 'credit'],
+  ['POST', '/efris/credit-notes/cancel', 'credit'], ['POST', '/efris/debit-notes/cancel', 'credit'], ['POST', '/efris/debit-note', 'credit'], ['POST', '/manager/create-credit-note', 'credit'],
   // Accountant: reports and reconcile
-  ['POST', '/efris/invoices-report', 'reports'], ['GET', '/z-report', 'reports'],
+  ['POST', '/efris/invoices-report', 'reports'], ['GET', '/z-report', 'reports'], ['POST', '/efris/check-day', 'reports'],
   ['POST', '/reconcile/documents', 'reconcile'], ['POST', '/reconcile/stock', 'reconcile'],
   // Accountant: stock (T131/T132 and the Manager inventory mirror)
   ['POST', '/efris/stock-in', 'stock'], ['POST', '/efris/stock-adjust', 'stock'], ['POST', '/manager/inventory-adjust', 'stock'],
@@ -365,6 +369,12 @@ const ROUTE_PERMS = [
   ['GET', '/admin/email', 'owner'], ['POST', '/admin/email', 'owner'], ['POST', '/admin/email/test', 'owner'],
   // Owner only: single-user mode (no sign-in on the relay's own computer).
   ['GET', '/admin/single-user', 'owner'], ['POST', '/admin/single-user', 'owner'],
+  // Any signed-in user: their notifications in this business (each one is filtered by permission).
+  ['GET', '/notifications', ''], ['GET', '/notifications/count', ''], ['POST', '/notifications/read', ''], ['POST', '/notifications/read-all', ''],
+  // Admin: is a newer EFRISConnect out? Turning the check off is the owner's call.
+  ['GET', '/admin/updates', 'admin'], ['POST', '/admin/updates/check', 'admin'], ['POST', '/admin/updates', 'owner'],
+  // Admin: the URA Offline Enabler's Windows services on this computer.
+  ['GET', '/admin/enabler', 'admin'], ['POST', '/admin/enabler/:action', 'admin'],
   // Everything else (tenant credentials, users, goods registration T130, custom
   // fields, theme install, Enabler test, manager/detect, rotate-key, logs, debug
   // routes, unit sync, currencies) is admin only.
@@ -865,6 +875,19 @@ const { DATA_DIR, SHIPPED_DIR } = require('./paths');
 let TREE = null;
 let UNITS = null;
 
+// Is this commodity code a service? URA's list (goods_tree.json, "s") says so per
+// code. null when the code is not in the list (then callers fall back).
+function commodityIsService(code) {
+  const c = String(code || '').trim();
+  if (!/^\d{8}$/.test(c)) return null;
+  try {
+    const seg = getTree()[c.slice(0, 2) + '000000']; if (!seg) return null;
+    const fam = seg.f && seg.f[c.slice(0, 4) + '0000']; if (!fam) return null;
+    const cls = fam.c && fam.c[c.slice(0, 6) + '00']; if (!cls || !cls.d) return null;
+    const com = cls.d[c];
+    return com && typeof com === 'object' && typeof com.s === 'boolean' ? com.s : null;
+  } catch (_) { return null; }
+}
 function getTree() {
   if (!TREE) {
     console.log('Loading goods_tree.json...');
@@ -1074,7 +1097,7 @@ function mgrCreds(req) {
 async function mgrTextCustomFields(ep, tk) {
   const byName = {}, byKey = {};
   try {
-    const r = await managerCall(ep, tk, 'GET', '/text-custom-fields');
+    const r = await managerCall(ep, tk, 'GET', '/text-custom-fields?pageSize=1000');
     const arr = (r.data && r.data.textCustomFields) || [];
     arr.forEach(f => { byName[f.name] = f.key; byKey[f.key] = f.name; });
   } catch (e) {}
@@ -1295,7 +1318,7 @@ function resolveAesKey(passwordDes, keyOverride) {
     let pem = keyOverride.pem || null;
     if (!pem && keyOverride.path) {
       if (!safeKeyPath(keyOverride.path)) tried.push('config-key path refused (must be a local .pem or .key file, not a network path)');
-      else { try { pem = fs.readFileSync(keyOverride.path, 'utf8'); } catch (e) { tried.push('config-key path not found: ' + keyOverride.path); } }
+      else { try { pem = fs.readFileSync(keyOverride.path, 'utf8'); } catch (e) { tried.push('the private key file was not found at ' + keyOverride.path + ' (is that drive or USB stick connected? Better: paste the key in Settings > EFRIS Credentials)'); } }
     }
     if (pem) {
       if (pem.includes('\\n')) pem = pem.replace(/\\n/g, '\n');
@@ -1521,11 +1544,51 @@ async function getSession(tin, deviceNo, password, efrisBaseUrl, keyOverride) {
       console.log('   [T103 login] fields: ' + Object.keys(login).join(', ') + (names ? ' | tax types: ' + names : ''));
     } else console.log('   [T103 login] no readable content');
   } catch (_) {}
+  try { if (login) noteLoginFlags(tin, efrisBaseUrl, login); } catch (e) { console.log('   (T103 settings not saved: ' + e.message + ')'); }
   const session = { symKeyEnc, aesKey, privatePem, login, ts: now, _args: [tin, deviceNo, password, efrisBaseUrl, keyOverride] };
   sessions[key] = session;
   return session;
 }
 
+// ── What URA's login (T103) says about this taxpayer ──
+// Kept per TIN in efris_login_<tin>.json: the verification page URL (qrCodeURL),
+// whether back-dating and debit notes are allowed, the offline period, and the
+// dictionary/excise versions (a newer version refreshes those lists).
+const loginFile = tin => path.join(DATA_DIR, 'efris_login_' + String(tin).replace(/[^0-9A-Za-z]/g, '') + '.json');
+const LOGIN_KEYS = ['qrCodeURL', 'isAllowBackDate', 'periodDate', 'isAllowOutOfScopeVAT', 'issueDebitNote', 'isReferenceNumberMandatory',
+  'isAllowIssueCreditWithoutFDN', 'maxGrossAmount', 'dictionaryVersion', 'exciseDutyVersion', 'taxpayerBranchVersion', 'commodityCategoryVersion'];
+function savedLoginFlags(tin) { try { return JSON.parse(fs.readFileSync(loginFile(tin), 'utf8')) || {}; } catch (_) { return {}; } }
+const _qrUrlByMode = {};
+function noteLoginFlags(tin, baseUrl, login) {
+  const isEnabler = /^https?:\/\/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(baseUrl || '');
+  if (isEnabler) return;   // the Enabler answers for itself, not with URA's settings
+  // Production only on URA's live host; the test host (and a test override) is sandbox.
+  const mode = (!process.env.EFRIS_URL_OVERRIDE && !/efristest/i.test(baseUrl || '') && /ura\.go\.ug/i.test(baseUrl || '')) ? 'production' : 'sandbox';
+  const prev = savedLoginFlags(tin), next = { mode, savedAt: new Date().toISOString() };
+  for (const k of LOGIN_KEYS) if (login[k] != null) next[k] = String(login[k]);
+  if (login.taxpayerBranch && typeof login.taxpayerBranch === 'object') next.taxpayerBranch = { branchCode: login.taxpayerBranch.branchCode || '', branchName: login.taxpayerBranch.branchName || '' };
+  // A newer dictionary or excise list at URA: forget the cached copies.
+  if (prev.dictionaryVersion && next.dictionaryVersion && prev.dictionaryVersion !== next.dictionaryVersion) {
+    for (const k of Object.keys(_dictCache)) if (k.startsWith(tin + '_')) delete _dictCache[k];
+    console.log('   URA dictionary version ' + prev.dictionaryVersion + ' -> ' + next.dictionaryVersion + ': it will be reloaded');
+  }
+  if (prev.exciseDutyVersion && next.exciseDutyVersion && prev.exciseDutyVersion !== next.exciseDutyVersion) delete _exciseCache[tin];
+  if (/^https:\/\/[^\s"']*ura\.go\.ug\//i.test(next.qrCodeURL || '')) _qrUrlByMode[mode] = next.qrCodeURL;
+  if (JSON.stringify({ ...prev, savedAt: '' }) !== JSON.stringify({ ...next, savedAt: '' })) writeFileAtomic(loginFile(tin), JSON.stringify(next, null, 2));
+}
+// URA's invoice verification page: the qrCodeURL URA gave at login when known.
+let _qrUrlLoaded = false;
+function validationBase(mode) {
+  const m = mode === 'production' ? 'production' : 'sandbox';
+  if (!_qrUrlLoaded) {   // after a restart: the URLs saved from earlier logins
+    _qrUrlLoaded = true;
+    try { for (const f of fs.readdirSync(DATA_DIR).filter(n => /^efris_login_.*\.json$/.test(n))) {
+      const x = JSON.parse(fs.readFileSync(path.join(DATA_DIR, f), 'utf8')) || {};
+      if (x.mode && !_qrUrlByMode[x.mode] && /^https:\/\/[^\s"']*ura\.go\.ug\//i.test(x.qrCodeURL || '')) _qrUrlByMode[x.mode] = x.qrCodeURL;
+    } } catch (_) {}
+  }
+  return _qrUrlByMode[m] || (m === 'production' ? 'https://efris.ura.go.ug/site_mobile/#/invoiceValidation' : 'https://efristest.ura.go.ug/site_new/#/invoiceValidation');
+}
 // Discard the cached session so the next getSession() re-runs T101/T104/T103 and
 // obtains a FRESH AES key. This is the recovery for rc:15 "Data decryption error":
 // EFRIS returns rc:15 when the AES key it issued has rotated on its side but our
@@ -1695,17 +1758,12 @@ async function efrisCurrencyIsoFromCode(code, tin, deviceNo, session, eu) {
 async function getEfrisMeasureUnits(tin, deviceNo, session, eu) {
   const dict = await getEfrisDictionary(tin, deviceNo, session, eu);
   if (!dict) return [];
-  // The units live in a section keyed by something like "rateUnit". Be tolerant:
-  // pick the array whose rows have short {value} codes and a descriptive name.
+  // The units live in T115 rateUnit (Interface Design v24.0.1).
   const candidates = ['rateUnit', 'measureUnit', 'unit', 'goodsUnit'];
   let list = null;
   for (const k of candidates) { if (Array.isArray(dict[k])) { list = dict[k]; break; } }
-  if (!list) {
-    // Fallback: any section whose rows look like {value, name} unit entries
-    for (const v of Object.values(dict)) {
-      if (Array.isArray(v) && v.length && v[0] && v[0].value && v[0].name && String(v[0].value).length <= 4) { list = v; break; }
-    }
-  }
+  // No guessing from other sections: currencyType, payWay and sector look the
+  // same ({value, name}) and would replace the units with currencies.
   if (!list) return [];
   return list.map(r => ({ code: String(r.value || r.code || ''), name: String(r.name || r.description || '') }))
              .filter(u => u.code);
@@ -1763,6 +1821,10 @@ async function getRegisteredGoodsMap(tin, deviceNo, session, eu) {
           taxRate: it.taxRate != null ? String(it.taxRate) : '',
           isExempt: it.isExempt != null ? String(it.isExempt) : '',
           isZeroRate: it.isZeroRate != null ? String(it.isZeroRate) : '',
+          // Excise duty (haveExciseTax 101): the code and rate URA holds for the good.
+          haveExciseTax: String(it.haveExciseTax || ''), exciseDutyCode: String(it.exciseDutyCode || '').trim(),
+          exciseDutyName: String(it.exciseDutyName || '').trim(), exciseRate: it.exciseRate != null ? String(it.exciseRate) : '',
+          pack: it.pack != null ? String(it.pack) : '', stick: it.stick != null ? String(it.stick) : '',
         };
       }
       if (items.length < 99) break;
@@ -1788,7 +1850,7 @@ async function getRegisteredGoodsMap(tin, deviceNo, session, eu) {
 
 // Annotate invoice/credit-note lines with the EFRIS-registered unit + commodity so
 // buildT109 stops defaulting unitOfMeasure to '101' (Stick). Mutates lines in place.
-function annotateLinesWithRegisteredGoods(invoice, goodsMap) {
+function annotateLinesWithRegisteredGoods(invoice, goodsMap, exciseList) {
   if (!invoice || !Array.isArray(invoice.Lines) || !goodsMap) return;
   for (const l of invoice.Lines) {
     const code = String(l.ItemCode || l.Code || l.itemCode || '').trim().toUpperCase();
@@ -1804,8 +1866,60 @@ function annotateLinesWithRegisteredGoods(invoice, goodsMap) {
       const tn = taxNameFromRegisteredGood(g);
       if (tn) l.TaxName = tn;
     }
+    if (g.haveExciseTax === '101' && g.exciseDutyCode) {
+      l.ExciseFlag = '1';
+      if (!l.ExciseDutyCode) l.ExciseDutyCode = g.exciseDutyCode;
+      if (!l.ExciseDutyName) l.ExciseDutyName = g.exciseDutyName || g.exciseDutyCode;
+      const d = exciseDutyDetail(g.exciseDutyCode, exciseList);
+      if (d) {
+        if (!l.ExciseRule) l.ExciseRule = d.rule;
+        if (l.ExciseRate == null || l.ExciseRate === '') l.ExciseRate = d.rate;
+        if (d.rule === '2') { if (!l.ExciseUnit) l.ExciseUnit = d.unit; if (!l.ExciseCurrency) l.ExciseCurrency = d.currency; }
+      } else if ((l.ExciseRate == null || l.ExciseRate === '') && g.exciseRate) l.ExciseRate = g.exciseRate;
+      if (!l.Pack && g.pack) l.Pack = g.pack;
+      if (!l.Stick && g.stick) l.Stick = g.stick;
+    }
   }
 }
+// ── Excise duty list (T125), cached per TIN on disk ──
+// Each duty has details of type 101 (a percentage) and/or 102 (an amount per
+// unit). A percentage is exciseRule 1; an amount per unit is exciseRule 2.
+const exciseFile = tin => path.join(DATA_DIR, 'efris_excise_' + String(tin).replace(/[^0-9A-Za-z]/g, '') + '.json');
+const _exciseCache = {};
+function savedExciseList(tin) { try { return JSON.parse(fs.readFileSync(exciseFile(tin), 'utf8')); } catch (_) { return null; } }
+async function getExciseDutyList(tin, deviceNo, session, eu) {
+  if (_exciseCache[tin] && Date.now() - _exciseCache[tin].ts < 12 * 3600000) return _exciseCache[tin].list;
+  try {
+    const r = await efrisSecure(eu, 'T125', {}, tin, deviceNo, session);
+    const c = r.data && r.data.data && r.data.data.content;
+    const raw = c ? efrisDecodeJson(c, session.aesKey) : null;
+    const d = raw ? JSON.parse(raw) : null;
+    const list = d && (d.exciseDutyList || (Array.isArray(d) ? d : null));
+    if (Array.isArray(list) && list.length) {
+      _exciseCache[tin] = { ts: Date.now(), list };
+      try { writeFileAtomic(exciseFile(tin), JSON.stringify(list)); } catch (_) {}
+      return list;
+    }
+  } catch (e) { console.log('   (T125 excise duty list failed: ' + e.message + ')'); }
+  return savedExciseList(tin) || [];
+}
+// Only ask URA for the excise list when a line on this document is excisable.
+async function exciseListFor(invoice, goodsMap, tin, deviceNo, session, eu) {
+  const any = (invoice.Lines || []).some(l => { const g = goodsMap && goodsMap[String(l.ItemCode || l.Code || '').trim().toUpperCase()]; return g && g.haveExciseTax === '101'; });
+  return any ? getExciseDutyList(tin, deviceNo, session, eu) : [];
+}
+// The currency names from T115 (101 -> UGX); UGX when unknown.
+const EXCISE_CURRENCY = { '101': 'UGX', '102': 'USD', '103': 'EUR', '104': 'GBP' };
+function exciseDutyDetail(code, list) {
+  const e = (list || []).find(x => String(x.exciseDutyCode || '') === String(code || ''));
+  if (!e) return null;
+  const det = Array.isArray(e.exciseDutyDetailsList) ? e.exciseDutyDetailsList : [];
+  const pct = det.find(x => String(x.type) === '101'), per = det.find(x => String(x.type) === '102');
+  if (pct) return { rule: '1', rate: String(pct.rate || ''), name: e.goodService || '' };
+  if (per) return { rule: '2', rate: String(per.rate || ''), unit: String(per.unit || ''), currency: EXCISE_CURRENCY[String(per.currency)] || String(per.currency || 'UGX'), name: e.goodService || '' };
+  return null;
+}
+const EXCISE_UNIT_NAME = { '101': 'per stick', '102': 'per litre', '103': 'per kg', '104': 'per user per day of access', '105': 'per minute', '106': 'per 1,000sticks', '107': 'per 50kgs', '108': '-', '109': 'per 1 g' };
 // Map a registered good's tax fields to a TaxName that buildT109 classifies.
 function taxNameFromRegisteredGood(g) {
   const truthy = v => /^(1|101|yes|true|y)$/i.test(String(v == null ? '' : v).trim());
@@ -1868,6 +1982,18 @@ function b2gBuyerType(cfg) {
 function buildT109(invoice, cfg) {
   const vat = !!cfg.vatRegistered;
   const isRefund = !!(invoice.IsRefund || invoice.isRefund);
+  // Export (URA invoiceIndustryCode 102 goods, 112 services): zero-rated, a
+  // foreign buyer; goods also need delivery terms (Incoterms, e.g. FOB, CIF) and
+  // each line's weight and piece unit (URA 3162-3173).
+  const exportType = /^(goods|service)$/.test(String(invoice.ExportType || '')) ? String(invoice.ExportType) : '';
+  const industryCode = exportType === 'goods' ? '102' : exportType === 'service' ? '112' : '101';
+  if (exportType === 'goods' && !isRefund) {
+    if (!/^[A-Z]{3}$/.test(String(invoice.DeliveryTerms || '').toUpperCase())) {
+      const err = new Error('An export of goods needs the delivery terms (three letters, for example FOB, CIF or EXW).'); err.expose = true; err.status = 400; throw err;
+    }
+    const noWeight = (invoice.Lines || []).filter(l => !(parseFloat(l.TotalWeight) > 0)).map(l => l.ItemName || l.Description || 'item');
+    if (noWeight.length) { const err = new Error('An export of goods needs the weight of every line (kg). Missing for: ' + noWeight.join(', ') + '. Set "Weight per unit" on the item under Goods.'); err.expose = true; err.status = 400; throw err; }
+  }
   // Debit note: a T109 of invoiceType 4 pointing at the ORIGINAL invoice's EFRIS id.
   const debitOf = invoice._debitOf && invoice._debitOf.oriInvoiceId ? invoice._debitOf : null;
   const r2 = n => (Math.round((parseFloat(n) || 0) * 100) / 100).toFixed(2);
@@ -1889,13 +2015,19 @@ function buildT109(invoice, cfg) {
     // and exciseTax; exciseRule '2' (specific/quantity duty) also needs exciseUnit
     // and exciseCurrency ('1' = ad valorem). Values come from the item config so we
     // never guess a rate.
-    const isExcise = /excise/.test(taxName) || l.ExciseFlag === '1' || !!(l.ExciseRate || l.ExciseTax);
+    const isExcise = !exportType && (/excise/.test(taxName) || l.ExciseFlag === '1' || !!(l.ExciseRate || l.ExciseTax));
     const vat18 = amt => r2(amt - amt / 1.18);   // VAT inside a VAT-inclusive 18% amount
-    if (vat && /deemed/.test(taxName)) { taxRate = '0.18'; tax = vat18(total); vatFlag = '1'; catCode = '04'; }  // D - Deemed 18%
+    if (vat && exportType) { taxRate = '0'; tax = '0'; vatFlag = '1'; catCode = '02'; }   // an export is zero-rated
+    else if (vat && /deemed/.test(taxName)) { taxRate = '0.18'; tax = vat18(total); vatFlag = '1'; catCode = '04'; }  // D - Deemed 18%
     else if (vat && /exempt/.test(taxName)) { taxRate = '-'; tax = '0'; vatFlag = '1'; catCode = '03'; }
     else if (vat && /zero/.test(taxName)) { taxRate = '0'; tax = '0'; vatFlag = '1'; catCode = '02'; }
-    else if (vat && (/standard/.test(taxName) || lineTax > 0)) { taxRate = '0.18'; tax = vat18(total); vatFlag = '1'; catCode = '01'; }
-    else if (vat) { taxRate = '-'; tax = '0'; vatFlag = '1'; catCode = '03'; }
+    else if (vat && (/standard|18\s*%|\bvat\b/.test(taxName) || lineTax > 0)) { taxRate = '0.18'; tax = vat18(total); vatFlag = '1'; catCode = '01'; }
+    // A tax code we cannot place must not quietly become Exempt: stop and say which.
+    else if (vat && taxName.trim() && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(taxName.trim())) {
+      const err = new Error('Line ' + (i + 1) + ' (' + String(l.ItemName || l.Description || 'item') + ') has the tax code "' + String(l.TaxName || l.TaxCode || invoice.TaxName) + '", which EFRISConnect cannot match to a URA tax category. Use a tax code named Standard (18%), Zero rated, Exempt or Deemed, then try again.');
+      err.expose = true; err.status = 400; throw err;
+    }
+    else if (vat) { taxRate = '-'; tax = '0'; vatFlag = '1'; catCode = '03'; console.log('   ⚠ Line ' + (i + 1) + ' has no tax code: sent to URA as Exempt'); }
     // Non-VAT-registered taxpayer: issues e-receipts (invoiceKind=2).
     // Per EFRIS developer docs taxRule field: OOS = Out of Scope (correct for
     // non-VAT businesses). catCode '05' = OOS in taxCategoryCode (01=Standard,
@@ -1924,19 +2056,34 @@ function buildT109(invoice, cfg) {
     // Excise duty fields (only when the line is excisable) - structure per v24.0.1
     // goodsDetails validation (codes 1231-1259). Values sourced from item config.
     if (isExcise) {
-      const exRule = String(l.ExciseRule || '1');   // '1' ad valorem, '2' specific
+      // URA 1222/2841: an excise line needs its excise duty code (categoryId) and
+      // exciseRateName; stop here rather than have URA reject the sale.
+      if (!l.ExciseDutyCode) {
+        const err = new Error('"' + g.item + '" is marked as excisable but has no URA excise duty code. Register it under Goods with its excise duty code, then try again.');
+        err.expose = true; err.status = 400; throw err;
+      }
+      const exRule = String(l.ExciseRule || '1');   // '1' a percentage, '2' an amount per unit
       const exRate = parseFloat(l.ExciseRate || 0) || 0;
+      g.categoryId = String(l.ExciseDutyCode).slice(0, 18);
+      g.categoryName = String(l.ExciseDutyName || l.ExciseDutyCode).slice(0, 1024);
       g.exciseRate = String(l.ExciseRate != null && l.ExciseRate !== '' ? l.ExciseRate : '');
       g.exciseRule = exRule;
-      // Compute the excise amount when not supplied: ad valorem (rule 1) = rate x
-      // line total; specific (rule 2) = rate x quantity.
+      // The line price includes VAT and excise. Excise is worked out on the amount
+      // before VAT: a percentage r gives (amount before VAT) x r / (1 + r); an amount
+      // per unit gives rate x quantity. An explicit ExciseTax always wins.
+      const beforeVat = catCode === '01' || catCode === '04' ? total / 1.18 : total;
       let exTax = (l.ExciseTax != null && l.ExciseTax !== '') ? parseFloat(l.ExciseTax) || 0
-                : (exRule === '2' ? exRate * qty : exRate * total);
+                : (exRule === '2' ? exRate * qty : beforeVat * exRate / (1 + exRate));
       g.exciseTax = r2(exTax);
+      g.pack = String(l.Pack || '1'); g.stick = String(l.Stick || '1');
       if (exRule === '2') {
         g.exciseUnit = String(l.ExciseUnit || '');
         g.exciseCurrency = String(l.ExciseCurrency || invoice.Currency || 'UGX');
+        g.exciseRateName = g.exciseCurrency + (+exRate) + ' ' + (EXCISE_UNIT_NAME[g.exciseUnit] || '');
+      } else {
+        g.exciseRateName = (Math.round(exRate * 10000) / 100) + '%';
       }
+      g._excise = { tax: exTax, beforeVat, rate: g.exciseRate, name: g.exciseRateName, unit: g.exciseUnit || '', currency: g.exciseCurrency || '' };
     }
     // Deemed VAT / VAT Exemption PROJECT fields (only when the line is on a project)
     // - v24.0.1 codes 3038-3046. deemedExemptCode <=3, vatProjectId <=18,
@@ -1946,6 +2093,14 @@ function buildT109(invoice, cfg) {
       g.vatProjectId     = String(l.VatProjectId || '').slice(0, 18);
       g.vatProjectName   = String(l.VatProjectName || '').slice(0, 100);
     }
+    if (exportType === 'goods') {
+      g.totalWeight = String(parseFloat(l.TotalWeight) || 0);
+      g.pieceQty = String(parseFloat(l.PieceQty) || qty);
+      g.pieceMeasureUnit = String(l.PieceMeasureUnit || g.unitOfMeasure || '');
+      if (l.HsCode) { g.hsCode = String(l.HsCode).slice(0, 50); g.hsName = String(l.HsName || '').slice(0, 1000); }
+    }
+    // URA 1177: a deemed line's item is the item name plus " (deemed)".
+    if (g.deemedFlag === '1') g.item = g.item.slice(0, 90) + ' (deemed)';
     goodsDetails.push(g);
     if (discount > 0) {
       // The discount line: same item and code, no qty/unitPrice, total = -discount.
@@ -1956,7 +2111,7 @@ function buildT109(invoice, cfg) {
       goodsDetails.push({
         // URA 1178: the discount line's item is the item name plus " (Discount)", or
         // plus " (deemed) (Discount)" on a deemed line.
-        ...g, item: String(g.item || '') + (g.deemedFlag === '1' ? ' (deemed)' : '') + ' (Discount)',
+        ...g, item: String(g.item || '') + ' (Discount)',
         qty: '', unitPrice: '', total: r2(-discount), tax: String(dTax),
         discountTotal: '', discountTaxRate: taxRate, discountFlag: '0',
         ...(g.exciseTax !== undefined ? { exciseTax: '0' } : {}),
@@ -1977,6 +2132,17 @@ function buildT109(invoice, cfg) {
     t.gross += parseFloat(g.total) || 0; t.tax += parseFloat(g.tax) || 0;
   }
   goodsDetails.forEach(g => delete g._catCode);
+  // Excise duty rows (taxCategoryCode 05, URA 1344/1346): summary.taxAmount adds
+  // their tax; summary.grossAmount leaves their gross out.
+  const exciseGroups = [];
+  for (const g of goodsDetails) {
+    const x = g._excise; delete g._excise;
+    if (!x || String(g.discountFlag) === '0') continue;
+    let t = exciseGroups.find(e => e.rate === x.rate && e.name === x.name);
+    if (!t) exciseGroups.push(t = { rate: x.rate, name: x.name, unit: x.unit, currency: x.currency, gross: 0, tax: 0 });
+    t.gross += x.beforeVat; t.tax += x.tax;
+  }
+  const exciseTaxTotal = exciseGroups.reduce((s, e) => s + e.tax, 0);
   // URA's documented format (yyyy-MM-dd HH:mm:ss). URA online also took dd/MM/yyyy,
   // but the Offline Enabler validates it itself and rejects anything else (rc 1130).
   // Always Uganda time, whatever the server's time zone. A sale queued offline
@@ -1993,6 +2159,11 @@ function buildT109(invoice, cfg) {
   const custType = String(invoice.CustomerType || 'b2c').toLowerCase();
   const hasTin = !!(invoice.CustomerTIN && String(invoice.CustomerTIN).trim());
   let buyerType, buyerTin, buyerPassportNum, buyerCitizenship, buyerLegalName, buyerBusinessName, buyerAddress;
+  // A business or government buyer is identified by its TIN: stop before URA rejects it.
+  if ((custType === 'b2b' || custType === 'b2g') && !hasTin && !isRefund) {
+    const err = new Error('A ' + (custType === 'b2b' ? 'business (B2B)' : 'government (B2G)') + ' buyer needs a TIN. Enter the buyer TIN, or choose B2C for a walk-in customer.');
+    err.expose = true; err.status = 400; throw err;
+  }
   if (custType === 'b2b') {
     buyerType = '0'; buyerTin = String(invoice.CustomerTIN || ''); buyerPassportNum = '';
     buyerCitizenship = ''; buyerLegalName = invoice.CustomerName || '';
@@ -2021,18 +2192,28 @@ function buildT109(invoice, cfg) {
   // entirely. The taxRule='OOS' on each goodsDetails line carries the designation.
   const taxDetails = vat
     ? taxGroups.map(t => ({ taxCategoryCode: t.catCode, netAmount: r2(t.gross - t.tax), taxRate: t.taxRate, taxAmount: r2(t.tax), grossAmount: r2(t.gross) }))
+      .concat(exciseGroups.map(e => ({ taxCategoryCode: '05', netAmount: r2(e.gross - e.tax), taxRate: e.rate, taxAmount: r2(e.tax), grossAmount: r2(e.gross),
+        ...(e.unit ? { exciseUnit: e.unit, exciseCurrency: e.currency } : {}), taxRateName: e.name })))
     : [];
+  // URA 1344: summary tax is every taxDetails row's tax, excise included.
+  const sumTax = vat ? taxAmount + exciseTaxTotal : taxAmount;
   return {
-    sellerDetails: { tin: cfg.tin, ninBrn: cfg.brn || '', legalName: cfg.businessName || cfg.tradeName || '', businessName: cfg.tradeName || cfg.businessName || '', address: cfg.businessAddress || 'Uganda', mobilePhone: cfg.phone || '', linePhone: '', emailAddress: cfg.email || '', placeOfBusiness: cfg.businessAddress || 'Uganda', referenceNo: (isRefund ? 'CN-' : '') + (invoice.Reference || '') },
-    basicInformation: { invoiceNo: '', antifakeCode: '', deviceNo: cfg.deviceNo, issuedDate, operator: invoice.Operator || cfg.issuedBy || cfg.operator || 'Cashier', currency: invoice.Currency || 'UGX', oriInvoiceId: debitOf ? String(debitOf.oriInvoiceId) : (invoice.OriginalFDN || ''), invoiceType: debitOf ? '4' : '1', invoiceKind: vat ? '1' : '2', dataSource: '103', invoiceIndustryCode: '101', isBatch: '0', isRefund: isRefund && !debitOf ? '1' : '0' },
-    buyerDetails: { buyerTin, buyerNinBrn: '', buyerPassportNum, buyerLegalName, buyerBusinessName, buyerAddress, buyerEmail: invoice.CustomerEmail || '', buyerMobilePhone: invoice.CustomerPhone || '', buyerLinePhone: '', buyerPlaceOfBusi: invoice.CustomerDept || '', buyerType, buyerCitizenship, buyerSector: '', buyerReferenceNo: '' },
+    sellerDetails: { tin: cfg.tin, ninBrn: cfg.brn || '', legalName: cfg.businessName || cfg.tradeName || '', businessName: cfg.tradeName || cfg.businessName || '', address: cfg.businessAddress || 'Uganda', mobilePhone: cfg.phone || '', linePhone: '', emailAddress: cfg.email || '', placeOfBusiness: cfg.businessAddress || 'Uganda', referenceNo: (isRefund ? 'CN-' : '') + (invoice.Reference || ''),
+      // URA itself refuses a second document with the same reference (rc 2254), a guard against double FDNs.
+      isCheckReferenceNo: invoice.Reference ? '1' : '0',
+      // The branch that issued it (T138), when the business has more than one.
+      ...((cfg.branchId || savedBranch(cfg.tin).branchId) ? { branchId: String(cfg.branchId || savedBranch(cfg.tin).branchId) } : {}) },
+    basicInformation: { invoiceNo: '', antifakeCode: '', deviceNo: cfg.deviceNo, issuedDate, operator: invoice.Operator || cfg.issuedBy || cfg.operator || 'Cashier', currency: invoice.Currency || 'UGX', oriInvoiceId: debitOf ? String(debitOf.oriInvoiceId) : (invoice.OriginalFDN || ''), invoiceType: debitOf ? '4' : '1', invoiceKind: vat ? '1' : '2', dataSource: '103', invoiceIndustryCode: industryCode, isBatch: '0', isRefund: isRefund && !debitOf ? '1' : '0' },
+    buyerDetails: { ...(exportType === 'goods' ? { deliveryTermsCode: String(invoice.DeliveryTerms).toUpperCase() } : {}), buyerTin, buyerNinBrn: String(invoice.CustomerNinBrn || '').trim().slice(0, 100), buyerPassportNum, buyerLegalName, buyerBusinessName, buyerAddress, buyerEmail: invoice.CustomerEmail || '', buyerMobilePhone: invoice.CustomerPhone || '', buyerLinePhone: '', buyerPlaceOfBusi: invoice.CustomerDept || '', buyerType, buyerCitizenship, buyerSector: '', buyerReferenceNo: '' },
     goodsDetails,
     taxDetails,
-    summary: { netAmount: r2(net), taxAmount: r2(taxAmount), grossAmount: r2(gross), itemCount: String(goodsDetails.filter(g => g.discountFlag !== '0').length) /* URA 1304: goods lines minus discount lines */, modeCode: '1', remarks: (isRefund && invoice.CreditNoteReason ? invoice.CreditNoteReason + (invoice.Notes ? '. ' + invoice.Notes : '') : invoice.Notes || ''), qrCode: '' },
+    summary: { netAmount: r2(gross - sumTax), taxAmount: r2(sumTax), grossAmount: r2(gross), itemCount: String(goodsDetails.filter(g => g.discountFlag !== '0').length) /* URA 1304: goods lines minus discount lines */, modeCode: '1', remarks: (isRefund && invoice.CreditNoteReason ? invoice.CreditNoteReason + (invoice.Notes ? '. ' + invoice.Notes : '') : invoice.Notes || ''), qrCode: '' },
     payWay: (invoice.PayWays && invoice.PayWays.length)
       ? invoice.PayWays.map((pw, i) => ({ paymentMode: String(pw.mode || '101'), paymentAmount: r2(pw.amount || 0), orderNumber: String(i + 1) }))
       : [{ paymentMode: String(invoice.PaymentMode || '101'), paymentAmount: r2(gross), orderNumber: '1' }],
-    extend: {},
+    // Debit note (invoiceType 4): URA's reason code 101 extra goods or wrong price,
+    // 102 the buyer asked for it, 103 other (reason text required).
+    extend: debitOf ? { reason: String(debitOf.reason || invoice.Notes || 'Additional charges').slice(0, 1024), reasonCode: ['101', '102', '103'].includes(String(debitOf.reasonCode)) ? String(debitOf.reasonCode) : '101' } : {},
     // Deemed VAT / VAT-Exemption summary list (v24.0.1 T190, codes 3371+). Only
     // emitted when the caller supplies it, so we never send a malformed collection.
     ...(invoice.VatDeemedExemptDtlList && invoice.VatDeemedExemptDtlList.length
@@ -2515,32 +2696,56 @@ app.post('/api/efris/sync-units', async (req, res) => {
   }
 });
 
+// One-box search over URA's commodity list: every word must appear in the
+// commodity, class or family name (or the code). Everyday words used by tour,
+// travel and hospitality businesses are widened to URA's wording.
+const COMMODITY_SYNONYMS = {
+  safari: ['tour arrangement', 'sightseeing', 'tour guides'], tour: ['tour arrangement', 'tour guides', 'sightseeing'], tours: ['tour arrangement', 'tour guides', 'sightseeing'], 'game drive': ['sightseeing'], gamedrive: ['sightseeing'], sightseeing: ['sightseeing'],
+  lodge: ['hotel', 'lodging'], lodges: ['hotel', 'lodging'], accommodation: ['hotel', 'lodging'], guesthouse: ['hotel', 'lodging'], camp: ['camping'], camping: ['camping'],
+  guide: ['guide'], guiding: ['guide'], 'park fee': ['reimbursement'], 'park fees': ['reimbursement'], permit: ['reimbursement'], 'gorilla permit': ['reimbursement'],
+  'car hire': ['vehicle rental'], 'car rental': ['vehicle rental'], 'vehicle hire': ['vehicle rental'], transfer: ['passenger'], transfers: ['passenger'],
+  soda: ['soft drinks'], sodas: ['soft drinks'], 'soft drink': ['soft drinks'], juice: ['juice'], beer: ['beer'], water: ['water', 'mineral water'], 'drinking water': ['water', 'mineral water'],
+  'boat trip': ['boat'], 'boat cruise': ['boat'], cruise: ['boat'], flight: ['air'], ticket: ['travel'], 'travel agent': ['travel agency'],
+};
 app.get('/api/commodity/search', (req, res) => {
   try {
-    const q = (req.query.q || '').toLowerCase().trim();
-    if (q.length < 2) return res.json([]);
+    const raw = (req.query.q || '').toLowerCase().trim();
+    if (raw.length < 2) return res.json([]);
+    const syn = COMMODITY_SYNONYMS[raw];
+    const queries = syn ? syn : [raw];
     const tree = getTree();
     const results = [];
-    for (const [sc, seg] of Object.entries(tree)) {
-      for (const [fc, fam] of Object.entries(seg.f)) {
-        for (const [cc, cls] of Object.entries(fam.c)) {
-          if (!cls.d) continue;
-          for (const [dc, com] of Object.entries(cls.d)) {
-            const comName = typeof com === 'string' ? com : com.n;
-            if (comName.toLowerCase().includes(q) || dc.includes(q)) {
-              results.push({ commodityCode: dc, commodityName: comName,
-                classCode: cc, className: cls.n, familyCode: fc, familyName: fam.n,
-                segmentCode: sc, segmentName: seg.n });
-              if (results.length >= 20) break;
+    const seen = new Set();
+    for (const q of queries) {
+      const words = q.split(/\s+/).filter(Boolean);
+      // Whole-word starts only: "tour" finds "Tour arrangement", not "tourniquet".
+      const res_ = words.map(w => new RegExp('\\b' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      for (const [sc, seg] of Object.entries(tree)) {
+        for (const [fc, fam] of Object.entries(seg.f)) {
+          for (const [cc, cls] of Object.entries(fam.c)) {
+            if (!cls.d) continue;
+            for (const [dc, com] of Object.entries(cls.d)) {
+              if (seen.has(dc)) continue;
+              const comName = typeof com === 'string' ? com : com.n;
+              const hay = (comName + ' ' + cls.n + ' ' + fam.n).toLowerCase();
+              if (dc.startsWith(raw) || res_.every(r => r.test(hay))) {
+                seen.add(dc);
+                // Earlier (more specific) words first; then whole words before word starts
+                // ("tour" before "tourniquet"); then matches in the commodity name itself.
+                const whole = words.every(w => new RegExp('\\b' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + 's?\\b').test(hay));
+                // A commodity named exactly what was typed ("Water") comes first of all.
+                const exact = comName.trim().toLowerCase() === q;
+                const rank = exact ? -1 : queries.indexOf(q) * 4 + (whole ? 0 : 2) + (res_.every(r => r.test(comName.toLowerCase())) ? 0 : 1);
+                results.push({ rank, commodityCode: dc, commodityName: comName, isService: typeof com === 'object' && typeof com.s === 'boolean' ? com.s : null,
+                  classCode: cc, className: cls.n, familyCode: fc, familyName: fam.n, segmentCode: sc, segmentName: seg.n });
+              }
             }
           }
-          if (results.length >= 20) break;
         }
-        if (results.length >= 20) break;
       }
-      if (results.length >= 20) break;
     }
-    res.json(results);
+    results.sort((x, y) => x.rank - y.rank);
+    res.json(results.slice(0, 30).map(({ rank, ...r }) => r));
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -2553,7 +2758,7 @@ app.get('/api/commodity/:code', (req, res) => {
         for (const [cc, cls] of Object.entries(fam.c)) {
           if (cls.d && cls.d[target]) {
             const com = cls.d[target];
-            return res.json({ commodityCode: target, commodityName: typeof com === 'string' ? com : com.n,
+            return res.json({ commodityCode: target, commodityName: typeof com === 'string' ? com : com.n, isService: typeof com === 'object' && typeof com.s === 'boolean' ? com.s : null,
               classCode: cc, className: cls.n, familyCode: fc, familyName: fam.n, segmentCode: sc, segmentName: seg.n });
           }
         }
@@ -2741,8 +2946,13 @@ app.post('/api/goods/sync-to-manager', async (req, res) => {
   // category segment (70-94 = services). This overrides a mis-set item.type so a tour
   // (90…) or transport (78…) lands as a Manager NON-inventory item even if the form said
   // "Goods". Falls back to item.type when no category is present.
-  const _catSeg = parseInt(String(item.comCode || item.commodityCategoryCode || '').slice(0, 2), 10);
-  const isService = (_catSeg >= 70 && _catSeg <= 94) ? true
+  // URA's own list marks each commodity code as a service or not; the segment
+  // range (70-94) is only the fallback for a code that is not in the list.
+  const _catCode = String(item.comCode || item.commodityCategoryCode || '');
+  const _catSeg = parseInt(_catCode.slice(0, 2), 10);
+  const _svc = commodityIsService(_catCode);
+  const isService = _svc !== null ? _svc
+                  : (_catSeg >= 70 && _catSeg <= 94) ? true
                   : (_catSeg >= 1) ? false
                   : (item.type || 'Service') !== 'Goods';
   const listPath = isService ? '/non-inventory-items' : '/inventory-items';
@@ -2791,7 +3001,7 @@ app.post('/api/goods/sync-to-manager', async (req, res) => {
     if (match) {
       // Step 2a: UPDATE - GET the full form, merge our fields, POST back to form endpoint
       existingKey = match.key || match.Key;
-      console.log(`   Existing item (key ${existingKey}) - GET form → mutate → POST form`);
+      console.log(`   Existing item (key ${existingKey}) - GET form → mutate → PUT form`);
       const formR = await managerCall(ep, accessToken, 'GET', `${formBase}/${existingKey}`, null);
       if (formR.status !== 200) {
         return res.json({ success: false, error: `Could not fetch item form: HTTP ${formR.status}` });
@@ -2809,6 +3019,10 @@ app.post('/api/goods/sync-to-manager', async (req, res) => {
         form.Name              = item.name;
         form.HasSalesUnitPrice = price > 0;
         form.SalesUnitPrice    = price;
+        // Manager's non-inventory item form holds the price as DefaultSalesUnitPrice
+        // (seen in its GET answer); setting only SalesUnitPrice left the old price.
+        form.DefaultSalesUnitPrice    = price;
+        form.HasDefaultSalesUnitPrice = price > 0;
       } else {
         // Inventory items - confirmed field names from GET form response
         form.ItemName                 = item.name;
@@ -2837,10 +3051,13 @@ app.post('/api/goods/sync-to-manager', async (req, res) => {
       if (item.division) form.Division = item.division;
       if (item.salesDivision) form.SalesDivision = item.salesDivision;
       if (!isService && item.costMethod != null && item.costMethod !== '') form.CostMethod = item.costMethod;
-      r = await managerCall(ep, accessToken, 'POST', `${formBase}/${existingKey}`, form);
+      // Update in place with PUT (Manager's update verb); POST to a key's address can
+      // add a new record instead. Older builds without PUT get the POST.
+      r = await managerCall(ep, accessToken, 'PUT', `${formBase}/${existingKey}`, form);
+      if (r.status === 404 || r.status === 405) r = await managerCall(ep, accessToken, 'POST', `${formBase}/${existingKey}`, form);
       action = 'updated';
       const written = Object.keys(cfStrings).length;
-      console.log(`   Manager form POST: HTTP ${r.status}`);
+      console.log(`   Manager form update: HTTP ${r.status}`);
       if (comCodeFieldKey) console.log(`   EFRIS Commodity Code → ${item.comCode}`);
       if (catPathFieldKey) console.log(`   EFRIS Category Path  → ${catPath}`);
       const ok = r.status >= 200 && r.status < 300;
@@ -3117,7 +3334,7 @@ async function discoverCustomerPlacement(ep, tk) {
   // unknown placement GUID found on an existing field is the Customer form.
   try {
     const known = new Set(Object.values(MGR_PLACEMENTS).filter(_isGuid).map(s => s.toLowerCase()));
-    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields', null);
+    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields?pageSize=1000', null);
     const fields = (list.data && list.data.textCustomFields) || [];
     for (const f of fields.slice(0, 30)) {
       const k = f.key || f.Key; if (!k) continue;
@@ -3162,7 +3379,7 @@ app.post('/api/manager/customers', async (req, res) => {
     const arr = (r.data && (r.data.customers || r.data.Customers)) || [];
     const customers = arr.map(c => ({ name: c.name || c.Name || '', code: c.code || c.Code || '', key: c.key || c.Key || '', type: '', tin: '' }));
     if (customers.length) {
-      const list = await managerCall(ep, tk, 'GET', '/text-custom-fields', null);
+      const list = await managerCall(ep, tk, 'GET', '/text-custom-fields?pageSize=1000', null);
       const nameByKey = {};
       for (const cf of ((list.data && list.data.textCustomFields) || [])) nameByKey[String(cf.key || cf.Key || '').toLowerCase()] = String(cf.name || '').trim().toLowerCase();
       const ENRICH_CAP = 60;
@@ -3212,7 +3429,7 @@ app.post('/api/manager/customer-detail', async (req, res) => {
     const f = await managerCall(ep, tk, 'GET', '/customer-form/' + bareKey(key), null);
     const d = f.data || {};
     const strings = (d.CustomFields2 && d.CustomFields2.Strings) || {};
-    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields', null);
+    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields?pageSize=1000', null);
     const nameByKey = {};
     for (const cf of ((list.data && list.data.textCustomFields) || [])) nameByKey[String(cf.key || cf.Key || '').toLowerCase()] = String(cf.name || '').trim().toLowerCase();
     const pick = (names) => { for (const k of Object.keys(strings)) { const nm = nameByKey[String(k).toLowerCase()]; if (nm && names.includes(nm)) { const v = strings[k]; if (v != null && String(v).trim() !== '') return String(v).trim(); } } return ''; };
@@ -3235,8 +3452,14 @@ app.post('/api/manager/create-customer', async (req, res) => {
   const { managerEndpoint, accessToken, customer } = req.body || {};
   const ep = normEp(managerEndpoint || ''), tk = accessToken;
   if (!ep || !tk || !customer || !customer.name) return res.status(400).json({ success: false, error: 'managerEndpoint, accessToken and customer.name required' });
+  try { res.json(await saveManagerCustomer(ep, tk, customer)); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+// Create or update (customer.key) a Manager customer with the EFRIS buyer fields.
+// An update keeps every field it is not given (addresses included).
+async function saveManagerCustomer(ep, tk, customer) {
   clearCustCache(ep, tk);   // the customer list changes
-  try {
+  {
     const placement = customer.placement || MGR_PLACEMENTS.customer || await discoverCustomerPlacement(ep, tk);
     // Reuse the SAME custom fields already created for documents - just ADD the
     // Customer placement to them (a Manager field can live on many forms). No
@@ -3247,7 +3470,7 @@ app.post('/api/manager/create-customer', async (req, res) => {
       { field: 'Nationality',      aliases: ['nationality', 'country'],                      val: customer.nationality, show: true },
       { field: 'Passport / ID No', aliases: ['passport / id no', 'passport / id', 'passport', 'id no'], val: customer.passport, show: true },
     ];
-    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields', null);
+    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields?pageSize=1000', null);
     const existing = (list.data && list.data.textCustomFields) || [];
     const findField = (names) => existing.find(f => names.includes(String(f.name || '').trim().toLowerCase()));
     // Ensure `placement` is in a field's Placement array, preserving everything else.
@@ -3277,7 +3500,7 @@ app.post('/api/manager/create-customer', async (req, res) => {
           // Field doesn't exist at all - create it on documents + the customer form.
           try {
             await managerCall(ep, tk, 'POST', '/text-custom-field-form', Object.assign({ Name: s.field, Placement: [MGR_PLACEMENTS.salesInvoice, MGR_PLACEMENTS.receipt, placement] }, s.show ? { DisplayOnView: true } : {}));
-            const l2 = await managerCall(ep, tk, 'GET', '/text-custom-fields', null);
+            const l2 = await managerCall(ep, tk, 'GET', '/text-custom-fields?pageSize=1000', null);
             const nf = ((l2.data && l2.data.textCustomFields) || []).find(x => String(x.name || '').trim().toLowerCase() === s.field.toLowerCase());
             if (nf) fieldKey[s.field] = nf.key || nf.Key;
           } catch (_) {}
@@ -3293,19 +3516,19 @@ app.post('/api/manager/create-customer', async (req, res) => {
     if (customer.key) {
       const k = bareKey(customer.key);
       const gf = await managerCall(ep, tk, 'GET', '/customer-form/' + k, null);
-      if (gf.status !== 200 || !gf.data) return res.json({ success: false, error: `Could not fetch the existing customer (HTTP ${gf.status})` });
+      if (gf.status !== 200 || !gf.data) return ({ success: false, error: `Could not fetch the existing customer (HTTP ${gf.status})` });
       const form = Object.assign({}, gf.data);
       form.Name = customer.name;
-      form.BillingAddress = String(customer.billing || '').trim();
-      form.DeliveryAddress = String(customer.delivery || '').trim();
+      if (customer.billing !== undefined) form.BillingAddress = String(customer.billing || '').trim();
+      if (customer.delivery !== undefined) form.DeliveryAddress = String(customer.delivery || '').trim();
       const cf2 = form.CustomFields2 || {};
       form.CustomFields2 = Object.assign({}, cf2, { Strings: Object.assign({}, cf2.Strings || {}, strings) });
       const ur = await managerCall(ep, tk, 'POST', '/customer-form/' + k, form);
       if (ur.status >= 200 && ur.status < 300) {
-        console.log(`   ✅ Updated Manager customer "${customer.name}" (key ${k}); ${Object.keys(strings).length} EFRIS field(s) set`);
-        return res.json({ success: true, key: k, action: 'updated', fieldsSet: Object.keys(strings).length });
+        console.log(`   ✅ Updated Manager customer (key ${k}); ${Object.keys(strings).length} EFRIS field(s) set`);
+        return ({ success: true, key: k, action: 'updated', fieldsSet: Object.keys(strings).length });
       }
-      return res.json({ success: false, error: 'Manager rejected the update (HTTP ' + ur.status + ')', detail: ur.data });
+      return ({ success: false, error: 'Manager rejected the update (HTTP ' + ur.status + ')', detail: ur.data });
     }
     const body = { Name: customer.name };
     if (customer.billing && String(customer.billing).trim())   body.BillingAddress = String(customer.billing).trim();
@@ -3314,20 +3537,20 @@ app.post('/api/manager/create-customer', async (req, res) => {
     const r = await managerCall(ep, tk, 'POST', '/customer-form', body);
     if (r.status >= 200 && r.status < 300) {
       const key = (r.data && (r.data.key || r.data.Key)) || null;
-      console.log(`   ✅ Created Manager customer "${customer.name}" (key ${key}); ${Object.keys(strings).length} EFRIS field(s) set${placement ? '' : ' - customer fields skipped (no placement)'}`);
-      return res.json({ success: true, key, placement: placement || null, fieldsSet: Object.keys(strings).length,
+      console.log(`   ✅ Created Manager customer (key ${key}); ${Object.keys(strings).length} EFRIS field(s) set${placement ? '' : ' - customer fields skipped (no placement)'}`);
+      return ({ success: true, key, placement: placement || null, fieldsSet: Object.keys(strings).length,
         note: placement ? undefined : 'Customer created, but the EFRIS buyer fields could not be attached (Manager Customer placement not found). Create one customer custom field by hand once, then re-run.' });
     }
-    res.json({ success: false, error: 'Manager rejected the customer (HTTP ' + r.status + ')', detail: r.data });
-  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
-});
+    return { success: false, error: 'Manager rejected the customer (HTTP ' + r.status + ')', detail: r.data };
+  }
+}
 
 // Report which EFRIS fields exist vs are missing (no writes).
 app.get('/api/manager/efris-fields-status', async (req, res) => {
   const { ep, tk } = mgrCreds(req);
   if (!ep || !tk) return res.status(400).json({ success: false, error: 'ep and tk required' });
   try {
-    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields', null);
+    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields?pageSize=1000', null);
     const have = new Set(((list.data && list.data.textCustomFields) || []).map(f => (f.name || '').trim().toLowerCase()));
     const specs = efrisFieldSpecs(MGR_PLACEMENTS);
     const existing = [], missing = [];
@@ -3442,7 +3665,7 @@ app.post('/api/manager/ensure-efris-fields', async (req, res) => {
   // replicate an example field they configured by hand.
   const templateName = ((req.body || {}).templateField || '').trim().toLowerCase();
   try {
-    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields', null);
+    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields?pageSize=1000', null);
     const allFields = (list.data && list.data.textCustomFields) || [];
     const have = new Set(allFields.map(f => (f.name || '').trim().toLowerCase()));
     // Learn the Business Details placement from a "Trading As" field created there by
@@ -3692,14 +3915,21 @@ app.post('/api/manager/create-receipt', async (req, res) => {
         const arr = (cr.data && (cr.data.customers || cr.data.Customers || [])) || [];
         const hit = arr.find(c => String(c.name || c.Name || '').trim().toLowerCase() === custName.toLowerCase());
         if (hit) custKey = hit.key || hit.Key || '';
+        // An existing customer: add the TIN / passport this sale identified (kept fields stay).
+        if (custKey && (receipt.buyerTin || receipt.passport)) {
+          try { await saveManagerCustomer(ep, accessToken, { key: custKey, name: hit.name || hit.Name || custName, type: receipt.customerType || undefined,
+            tin: receipt.buyerTin || undefined, nationality: receipt.nationality || undefined, passport: receipt.passport || undefined,
+            billing: receipt.customerAddress || undefined }); } catch (_) {}
+        }
         if (!custKey) {
-          const nc = await managerCall(ep, accessToken, 'POST', '/customer-form', { Name: custName });
-          if (nc.status >= 200 && nc.status < 400) {
-            custKey = (nc.data && (nc.data.key || nc.data.Key)) || '';
+          const nc = await saveManagerCustomer(ep, accessToken, { name: custName, type: receipt.customerType || '', tin: receipt.buyerTin || '',
+            nationality: receipt.nationality || '', passport: receipt.passport || '', billing: receipt.customerAddress || undefined });
+          if (nc && nc.success) {
+            custKey = nc.key || '';
             if (!custKey) { // re-list to find the new key
               try { const cr2 = await managerCall(ep, accessToken, 'GET', '/customers', null); const a2 = (cr2.data && (cr2.data.customers || cr2.data.Customers || [])) || []; const h2 = a2.find(c => String(c.name || c.Name || '').trim().toLowerCase() === custName.toLowerCase()); if (h2) custKey = h2.key || h2.Key || ''; } catch (_) {}
             }
-            console.log(`   Created Manager customer "${custName}" → ${custKey || 'unknown'}`);
+            console.log(`   Created Manager customer (key ${custKey || 'unknown'})`);
             clearCustCache(ep, accessToken);
           }
         }
@@ -3721,11 +3951,16 @@ app.post('/api/manager/create-receipt', async (req, res) => {
     try {
       let themeId = bareKey(receipt.themeKey || '');
       if (themeId) { const tg = await managerCall(ep, accessToken, 'GET', '/custom-theme-form/' + themeId, null); if (tg.status !== 200) { console.log('   Receipt theme ' + themeId + ' not found in Manager (reinstall the theme)'); themeId = ''; } }
+      // The saved key may point at a theme deleted in Manager (duplicates removed by
+      // hand): find the EFRISConnect theme by the Form Defaults, then by its name.
+      if (!themeId) { try { themeId = await findInstalledThemeKey(ep, accessToken, 'EFRISConnect'); } catch (_) {} }
+      if (!themeId) { try { themeId = await findThemeKeyByName(ep, accessToken, 'EFRISConnect'); } catch (_) {} }
       if (!themeId) {
         const rl = await managerCall(ep, accessToken, 'GET', '/receipts?pageSize=5', null);
         for (const r0 of ((rl.data && (rl.data.receipts || rl.data.receiptsAndPayments)) || [])) {
           const rf = await managerCall(ep, accessToken, 'GET', '/receipt-form/' + (r0.key || r0.Key), null);
-          if (rf.data && rf.data.CustomThemeId) { themeId = rf.data.CustomThemeId; break; }
+          const id = rf.data && (rf.data.CustomThemeId || rf.data.customThemeId);   // Manager Desktop: camelCase
+          if (id) { themeId = id; break; }
         }
       }
       if (themeId) { form.CustomTheme = true; form.CustomThemeId = themeId; console.log('   Receipt theme: ' + themeId); }
@@ -3748,6 +3983,10 @@ app.post('/api/manager/create-receipt', async (req, res) => {
     form.Lines = await Promise.all((receipt.lines || []).map(async l => {
       const price = parseFloat(l.unitPrice) || 0;
       const line = { Qty: parseFloat(l.qty) || 1, UnitPrice: price, SalesUnitPrice: price };
+      // The line discount the cashier gave (same money as the price, URA got it as a
+      // discount line): Manager's "Discount" column, as an exact amount.
+      const disc = Math.round((parseFloat(l.discount) || 0) * 100) / 100;
+      if (disc > 0) { line.DiscountAmount = disc; form.Discount = true; form.DiscountType = 'ExactAmount'; }
       let key = l.itemKey;
       // Link the line to the Manager inventory/service item (so stock/books update)
       // by resolving from the code or name when no key was supplied.
@@ -3828,6 +4067,16 @@ app.post('/api/manager/create-receipt', async (req, res) => {
       if (loc) { const parts = loc.split('/').filter(Boolean); newKey = parts[parts.length - 1]; }
     }
     console.log(`   Created Manager receipt → key: ${newKey || 'unknown'} ref: ${receipt.reference || ''}`);
+    // A discounted sale: check Manager kept the discount (it silently drops a field
+    // it does not know), so its total matches what URA fiscalised.
+    let discountWarning = '';
+    if (newKey && form.Discount) {
+      try {
+        const g = await managerCall(ep, accessToken, 'GET', '/receipt-form/' + bareKey(newKey), null);
+        const kept = ((g.data && (g.data.Lines || g.data.lines)) || []).some(l => (parseFloat(l.DiscountAmount != null ? l.DiscountAmount : l.discountAmount) || 0) > 0);
+        if (!kept) { discountWarning = 'Manager did not keep the line discount, so its receipt total is higher than the one URA has. Open the receipt in Manager, tick Column - Discount, and enter the discount.'; console.log('   ⚠ ' + discountWarning); }
+      } catch (_) {}
+    }
     const transfers = [];
     for (const p of parts.slice(1)) {
       if (!p.account || bareKey(p.account) === bareKey(receivedIn)) continue;
@@ -3859,7 +4108,7 @@ app.post('/api/manager/create-receipt', async (req, res) => {
         transfers.push({ method: p.method, amount: amt, ok });
       } catch (e) { console.log('   Split payment transfer error: ' + e.message); transfers.push({ method: p.method, amount: amt, ok: false }); }
     }
-    res.json({ success: true, key: newKey, reference: receipt.reference, transfers });
+    res.json({ success: true, key: newKey, reference: receipt.reference, transfers, ...(discountWarning ? { warning: discountWarning } : {}) });
   } catch(e) {
     res.status(500).json({ success: false, error: e.message });
   }
@@ -3906,7 +4155,7 @@ app.post('/api/manager/debug-custom-field', async (req, res) => {
   const ep = normEp(managerEndpoint || ''), tk = accessToken;
   if (!ep || !tk || !name) return res.status(400).json({ success: false, error: 'managerEndpoint, accessToken and name required' });
   try {
-    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields', null);
+    const list = await managerCall(ep, tk, 'GET', '/text-custom-fields?pageSize=1000', null);
     const arr = (list.data && list.data.textCustomFields) || [];
     const hit = arr.find(f => String(f.name || '').trim().toLowerCase() === String(name).trim().toLowerCase());
     if (!hit) return res.json({ success: false, error: 'no field named "' + name + '" found', available: arr.map(f => f.name) });
@@ -4154,13 +4403,30 @@ app.post('/api/manager/inventory-adjust', async (req, res) => {
         const payload = {
           IssueDate: (String(date).slice(0, 10)) + 'T00:00:00',
           Description: description,
-          Lines: [{ Item: key, Qty: it.qty, PurchaseUnitPrice: parseFloat(it.unitPrice) || 0 }]
+          // Manager silently drops a line field it does not know, which leaves the
+          // line (and the items' cost) at 0: send the price under the names Manager
+          // builds use (PurchaseUnitPrice, UnitPrice) and read it back below.
+          Lines: [{ Item: key, Qty: it.qty, PurchaseUnitPrice: parseFloat(it.unitPrice) || 0, UnitPrice: parseFloat(it.unitPrice) || 0 }]
         };
         try { if (supplierKey === undefined) supplierKey = await mgrSupplierKey(ep, accessToken, b.supplierName); } catch (e) { supplierKey = ''; console.log('   Could not set the supplier: ' + e.message); }
         if (supplierKey) payload.Supplier = supplierKey;
         const r = await managerCall(ep, accessToken, 'POST', '/purchase-invoice-form', payload);
         console.log(`   purchase-invoice POST (type ${sit}): HTTP ${r.status} item=${key} qty=${it.qty} body=${JSON.stringify(r.data||'').slice(0,120)}`);
-        if (r.status >= 200 && r.status < 400) results.push({ item: it.itemCode || key, ok: true, path: 'purchase-invoice' });
+        if (r.status >= 200 && r.status < 400) {
+          // Check the cost arrived: Manager answers 201 even when it dropped the price.
+          let costNote = '';
+          try {
+            const newKey = (r.data && (r.data.key || r.data.Key)) || String((r.headers && r.headers.location) || '').split('/').pop();
+            if (newKey && parseFloat(it.unitPrice) > 0) {
+              const g = await managerCall(ep, accessToken, 'GET', '/purchase-invoice-form/' + bareKey(newKey), null);
+              const ln = ((g.data && (g.data.Lines || g.data.lines)) || [])[0] || {};
+              const got = parseFloat(ln.PurchaseUnitPrice != null ? ln.PurchaseUnitPrice : ln.purchaseUnitPrice != null ? ln.purchaseUnitPrice : ln.UnitPrice != null ? ln.UnitPrice : ln.unitPrice) || 0;
+              console.log('   purchase-invoice line read back: ' + JSON.stringify(ln).slice(0, 200));
+              if (!got) costNote = 'The purchase invoice in Manager has no unit cost: open it in Manager and enter ' + it.unitPrice + ' per unit, or the cost of sales stays 0.';
+            }
+          } catch (_) {}
+          results.push({ item: it.itemCode || key, ok: true, path: 'purchase-invoice', ...(costNote ? { warning: costNote } : {}) });
+        }
         else results.push({ item: it.itemCode || key, ok: false, error: `Purchase invoice HTTP ${r.status}: ${JSON.stringify(r.data||'').slice(0,160)}` });
       } else {
         // decrease -> write-off document. Manager silently drops unknown line
@@ -4315,8 +4581,94 @@ app.post('/api/manager/readiness-audit', async (req, res) => {
     else add('accounts', 'Chart of accounts', 'warn', `Chart of accounts returned HTTP ${r.status} / empty.`);
   } catch (e) { add('accounts', 'Chart of accounts', 'warn', e.message); }
 
+  // 7. A bank or cash account to receive payments into.
+  try {
+    const r = await managerCall(ep, tk, 'GET', '/bank-and-cash-accounts', null);
+    const arr = (r.status === 200 && r.data) ? (Object.values(r.data).find(v => Array.isArray(v)) || []) : [];
+    if (arr.length) add('cash', 'Bank and cash accounts', 'ok', arr.length + ' account(s) to receive payments into.');
+    else checks.push({ id: 'cash', title: 'Bank and cash accounts', status: 'warn', detail: 'No bank or cash account in Manager, so receipts have nowhere to record the money.',
+      fix: 'Use the button to create "Cash on Hand", or create one in Manager under Bank and Cash Accounts.', action: 'create-cash-account' });
+  } catch (e) { add('cash', 'Bank and cash accounts', 'warn', 'Could not read bank and cash accounts now.'); }
+
+  // 8. The EFRISConnect receipt theme (the URA QR code and fiscal details on printouts).
+  try {
+    const key = await findInstalledThemeKey(ep, tk, 'EFRISConnect');
+    if (key) add('theme', 'Receipt theme', 'ok', 'The EFRISConnect theme is set on Manager documents.');
+    else checks.push({ id: 'theme', title: 'Receipt theme', status: 'warn', detail: 'Receipts printed from Manager do not show the URA QR code and fiscal details yet.',
+      fix: 'Use the button to install the EFRISConnect theme into Manager.', action: 'install-theme' });
+  } catch (e) { add('theme', 'Receipt theme', 'warn', 'Could not check the theme now.'); }
+
+  // 9. The URA Offline Enabler, when it is installed on this computer.
+  try {
+    const en = await enablerControl.status();
+    if (en.supported && en.installed) {
+      if (en.running) add('enabler', 'Offline Enabler', 'ok', 'Installed and running: sales get an FDN even without internet.');
+      else checks.push({ id: 'enabler', title: 'Offline Enabler', status: 'warn', detail: 'The Offline Enabler is installed on this computer but not running.',
+        fix: 'Use the button to start it (database first, then the Enabler).', action: 'start-enabler' });
+    }
+  } catch (_) {}
+
   const worst = checks.some(c => c.status === 'fail') ? 'fail' : checks.some(c => c.status === 'warn') ? 'warn' : 'ok';
   res.json({ success: true, overall: worst, checks });
+});
+
+// Readiness check fix: create a "Cash on Hand" account in Manager (admin only).
+// ── Manager custom buttons that open EFRISConnect ──
+// One placement per button (Manager's rule). A button already pointing at this
+// placement with this address is left alone; nothing existing is changed.
+const EFC_BUTTONS = [
+  { Name: 'Fiscalise receipt', Placement: 'receipt-view' },
+  { Name: 'Fiscalise receipt', Placement: 'receipt-form' },
+  { Name: 'Fiscalise invoice', Placement: 'sales-invoice-view' },
+  { Name: 'Fiscalise invoice', Placement: 'sales-invoice-form' },
+  { Name: 'EFRISConnect', Placement: 'receipts' },
+  { Name: 'EFRISConnect', Placement: 'sales-invoices' },
+  { Name: 'EFRIS goods', Placement: 'inventory-items' },
+  { Name: 'EFRIS goods', Placement: 'inventory-item-view' },
+  { Name: 'EFRIS services', Placement: 'non-inventory-items' },
+  { Name: 'EFRIS services', Placement: 'non-inventory-item-view' },
+];
+const ciGet = (o, k) => { if (!o) return ''; const hit = Object.keys(o).find(x => x.toLowerCase() === k.toLowerCase()); return hit ? o[hit] : ''; };
+app.post('/api/manager/ensure-custom-buttons', async (req, res) => {
+  const { managerEndpoint, accessToken, extensionUrl } = req.body || {};
+  if (!managerEndpoint || !accessToken) return res.status(400).json({ success: false, error: 'managerEndpoint and accessToken required' });
+  let url;
+  try { url = new URL(String(extensionUrl || '')); } catch (_) { return res.status(400).json({ success: false, error: 'extensionUrl must be the EFRISConnect address ending in /extension' }); }
+  if (!/^https?:$/.test(url.protocol) || !/\/extension$/.test(url.pathname)) return res.status(400).json({ success: false, error: 'extensionUrl must be the EFRISConnect address ending in /extension' });
+  const ep = normEp(managerEndpoint), endpoint = url.origin + '/extension';
+  try {
+    const l = await managerCall(ep, accessToken, 'GET', '/custom-buttons', null);
+    if (l.status !== 200) return res.json({ success: false, error: 'Manager answered HTTP ' + l.status + ' for its custom buttons. Add them in Manager under Settings, Custom Buttons.' });
+    const rows = (l.data && (Object.values(l.data).find(v => Array.isArray(v)) || [])) || [];
+    const have = [];
+    for (const r of rows) {
+      const key = ciGet(r, 'key'); if (!key) continue;
+      const f = await managerCall(ep, accessToken, 'GET', '/custom-button-form/' + key, null);
+      const d = (f.status === 200 && f.data) || r;
+      have.push({ placement: String(ciGet(d, 'placement') || '').toLowerCase(), endpoint: String(ciGet(d, 'endpoint') || '').replace(/\/+$/, '').toLowerCase() });
+    }
+    const created = [], existed = [], failed = [];
+    for (const b of EFC_BUTTONS) {
+      if (have.some(h => h.placement === b.Placement && h.endpoint === endpoint.toLowerCase())) { existed.push(b.Placement); continue; }
+      const r = await managerCall(ep, accessToken, 'POST', '/custom-button-form', { Name: b.Name, Endpoint: endpoint, Placement: b.Placement });
+      if (r.status === 200 || r.status === 201) created.push(b.Placement); else failed.push(b.Placement + ' (HTTP ' + r.status + ')');
+    }
+    if (created.length) console.log('   Manager custom buttons added: ' + created.join(', '));
+    res.json({ success: !failed.length, created, existed, failed, endpoint });
+  } catch (e) { res.status(502).json({ success: false, error: e.message }); }
+});
+app.post('/api/manager/create-cash-account', async (req, res) => {
+  const { managerEndpoint, accessToken } = req.body || {};
+  if (!managerEndpoint || !accessToken) return res.status(400).json({ success: false, error: 'managerEndpoint and accessToken required' });
+  try {
+    // Only when Manager has no bank or cash account at all.
+    const l = await managerCall(normEp(managerEndpoint), accessToken, 'GET', '/bank-and-cash-accounts', null);
+    const have = (l.status === 200 && l.data) ? (Object.values(l.data).find(v => Array.isArray(v)) || []) : [];
+    if (have.length) return res.json({ success: true, existed: true });
+    const r = await managerCall(normEp(managerEndpoint), accessToken, 'POST', '/bank-or-cash-account-form', { Name: 'Cash on Hand' });
+    if (r.status === 200 || r.status === 201) { console.log('   Created bank/cash account "Cash on Hand" in Manager'); return res.json({ success: true }); }
+    res.json({ success: false, error: 'Manager answered HTTP ' + r.status + '. Create it in Manager under Bank and Cash Accounts.' });
+  } catch (e) { res.status(502).json({ success: false, error: e.message }); }
 });
 
 // Full details for a single Manager.io item (for import prefill)
@@ -4390,11 +4742,98 @@ app.post('/api/efris/measure-units', async (req, res) => {
   }
 });
 
+// URA's excise duty list (T125) for the goods form: code, name, rule and rate.
+// ── End-of-day check with URA (T117) ──
+// Sends the day's FDNs from the history (with their kind) to URA; URA returns the
+// ones it does not hold, or holds differently. An empty answer means all agree.
+function t117Type(e) { return e.kind === 'credit-note' ? '2' : e.kind === 'debit-note' ? '4' : '1'; }
+app.post('/api/efris/check-day', rateLimit(10), async (req, res) => {
+  const { config, date } = req.body || {};
+  if (!config || !config.tin) return res.status(400).json({ success: false, error: 'config.tin required' });
+  const day = /^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) ? String(date) : eatToday();
+  const v = tenantView(req);
+  const docs = readSubmissionLog().filter(e => v.sees(e) && e.status === 'success' && e.fdn && String(e.tin || config.tin) === String(config.tin)
+    && eatParts(Date.parse(e.submittedAt || '') || 0).date === day);
+  if (!docs.length) return res.json({ success: true, date: day, checked: 0, mismatches: [] });
+  try {
+    const { eu, cfg, session } = await efrisQuerySession(config);
+    const mismatches = [];
+    for (let i = 0; i < docs.length; i += 50) {
+      const batch = docs.slice(i, i + 50).map(e => ({ invoiceNo: String(e.fdn), invoiceType: t117Type(e) }));
+      const r = await efrisSecure(eu, 'T117', batch, cfg.tin, cfg.deviceNo, session);
+      const { rc, rm } = efrisRcOf(r);
+      if (rc && rc !== '00') return res.json({ success: false, error: 'URA ' + rc + ': ' + rm });
+      const d = efrisContentJson(r, session);
+      for (const x of (Array.isArray(d) ? d : [])) {
+        const e = docs.find(y => String(y.fdn) === String(x.invoiceNo));
+        mismatches.push({ invoiceNo: String(x.invoiceNo || ''), invoiceType: String(x.invoiceType || ''), reference: e ? e.reference || '' : '', amount: e ? e.totalAmount : null });
+      }
+    }
+    console.log('   End-of-day check ' + day + ': ' + docs.length + ' document(s), ' + mismatches.length + ' not matching URA');
+    res.json({ success: true, date: day, checked: docs.length, mismatches });
+  } catch (e) {
+    res.json({ success: false, error: efrisFriendly(e, 'the day could not be checked with URA') });
+  }
+});
+// ── Branches (T138) ──
+// The branch this relay issues for, per TIN (one relay per shop or branch). Sales
+// (T109 sellerDetails.branchId) and stock movements (T131) carry it.
+const branchFile = tin => path.join(DATA_DIR, 'efris_branch_' + String(tin).replace(/[^0-9A-Za-z]/g, '') + '.json');
+function savedBranch(tin) { try { return JSON.parse(fs.readFileSync(branchFile(tin), 'utf8')) || {}; } catch (_) { return {}; } }
+app.post('/api/efris/branches', rateLimit(20), async (req, res) => {
+  const { config } = req.body || {};
+  if (!config || !config.tin) return res.status(400).json({ success: false, error: 'config.tin required' });
+  try {
+    const { eu, cfg, session } = await efrisQuerySession(config);
+    const r = await efrisSecure(eu, 'T138', {}, cfg.tin, cfg.deviceNo, session);
+    const { rc, rm } = efrisRcOf(r);
+    const d = efrisContentJson(r, session);
+    const list = Array.isArray(d) ? d : (d && (d.branches || d.records || d.list)) || [];
+    if (!list.length && rc && rc !== '00') return res.json({ success: false, error: 'URA ' + rc + ': ' + rm });
+    res.json({ success: true, branches: list.map(b => ({ branchId: String(b.branchId || ''), branchName: String(b.branchName || '') })).filter(b => b.branchId), current: savedBranch(cfg.tin) });
+  } catch (e) {
+    res.json({ success: false, error: efrisFriendly(e, 'the branch list could not be loaded') });
+  }
+});
+app.post('/api/efris/branch', (req, res) => {
+  const { tin, branchId, branchName } = req.body || {};
+  if (!/^\d{6,15}$/.test(String(tin || ''))) return res.status(400).json({ success: false, error: 'tin required' });
+  const id = String(branchId || '').trim();
+  if (id && !/^\d{1,20}$/.test(id)) return res.status(400).json({ success: false, error: 'That is not a URA branch id' });
+  if (!id) { try { fs.rmSync(branchFile(tin), { force: true }); } catch (_) {} return res.json({ success: true, branch: {} }); }
+  const b = { branchId: id, branchName: String(branchName || '').slice(0, 500), savedAt: new Date().toISOString() };
+  writeFileAtomic(branchFile(tin), JSON.stringify(b, null, 2));
+  console.log('   Branch for TIN ' + tin + ' set to ' + (b.branchName || id));
+  res.json({ success: true, branch: b });
+});
+// What URA's login said about this TIN (Settings shows it).
+app.get('/api/efris/login-flags', (req, res) => {
+  const tin = String(req.query.tin || '').trim();
+  if (!/^\d{6,15}$/.test(tin)) return res.status(400).json({ success: false, error: 'tin required' });
+  res.json({ success: true, flags: savedLoginFlags(tin) });
+});
+app.post('/api/efris/excise-duties', rateLimit(20), async (req, res) => {
+  const { config } = req.body || {};
+  if (!config || !config.tin) return res.status(400).json({ success: false, error: 'config.tin required' });
+  try {
+    const { eu, cfg, session } = await efrisQuerySession(config);
+    const list = await getExciseDutyList(cfg.tin, cfg.deviceNo, session, eu);
+    res.json({ success: true, duties: list.map(e => { const d = exciseDutyDetail(e.exciseDutyCode, list) || {};
+      return { code: String(e.exciseDutyCode || ''), name: String(e.goodService || ''), rateText: String(e.rateText || ''), leaf: String(e.isLeafNode) !== '0', rule: d.rule || '', rate: d.rate || '', unit: d.unit || '', currency: d.currency || '' }; }) });
+  } catch (e) {
+    res.json({ success: false, error: efrisFriendly(e, 'the excise duty list could not be loaded') });
+  }
+});
 app.post('/api/efris/register-goods', async (req, res) => {
-  const { tin, deviceNo, efrisPassword, mode, item } = req.body || {};
+  const { tin, deviceNo, efrisPassword, mode, item, update } = req.body || {};
   if (!tin || !deviceNo || !item) {
     return res.status(400).json({ success: false, error: 'tin, deviceNo and item are required' });
   }
+  // Sold by the piece as well as by the unit: both the piece unit and how many
+  // pieces make one unit are needed (URA havePieceUnit 101).
+  const piece = String(item.pieceUnit || '').trim().toUpperCase();
+  const pieceScaled = parseFloat(item.pieceScaled) || 0;
+  if (piece && !(pieceScaled > 0)) return res.json({ success: false, error: 'Enter how many pieces make one ' + (item.uom || 'unit') + ' (for example 24), or clear the piece unit.' });
   const eu = uraUrl(mode);
   try {
     let session = await getSession(tin, deviceNo, efrisPassword, eu, keyOverrideFrom(req.body));
@@ -4457,17 +4896,24 @@ app.post('/api/efris/register-goods', async (req, res) => {
       commodityCategoryId:   item.comCode || '',
       commodityCategoryName: item.comName || '',
       haveExciseTax:         item.excise === 'Yes' ? '101' : '102',
+      // URA 662: an excisable good needs its excise duty code (from T125).
+      exciseDutyCode:        item.excise === 'Yes' ? String(item.exciseCode || '').trim().toUpperCase() : '',
       description:           item.remarks || '',
       stockPrewarning:       '0',
       pricingMode:           '1',
-      havePieceUnit:         '102',
-      pieceUnit:             '',
-      packageScaledValue:    '',
-      scaledValue:           '',
+      // 101 registers a new good; 102 changes one already registered (price, name, unit).
+      operationType:         update ? '102' : '101',
+      havePieceUnit:         piece ? '101' : '102',
+      pieceMeasureUnit:      piece,
+      pieceUnitPrice:        piece ? String(parseFloat(item.piecePrice) || 0) : '',
+      packageScaledValue:    piece ? '1' : '',
+      pieceScaledValue:      piece ? String(pieceScaled) : '',
+      haveOtherUnit:         '102',
       discountTaxRate:       '',
     };
 
-    console.log(`\n📦 Registering goods with EFRIS T130: ${item.code} - ${item.name}`);
+    if (item.excise === 'Yes' && !t130Payload.exciseDutyCode) return res.json({ success: false, error: 'This item is marked as excisable. Choose its URA excise duty code in the Excise Duty Detail box, then register it again.' });
+    console.log(`\n📦 ${update ? 'Updating goods at URA (T130 operation 102)' : 'Registering goods with EFRIS T130'}: ${item.code} - ${item.name}`);
     console.log(`   Payload: goodsCode=${t130Payload.goodsCode}, categoryId=${t130Payload.commodityCategoryId}, measureUnit=${measureUnit}, price=${t130Payload.unitPrice}, currency=${t130Currency}, vatCat=${vatCat}, type=${goodsTypeCode}`);
 
     // T130 is a BATCH interface - payload must be an array even for a single item
@@ -4557,7 +5003,9 @@ app.post('/api/efris/register-goods', async (req, res) => {
     // registration fact, not a fixable payload error. Give a clear, actionable
     // message and flag it so the frontend can offer "register without excise".
     let exciseProblem = false;
-    if (!ok && (itemRc === '681' || /excise/i.test(itemRm || ''))) {
+    if (!ok && ['662', '663', '664', '665'].includes(String(itemRc))) {
+      itemRm = 'URA did not accept the excise duty code "' + (t130Payload.exciseDutyCode || '') + '" (' + itemRm + '). Pick the item\'s code from URA\'s excise duty list in the Excise Duty Detail box and register it again.';
+    } else if (!ok && (itemRc === '681' || /registered.*excise|excise.*registr/i.test(itemRm || ''))) {
       exciseProblem = true;
       itemRm = `This item is marked as excisable, but TIN ${tin} is not registered for Local Excise Duty in EFRIS, so URA will not accept it as an excise good. Either add Excise Duty to your URA registration, or turn off the excise flag on this item and register it as a normal VAT good.`;
     }
@@ -4648,7 +5096,7 @@ async function performInvoiceSubmissionInner(invoice, config, eu) {
   if (!session.aesKey) throw new Error('No AES key available to encrypt T109');
   try {
     const goodsMap = await getRegisteredGoodsMap(config.tin, config.deviceNo, session, eu);
-    annotateLinesWithRegisteredGoods(invoice, goodsMap);
+    annotateLinesWithRegisteredGoods(invoice, goodsMap, await exciseListFor(invoice, goodsMap, config.tin, config.deviceNo, session, eu));
   } catch (e) { console.log(`   goods-map annotate skipped: ${e.message}`); }
   // Seller details missing from this business's settings (URA rejects an empty email,
   // rc 1115): fill them from the taxpayer record URA returned at login.
@@ -4685,30 +5133,37 @@ async function performInvoiceSubmissionInner(invoice, config, eu) {
     try { contentStr = aesDecryptStr(t109.data.data.content, session.aesKey); }
     catch(e) { try { contentStr = Buffer.from(t109.data.data.content, 'base64').toString('utf8'); } catch(_) {} }
   }
-  let fdn = null, qrCode = null, antifakeCode = null, invoiceId = '', validationUrl = null;
+  let fdn = null, qrCode = null, antifakeCode = null, invoiceId = '', validationUrl = null, uraQrCode = '', uraIssued = '';
   try {
     if (contentStr) {
       const d = JSON.parse(contentStr);
       const bi = d.basicInformation || {};
+      // The issue time URA recorded (dd/MM/yyyy HH:mm:ss, Uganda time): printed so our
+      // copy shows the same time as URA's own document.
+      { const m = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/.exec(String(bi.issuedDate || '').trim());
+        if (m) uraIssued = new Date(Date.UTC(+m[3], +m[2] - 1, +m[1], +m[4] - 3, +m[5], +m[6])).toISOString(); }
       fdn = d.fdn || d.fiscalDocumentNumber || bi.invoiceNo || bi.fdn;
       antifakeCode = d.antiFakeCode || d.antifakeCode || bi.antifakeCode || bi.antiFakeCode;
       invoiceId = bi.invoiceId || bi.invoiceID || d.invoiceId || '';
-      const efrisPortal = config.mode === 'production'
-        ? 'https://efris.ura.go.ug/site_mobile/#/invoiceValidation'
-        : 'https://efristest.ura.go.ug/site_new/#/invoiceValidation';
+      const efrisPortal = validationBase(config.mode);
       validationUrl = (fdn && antifakeCode)
         ? `${efrisPortal}?invoiceNo=${encodeURIComponent(fdn)}&antiFakeCode=${encodeURIComponent(antifakeCode)}` : null;
+      // URA's own QR text (summary.qrCode) is kept as uraQrCode; receipts print the verification link.
+      uraQrCode = (d.summary && d.summary.qrCode) || d.qrCode || bi.qrCode || '';
       qrCode = d.qrCode || d.qrCodeBase64 || bi.qrCode || validationUrl || antifakeCode;
       console.log(`   T109 result - FDN: ${fdn}, antifakeCode: ${antifakeCode}`);
     }
   } catch(e) { console.log(`   T109 content parse error: ${e.message}`); }
   const ok = rc === '00' || !!fdn;
-  const issuedDate = new Date().toISOString();
+  const issuedDate = uraIssued || new Date().toISOString();
   if (ok) {
     try {
       appendSubmissionLog({
         id: crypto.randomUUID(), submittedAt: issuedDate, fdn, antifakeCode, validationUrl, tenantId: config._tenantId || undefined,
-        userId: config._userId || undefined, userName: config._userName || undefined,
+        userId: config._userId || undefined, userName: config._userName || undefined, ...(uraQrCode ? { uraQrCode } : {}),
+        ...(t109data.sellerDetails && t109data.sellerDetails.branchId ? { branchId: t109data.sellerDetails.branchId } : {}),
+        // Issued by the Offline Enabler: printed as "Mode: Offline".
+        ...(/^https?:\/\/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(eu || '') ? { viaEnabler: true } : {}),
         ...(invoice._debitOf ? { kind: 'debit-note', docType: 'Debit note', originalFdn: invoice._debitOf.oriInvoiceNo || '' } : {}),
         deviceNo: config.deviceNo, invoiceId, reference: invoice.Reference || invoice.reference || '',
         returnCode: rc, status: 'success', tin: config.tin,
@@ -4725,7 +5180,7 @@ async function performInvoiceSubmissionInner(invoice, config, eu) {
       });
     } catch(le) { console.log('Submission log write error:', le.message); }
   }
-  return { ok, fdn, qrCode, antifakeCode, validationUrl, deviceNo: config.deviceNo, issuedDate, invoiceId, returnCode: rc, returnMessage: rm };
+  return { ok, fdn, qrCode, uraQrCode, antifakeCode, validationUrl, deviceNo: config.deviceNo, issuedDate, invoiceId, returnCode: rc, returnMessage: rm };
 }
 
 app.post('/api/efris/submit-invoice', rateLimit(30), async (req, res) => {
@@ -4798,8 +5253,17 @@ app.post('/api/efris/submit-invoice', rateLimit(30), async (req, res) => {
           message: 'EFRIS did not answer in time, so it may already have this sale. It is saved and will be checked with EFRIS (by reference) before it is sent again.' });
       }
       console.log(`   ⚠ EFRIS unreachable (URA${config.enablerUrl ? ' + Enabler' : ''}) - queued offline (${offlineId})`);
+      const overdue = queueOverdue(queueOfBusiness(req)).length;
       return res.json({ success: true, queued: true, offline: true, offlineId, reference: invoice.Reference || '',
-        message: 'Saved offline - EFRIS is unreachable. It will be submitted automatically when the connection returns.' });
+        message: 'Saved offline - EFRIS is unreachable. It will be submitted automatically when the connection returns.',
+        ...(overdue ? { overdue, warning: overdueWarning(overdue) } : {}) });
+    }
+    // URA already has this reference (sent before, maybe from another till): show its FDN, never a second one.
+    if (!result.ok && String(result.returnCode) === '2254' && invoice.Reference) {
+      try {
+        const found = await findIssuedByReference({ saleAt, tenantId: config._tenantId || '', invoice }, config, String(invoice.Reference).trim());
+        if (found) { console.log(`   ${invoice.Reference} is already at URA (FDN ${found.fdn}) - not issued again`); result = found; }
+      } catch (le) { console.log('   Could not look up ' + invoice.Reference + ' at URA: ' + le.message); }
     }
     return res.json(result.ok
       ? { success: true, fdn: result.fdn, qrCode: result.qrCode, antifakeCode: result.antifakeCode, validationUrl: result.validationUrl, deviceNo: result.deviceNo, issuedDate: result.issuedDate, invoiceId: result.invoiceId, viaEnabler: !!result.viaEnabler, returnCode: result.returnCode, returnMessage: result.returnMessage }
@@ -4852,7 +5316,8 @@ app.post('/api/efris/verify-tin', async (req, res) => {
       try {
         const s = aesDecryptStr(t119.data.data.content, session.aesKey);
         info = JSON.parse(s);
-        console.log('[T119 taxpayer fields]', JSON.stringify(info));
+        // Field names only: the values are a buyer's personal details (names, phone, email).
+        console.log('[T119 taxpayer fields] ' + Object.keys((info && (info.taxpayer || info)) || {}).join(', '));
       } catch(e) {}
     }
     const ok = rc === '00';
@@ -4975,6 +5440,67 @@ app.post('/api/efris/test/rotate-key', rateLimit(6), async (req, res) => {
 });
 
 // ── Credit Note (T108) ────────────────────────────────────────
+// ── Credit note limits, checked before URA sees it ──
+// URA accepts a credit note only within creditNoteMaximumInvoicingDays (T115,
+// 90 by default) of the original, and never for more than is left on it. The
+// original and the earlier credit notes come from the history on this computer;
+// when the original is not there, URA does the checking.
+const CN_REASON_TEXT = { '101': 'Return of products (expiry or damage)', '102': 'Cancellation of purchase', '103': 'Invoice amount wrongly stated', '104': 'Partial or complete waive off', '105': 'Other' };
+function cnMaxDays(tin) {
+  const d = savedDictionary(tin) || {};
+  const v = parseInt((d.creditNoteMaximumInvoicingDays || {}).value, 10);
+  return v > 0 ? v : 90;
+}
+function cnLiveOn(log, tin, fdn) {
+  return log.filter(e => e.kind === 'credit-note' && String(e.originalFdn || '') === String(fdn) && String(e.tin || tin) === String(tin)
+    && !e.cancelled && !['103', '104'].includes(String(e.approveStatus || '')));
+}
+// URA takes one credit note application per invoice at a time: one still waiting
+// for approval (sent, no FDN, not approved, rejected or cancelled) blocks the next.
+function cnPendingProblem(originalFDN, tin) {
+  // URA 317: no credit note on an invoice that has a debit note (until its cancellation is approved).
+  const dns = readSubmissionLog().filter(e => e.kind === 'debit-note' && e.status === 'success' && String(e.originalFdn || '') === String(originalFDN) && String(e.tin || tin) === String(tin) && !e.cancelled);
+  if (dns.length) {
+    const d = dns[dns.length - 1];
+    return 'URA does not accept a credit note on ' + originalFDN + ' because it has a debit note (' + (d.reference || d.fdn) + ')' + (d.cancelRequested ? ', whose cancellation is still waiting for URA' : '') + '. Cancel the debit note first (Documents) and wait for URA to approve the cancellation. Nothing was sent.';
+  }
+  const wait = cnLiveOn(readSubmissionLog(), tin, originalFDN).filter(e => !e.fdn && String(e.approveStatus || '') !== '101');
+  if (!wait.length) return null;
+  const e = wait[wait.length - 1];
+  return 'A credit note on ' + originalFDN + ' (' + (e.reference || 'sent ' + eatParts(Date.parse(e.submittedAt || '') || Date.now()).date) + ') is still waiting for URA approval. URA takes one at a time: wait until URA approves or rejects it (Documents shows the status), or cancel that application, then send this one. Nothing was sent.';
+}
+function cnLimitProblem(originalFDN, tin, goodsDetails, now = Date.now()) {
+  const log = readSubmissionLog();
+  const orig = log.find(e => e.status === 'success' && e.kind !== 'credit-note' && String(e.fdn || '') === String(originalFDN) && String(e.tin || tin) === String(tin));
+  if (!orig) return null;
+  const maxDays = cnMaxDays(tin);
+  const issued = Date.parse(orig.submittedAt || '');
+  if (issued && now - issued > maxDays * 86400000) {
+    return 'URA accepts a credit note only within ' + maxDays + ' days of the original invoice. ' + originalFDN + ' was issued on ' + eatParts(issued).date + '. For an older invoice, speak to URA.';
+  }
+  const prior = cnLiveOn(log, tin, originalFDN);
+  const lines = (goodsDetails || []).filter(g => String(g.discountFlag) !== '0');
+  const thisGross = lines.reduce((s, g) => s + Math.abs(parseFloat(g.total) || 0), 0);
+  const priorGross = prior.reduce((s, e) => s + Math.abs(parseFloat(e.totalAmount) || 0), 0);
+  const origGross = Math.abs(parseFloat(orig.totalAmount) || 0);
+  if (origGross && priorGross + thisGross > origGross + 0.5) {
+    const left = Math.max(0, origGross - priorGross);
+    const m = v => v.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    return 'This credit note (' + m(thisGross) + ') is more than is left to credit on ' + originalFDN + ': ' + m(left) + ' of ' + m(origGross) + ' is left after earlier credit notes (including any still waiting for URA).';
+  }
+  if (!Array.isArray(orig.lines) || !orig.lines.length) return null;
+  for (const g of lines) {
+    const on = parseInt(g.orderNumber, 10);
+    const o = orig.lines.find(l => l.orderNumber === on);
+    if (!o) continue;
+    const price = Math.abs(parseFloat(g.unitPrice) || 0), qty = Math.abs(parseFloat(g.qty) || 0);
+    if (price > Math.abs(o.unitPrice) + 0.005) return '"' + (o.name || g.item) + '": the credit note price ' + price + ' is higher than the original price ' + o.unitPrice + '.';
+    const credited = prior.reduce((s, e) => s + (Array.isArray(e.lines) ? e.lines.filter(l => l.orderNumber === on).reduce((a, l) => a + Math.abs(l.qty || 0), 0) : 0), 0);
+    const left = Math.abs(o.qty) - credited;
+    if (qty > left + 1e-9) return '"' + (o.name || g.item) + '": ' + qty + ' to credit, but only ' + Math.max(0, left) + ' of ' + Math.abs(o.qty) + ' is left after earlier credit notes.';
+  }
+  return null;
+}
 app.post('/api/efris/credit-note', rateLimit(30), async (req, res) => {
   const { originalFDN, originalInvoiceId, reasonCode, reason, remarks, referenceNo, items, invoice, config } = req.body || {};
   if (!originalFDN || !config || !config.tin) return res.status(400).json({ success: false, error: 'originalFDN and config required' });
@@ -5004,7 +5530,7 @@ app.post('/api/efris/credit-note', rateLimit(30), async (req, res) => {
     // credit note with "unit of measure does not match goods maintenance".
     try {
       const goodsMap = await getRegisteredGoodsMap(cnCfg.tin, cnCfg.deviceNo, session, eu);
-      annotateLinesWithRegisteredGoods(cnInvoice, goodsMap);
+      annotateLinesWithRegisteredGoods(cnInvoice, goodsMap, await exciseListFor(cnInvoice, goodsMap, cnCfg.tin, cnCfg.deviceNo, session, eu));
     } catch (e) { console.log(`   CN goods-map annotate skipped: ${e.message}`); }
     const t108data = buildT108(cnInvoice, cnCfg, {
       oriInvoiceId: originalInvoiceId,
@@ -5021,23 +5547,13 @@ app.post('/api/efris/credit-note', rateLimit(30), async (req, res) => {
       t108data.goodsDetails.forEach((g, j) => { g.orderNumber = String(+items[j].orderNumber); });
     }
     t108data.goodsDetails.forEach(g => console.log(`   CN line: #${g.orderNumber} item="${g.item}" itemCode="${g.itemCode}" uom="${g.unitOfMeasure}" qty=${g.qty} total=${g.total}`));
+    { const why = cnLimitProblem(originalFDN, config.tin, t108data.goodsDetails) || cnPendingProblem(originalFDN, config.tin); if (why) { console.log('   Credit note not sent: ' + why); return res.json({ success: false, limit: true, error: why }); } }
     // Per Interface Design v24.0.1, the Credit-Note Application interface is T110
-    // (T108 is a query). Our payload is already a T110 application (reasonCode,
-    // applicationTime, invoiceApplyCategoryCode). Send T110; if this EFRIS build
-    // doesn't recognise it (older sandbox), fall back to T108 which worked before.
-    const cnSubmit = async (code) => {
-      const r = await efrisSecure(eu, code, t108data, cnCfg.tin, cnCfg.deviceNo, session);
-      const c = r.data && r.data.returnStateInfo ? r.data.returnStateInfo.returnCode : null;
-      const m = r.data && r.data.returnStateInfo ? r.data.returnStateInfo.returnMessage : '';
-      return { r, c, m };
-    };
-    let iface = 'T110';
-    let { r: t108, c: rc, m: rm } = await cnSubmit('T110');
-    // "interface not found / illegal" style failures → retry as T108.
-    if (rc !== '00' && /interface|not\s*exist|not\s*found|illegal|no such|不存在/i.test(rm || '')) {
-      console.log(`   T110 rejected (${rc} ${rm}) - falling back to T108`);
-      const fb = await cnSubmit('T108'); t108 = fb.r; rc = fb.c; rm = fb.m; iface = 'T108';
-    }
+    // (T108 only looks up an invoice, so it can never create a credit note).
+    const iface = 'T110';
+    const t108 = await efrisSecure(eu, iface, t108data, cnCfg.tin, cnCfg.deviceNo, session);
+    const rc = t108.data && t108.data.returnStateInfo ? t108.data.returnStateInfo.returnCode : null;
+    const rm = t108.data && t108.data.returnStateInfo ? t108.data.returnStateInfo.returnMessage : '';
     console.log(`   Credit note submitted via ${iface}: rc=${rc} ${rm}`);
     let fdn = null, cnRef = null, antifakeCode = null, invoiceId = '', validationUrl = null;
     if (t108.data && t108.data.data && t108.data.data.content) {
@@ -5049,13 +5565,12 @@ app.post('/api/efris/credit-note', rateLimit(30), async (req, res) => {
         antifakeCode = d.antiFakeCode || d.antifakeCode || bi.antifakeCode || bi.antiFakeCode || null;
         invoiceId = d.invoiceId || d.invoiceID || bi.invoiceId || '';
         cnRef = d.referenceNo || referenceNo || null;
-        const efrisPortal = config.mode === 'production'
-          ? 'https://efris.ura.go.ug/site_mobile/#/invoiceValidation'
-          : 'https://efristest.ura.go.ug/site_new/#/invoiceValidation';
+        const efrisPortal = validationBase(config.mode);
         validationUrl = (fdn && antifakeCode)
           ? `${efrisPortal}?invoiceNo=${encodeURIComponent(fdn)}&antiFakeCode=${encodeURIComponent(antifakeCode)}`
           : null;
-        console.log('   T108 credit note:', JSON.stringify(d));
+        // Not the whole answer: it carries the buyer's name and contact details.
+        console.log('   Credit note answer: FDN ' + (fdn || '-') + ', reference ' + ((d.basicInformation || {}).referenceNo || d.referenceNo || '-'));
       } catch(e) { console.log('   T108 parse error:', e.message); }
     }
     const ok = rc === '00' || !!fdn;
@@ -5067,6 +5582,10 @@ app.post('/api/efris/credit-note', rateLimit(30), async (req, res) => {
           id: crypto.randomUUID(), kind: 'credit-note', docType: 'Credit note', submittedAt: new Date().toISOString(), fdn: fdn || '', antifakeCode: antifakeCode || '', validationUrl,
           tenantId: reqTenant(req) || undefined, deviceNo: cnCfg.deviceNo, invoiceId, reference: cnRef || t108data.sellersReferenceNo || '',
           originalFdn: originalFDN, returnCode: rc, status: 'success', tin: config.tin,
+          // Printed on the credit note (VAT Act: the reason and the original invoice).
+          reasonCode: String(reasonCode || '102'), reason: String(reason || CN_REASON_TEXT[String(reasonCode || '102')] || ''),
+          // Kept so the next credit note on the same invoice knows what is left.
+          lines: (t108data.goodsDetails || []).filter(g => String(g.discountFlag) !== '0').map(g => ({ name: g.item || '', orderNumber: parseInt(g.orderNumber, 10), qty: Math.abs(parseFloat(g.qty) || 0), unitPrice: Math.abs(parseFloat(g.unitPrice) || 0) })),
           customerName: t108data.buyerDetails ? (t108data.buyerDetails.buyerLegalName || t108data.buyerDetails.buyerTin || '') : '',
           totalAmount: -Math.abs(parseFloat(t108data.summary && t108data.summary.grossAmount) || 0),
           currency: t108data.currency || 'UGX', invoiceKind: t108data.basicInformation ? t108data.basicInformation.invoiceKind || '' : '', mode: config.mode || 'sandbox',
@@ -5179,9 +5698,7 @@ async function t111Query(config, f) {
 // URA's portal link for a fiscal document (what receipts print as their QR code).
 function efrisValidationUrl(mode, fdn, antifakeCode) {
   if (!fdn || !antifakeCode) return null;
-  const portal = mode === 'production'
-    ? 'https://efris.ura.go.ug/site_mobile/#/invoiceValidation'
-    : 'https://efristest.ura.go.ug/site_new/#/invoiceValidation';
+  const portal = validationBase(mode);
   return `${portal}?invoiceNo=${encodeURIComponent(fdn)}&antiFakeCode=${encodeURIComponent(antifakeCode)}`;
 }
 // URA T111 times are dd/MM/yyyy HH:mm:ss in Uganda time; ISO, or '' when unreadable.
@@ -5510,44 +6027,55 @@ app.post('/api/efris/credit-notes/void', rateLimit(30), async (req, res) => {
   }
 });
 
-// Cancel an ISSUED (approved) credit note (T114, category 104).
-app.post('/api/efris/credit-notes/cancel', rateLimit(30), async (req, res) => {
-  const { config, oriInvoiceId, invoiceNo, reasonCode, reason } = req.body || {};
-  if (!config || !config.tin || !oriInvoiceId || !invoiceNo) return res.status(400).json({ success: false, error: 'config, oriInvoiceId (the original invoice\'s EFRIS id) and invoiceNo (the credit note FDN) are required' });
-  const code = String(reasonCode || '');
-  if (!['101', '102', '103'].includes(code)) return res.status(400).json({ success: false, error: 'reasonCode must be 101 (buyer refused), 102 (not delivered) or 103 (other)' });
-  if (code === '103' && !String(reason || '').trim()) return res.status(400).json({ success: false, error: 'Give a reason when the reason is "Other"' });
-  try {
-    const { eu, cfg, session } = await efrisQuerySession(config);
-    const body = { oriInvoiceId: String(oriInvoiceId), invoiceNo: String(invoiceNo), reason: String(reason || ''), reasonCode: code, invoiceApplyCategoryCode: '104', attachmentList: [] };
-    const r = await efrisSecure(eu, 'T114', body, cfg.tin, cfg.deviceNo, session);
-    const { rc, rm } = efrisRcOf(r);
-    console.log(`   T114 cancel credit note ${invoiceNo}: rc=${rc} ${rm}`);
-    if (rc === '00') {
-      updateSubmissionLog(log => {
-        const e = log.find(x => x.kind === 'credit-note' && String(x.tin || '') === String(config.tin) && String(x.fdn || '') === String(invoiceNo));
-        if (!e) return false;
-        e.cancelled = true; e.cancelledAt = new Date().toISOString();
-      });
+// Cancel an ISSUED (approved) credit note (T114, category 104), or ask URA to
+// cancel an issued debit note (T114, category 103: a request URA must approve).
+function t114Cancel(kind) {
+  const isDn = kind === 'debit-note', what = isDn ? 'debit note' : 'credit note';
+  return async (req, res) => {
+    const { config, oriInvoiceId, invoiceNo, reasonCode, reason } = req.body || {};
+    if (!config || !config.tin || !oriInvoiceId || !invoiceNo) return res.status(400).json({ success: false, error: 'config, oriInvoiceId (the original invoice\'s EFRIS id) and invoiceNo (the ' + what + ' FDN) are required' });
+    const code = String(reasonCode || '');
+    if (!['101', '102', '103'].includes(code)) return res.status(400).json({ success: false, error: 'reasonCode must be 101 (buyer refused), 102 (not delivered) or 103 (other)' });
+    if (code === '103' && !String(reason || '').trim()) return res.status(400).json({ success: false, error: 'Give a reason when the reason is "Other"' });
+    try {
+      const { eu, cfg, session } = await efrisQuerySession(config);
+      const body = { oriInvoiceId: String(oriInvoiceId), invoiceNo: String(invoiceNo), reason: String(reason || ''), reasonCode: code, invoiceApplyCategoryCode: isDn ? '103' : '104', attachmentList: [] };
+      const r = await efrisSecure(eu, 'T114', body, cfg.tin, cfg.deviceNo, session);
+      const { rc, rm } = efrisRcOf(r);
+      console.log(`   T114 cancel ${what} ${invoiceNo}: rc=${rc} ${rm}`);
+      if (rc === '00') {
+        updateSubmissionLog(log => {
+          const e = log.find(x => x.kind === kind && String(x.tin || '') === String(config.tin) && String(x.fdn || '') === String(invoiceNo));
+          if (!e) return false;
+          if (isDn) { e.cancelRequested = true; e.cancelRequestedAt = new Date().toISOString(); }
+          else { e.cancelled = true; e.cancelledAt = new Date().toISOString(); }
+        });
+      }
+      res.json(rc === '00' ? { success: true, returnCode: rc, returnMessage: rm, ...(isDn ? { pendingApproval: true } : {}) } : { success: false, returnCode: rc, returnMessage: rm, error: 'URA ' + rc + ': ' + rm });
+    } catch (e) {
+      logger.error(isDn ? 'debit-notes/cancel failed' : 'credit-notes/cancel failed', { message: redactSecrets(e && e.message, req) });
+      res.json({ success: false, error: efrisFriendly(e, 'the ' + what + ' was not cancelled') });
     }
-    res.json(rc === '00' ? { success: true, returnCode: rc, returnMessage: rm } : { success: false, returnCode: rc, returnMessage: rm, error: 'URA ' + rc + ': ' + rm });
-  } catch (e) {
-    logger.error('credit-notes/cancel failed', { message: redactSecrets(e && e.message, req) });
-    res.json({ success: false, error: efrisFriendly(e, 'the credit note was not cancelled') });
-  }
-});
+  };
+}
+app.post('/api/efris/credit-notes/cancel', rateLimit(30), t114Cancel('credit-note'));
+app.post('/api/efris/debit-notes/cancel', rateLimit(30), t114Cancel('debit-note'));
 
 // ── Debit Note (T109, invoiceType 4) ──────────────────────────
 // Same flow as submit-invoice, but the T109 points at the ORIGINAL invoice's EFRIS
 // id. Not queued offline: a debit note is raised at the desk and can be resent.
 app.post('/api/efris/debit-note', rateLimit(30), async (req, res) => {
-  const { invoice, config, originalFDN, originalInvoiceId, reason } = req.body || {};
+  const { invoice, config, originalFDN, originalInvoiceId, reason, reasonCode } = req.body || {};
   if (!invoice || !config || !config.tin) return res.status(400).json({ success: false, error: 'Missing invoice or config.tin' });
   if (!originalInvoiceId) return res.status(400).json({ success: false, error: 'A debit note needs the original invoice\'s EFRIS Invoice ID. Open the original from Documents, or enter its FDN so it can be looked up.' });
   if (!(invoice.Lines || []).length) return res.json({ success: false, error: 'The debit note has no line items. Add the extra goods or charges being billed.' });
   config._tenantId = reqTenant(req);
   { const a = actor(req); config._userId = a.userId || ''; config._userName = a.userName || ''; }
-  const dn = { ...invoice, _debitOf: { oriInvoiceId: String(originalInvoiceId), oriInvoiceNo: String(originalFDN || '') } };
+  if (String(reasonCode || '') === '103' && !String(reason || '').trim()) return res.json({ success: false, error: 'Reason "Other" needs a short explanation for URA.' });
+  // URA 306: no debit note on an invoice that has a credit note (waiting or approved).
+  { const cns = originalFDN ? cnLiveOn(readSubmissionLog(), config.tin, originalFDN) : [];
+    if (cns.length) return res.json({ success: false, limit: true, error: 'URA does not accept a debit note on ' + originalFDN + ' because it has a credit note (' + cns.map(e => e.reference || e.fdn || 'credit note').join(', ') + '). Cancel that credit note first, or issue the extra charge as a new invoice. Nothing was sent.' }); }
+  const dn = { ...invoice, _debitOf: { oriInvoiceId: String(originalInvoiceId), oriInvoiceNo: String(originalFDN || ''), reasonCode: String(reasonCode || '101'), reason: String(reason || '') } };
   delete dn.IsRefund; delete dn.isRefund;
   if (reason && !dn.Notes) dn.Notes = String(reason);
   try {
@@ -5802,6 +6330,16 @@ app.post('/api/efris/stock-in', rateLimit(30), async (req, res) => {
   try {
     let session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
     if (!session.aesKey) throw new Error('No AES key for T131');
+    // Each line's unit is the one the good was registered with (T127), never a guess.
+    try {
+      const goodsMap = await getRegisteredGoodsMap(config.tin, config.deviceNo, session, eu);
+      for (const it of items) {
+        const g = goodsMap[String(it.goodsCode || it.itemCode || '').trim().toUpperCase()];
+        if (g && g.measureUnit) it.measureUnit = g.measureUnit;
+      }
+    } catch (e) { console.log('   stock-in unit lookup skipped: ' + e.message); }
+    const noUnit = items.filter(it => !String(it.measureUnit || '').trim()).map(it => it.goodsCode || it.itemCode || '?');
+    if (noUnit.length) return res.json({ success: false, error: 'No unit of measure is known for ' + noUnit.join(', ') + '. Register the item with URA first (Goods), then record the stock-in.' });
     // EFRIS T131 requires the header wrapped in `goodsStockIn` and items in
     // `goodsStockInItem`. operationType lives ONLY in the header (101 = stock-in).
     // A flat operationType at the root is why rc 2076 ("operationType cannot be
@@ -5816,7 +6354,7 @@ app.post('/api/efris/stock-in', rateLimit(30), async (req, res) => {
         stockInType:       stockInType || '104',
         productionBatchNo: productionBatchNo || '',
         productionDate:    productionDate || '',
-        branchId:          branchId || '',
+        branchId:          branchId || savedBranch(config.tin).branchId || '',
         invoiceNo:         '',
         isCheckBatchNo:    '',
         rollBackIfError:   '1',
@@ -5824,7 +6362,7 @@ app.post('/api/efris/stock-in', rateLimit(30), async (req, res) => {
       },
       goodsStockInItem: items.map(item => ({
         goodsCode:   String(item.goodsCode || item.itemCode || ''),
-        measureUnit: (item.measureUnit || 'PS').toUpperCase(),
+        measureUnit: String(item.measureUnit).toUpperCase(),
         quantity:    String(item.quantity || 1),
         unitPrice:   String(item.unitPrice || 0),
         remarks:     '',
@@ -5886,6 +6424,15 @@ app.post('/api/efris/stock-adjust', async (req, res) => {
   try {
     let session = await getSession(config.tin, config.deviceNo, config.efrisPassword, eu, keyOverrideFrom(config));
     if (!session.aesKey) throw new Error('No AES key for stock adjust');
+    try {
+      const goodsMap = await getRegisteredGoodsMap(config.tin, config.deviceNo, session, eu);
+      for (const it of items) {
+        const g = goodsMap[String(it.itemCode || it.goodsCode || '').trim().toUpperCase()];
+        if (g && g.measureUnit) it.measureUnit = g.measureUnit;
+      }
+    } catch (e) { console.log('   stock-adjust unit lookup skipped: ' + e.message); }
+    const noUnit = items.filter(it => !String(it.measureUnit || '').trim()).map(it => it.itemCode || it.goodsCode || '?');
+    if (noUnit.length) return res.json({ success: false, error: 'No unit of measure is known for ' + noUnit.join(', ') + '. Register the item with URA first (Goods), then adjust its stock.' });
     // Stock adjustment is the SAME T131 interface with operationType 102 (decrease)
     // plus an adjustType. Same goodsStockIn/goodsStockInItem wrapper as stock-in -
     // the old flat payload to "T132" caused rc 2066 "Illegal json format".
@@ -5897,14 +6444,14 @@ app.post('/api/efris/stock-adjust', async (req, res) => {
         adjustType:       adjustType || '102',
         remarks:          remarks || '',
         stockInDate:      (adjustDate || eatToday()).slice(0,10),
-        branchId:         branchId || '',
+        branchId:         branchId || savedBranch(config.tin).branchId || '',
         invoiceNo:        '',
         rollBackIfError:  '1',
         goodsTypeCode:    '',
       },
       goodsStockInItem: items.map(item => ({
         goodsCode:   String(item.itemCode || item.goodsCode || ''),
-        measureUnit: (item.measureUnit || 'PS').toUpperCase(),
+        measureUnit: String(item.measureUnit).toUpperCase(),
         quantity:    String(item.quantity || 1),
         unitPrice:   String(item.unitPrice || 0),
         remarks:     '',
@@ -6468,7 +7015,8 @@ app.get('/api/connectivity', async (req, res) => {
   const key = mode + '|' + enablerUrl + '|' + enablerMode;
   const now = Date.now();
   if (_connCache.data && _connCache.key === key && (now - _connCache.ts) < 15000) {
-    return res.json({ ..._connCache.data, cached: true, pending: loadQueue().filter(e => e.status === 'pending').length });
+    const q = queueOfBusiness(req);
+    return res.json({ ..._connCache.data, cached: true, pending: q.filter(e => e.status === 'pending').length, overdue: queueOverdue(q).length });
   }
   const uraPing = uraHost(mode);
   const [ura, enabler] = await Promise.all([
@@ -6477,7 +7025,8 @@ app.get('/api/connectivity', async (req, res) => {
   ]);
   const data = { success: true, ura, enabler, enablerMode, mode };
   _connCache = { ts: now, key, data };
-  res.json({ ...data, pending: loadQueue().filter(e => e.status === 'pending').length });
+  const q = queueOfBusiness(req);
+  res.json({ ...data, pending: q.filter(e => e.status === 'pending').length, overdue: queueOverdue(q).length });
 });
 
 // Fetch UGX exchange rates (1 <CUR> = N UGX), cached 1h. Reusable server-side.
@@ -6493,6 +7042,19 @@ async function getFxRates() {
     while ((m = re.exec(xml)) !== null) { const v = parseFloat(m[2]); if (v > 0) { rates[m[1]] = v; n++; } }
     if (n) sources.push('Bank of Uganda');
   } catch (e) { console.log('FX: BOU source failed - ' + e.message); }
+  // Frankfurter (open source, rates published by central banks, incl. the Central
+  // Bank of Kenya for UGX): one EUR-based list; X->UGX = (EUR->UGX) / (EUR->X).
+  if (!Object.keys(rates).length) {
+    try {
+      const arr = JSON.parse(await _httpGet('https://api.frankfurter.dev/v2/rates?base=EUR'));
+      const byQ = {}; for (const r of (Array.isArray(arr) ? arr : [])) if (r && r.quote && r.rate > 0) byQ[String(r.quote).toUpperCase()] = parseFloat(r.rate);
+      const eurUgx = byQ.UGX;
+      if (eurUgx > 0) {
+        for (const code in byQ) if (code !== 'UGX') rates[code] = Math.round((eurUgx / byQ[code]) * 10000) / 10000;
+        sources.push('Frankfurter (central banks)');
+      }
+    } catch (e) { console.log('FX: Frankfurter source failed - ' + e.message); }
+  }
   if (!Object.keys(rates).length) {
     try {
       const txt = await _httpGet('https://open.er-api.com/v6/latest/UGX');
@@ -6832,6 +7394,8 @@ app.post('/api/efris/search-goods', async (req, res) => {
     // field, so an import can seed the Manager opening balance from it. EFRIS
     // naming varies by version; take the first present numeric candidate.
     for (const it of items) { const n = goodsStockOf(it); if (n != null) it.currentStock = n; }
+    // Service or goods, from URA's commodity list (the page falls back to the segment).
+    for (const it of items) { const sv = commodityIsService(it.commodityCategoryCode || it.commodityCategoryId); if (sv !== null) it.isService = sv; }
     // Log each record's type/unit so goods-vs-service classification can be verified.
     for (const it of items) { const seg = parseInt(String(it.commodityCategoryCode||'').slice(0,2),10); console.log(`     • ${it.goodsCode||'?'}  cat=${it.commodityCategoryCode} unit=${it.measureUnit} (${seg>=70&&seg<=94?'Service':'Goods'})`); }
     // Receipt-time currency conversion: the good stays priced in its ORIGINAL
@@ -6872,8 +7436,23 @@ app.post('/api/efris/search-goods', async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 const SUBMISSION_LOG_FILE = path.join(DATA_DIR, 'submission_log.json');
 
-// Keep about a year of a busy till's documents (the Z report and Documents read it).
+// Keep about a year of a busy till's documents in the working file (the Z report
+// and Documents read it). Older entries are never dropped: the VAT Act asks for
+// six years of records, so they move to data/archive/submission_log_<year>.json.
 const SUBMISSION_LOG_MAX = 20000;
+const ARCHIVE_DIR = path.join(DATA_DIR, 'archive');
+// Append entries to the yearly archive files (by the year each was made).
+function archiveByYear(prefix, entries, yearOf) {
+  const byYear = new Map();
+  for (const e of entries) { const y = yearOf(e) || 'unknown'; if (!byYear.has(y)) byYear.set(y, []); byYear.get(y).push(e); }
+  for (const [y, list] of byYear) {
+    const f = path.join(ARCHIVE_DIR, prefix + '_' + y + '.json');
+    let cur = [];
+    try { const r = readJsonDurable(f, { backup: true }).value; if (Array.isArray(r)) cur = r; } catch (_) {}
+    writeFileAtomic(f, JSON.stringify(cur.concat(list)), { backup: true });
+  }
+}
+const yearOfEntry = e => String(e.submittedAt || e.createdAt || '').slice(0, 4);
 // ── Per-business view of the submission log ──
 // Several businesses (Manager files) can share one relay and even one TIN, so
 // each entry records the business that created it (tenantId, the request's
@@ -6940,17 +7519,11 @@ function markUnlinked(e) { return e.tenantId ? e : Object.assign({}, e, { unlink
 // Atomic write: temp file then rename, so a crash or a reader never sees a half-
 // written file. Synchronous on purpose: a read-change-write built on it runs to the
 // end before any other request's, so writers cannot overwrite each other.
-function writeFileAtomic(file, data) {
-  const tmp = file + '.' + process.pid + '.tmp';
-  try { fs.writeFileSync(tmp, data); }
-  catch (e) { try { fs.rmSync(tmp, { force: true }); } catch (_) {} throw e; }
-  try { fs.renameSync(tmp, file); }
-  catch (e) {
-    // Windows: antivirus/indexer can hold the target open for a moment; write in place.
-    try { fs.writeFileSync(file, data); } finally { try { fs.rmSync(tmp, { force: true }); } catch (_) {} }
-  }
-}
-function readSubmissionLog() { try { const l = JSON.parse(fs.readFileSync(SUBMISSION_LOG_FILE, 'utf8')); return Array.isArray(l) ? l : []; } catch (_) { return []; } }
+// Flushed to disk before it replaces the old copy (a power cut must not leave a
+// file of zero bytes). opts.backup also keeps <file>.bak for damage recovery.
+function writeFileAtomic(file, data, opts) { writeDurable(file, data, opts || {}); }
+// A damaged log is moved aside (kept as .damaged-<time>), never overwritten.
+function readSubmissionLog() { try { const l = readJsonDurable(SUBMISSION_LOG_FILE).value; return Array.isArray(l) ? l : []; } catch (_) { return []; } }
 // The ONE writer of the submission log: every change (new submission, Manager-only
 // row, link, delete, URA import) goes through here. fn changes the array in place
 // (or returns a new one); returning false means nothing to save.
@@ -6959,7 +7532,10 @@ function updateSubmissionLog(fn) {
   const out = fn(log);
   if (out === false) return false;
   if (Array.isArray(out)) log = out;
-  if (log.length > SUBMISSION_LOG_MAX) log = log.slice(0, SUBMISSION_LOG_MAX);
+  if (log.length > SUBMISSION_LOG_MAX) {
+    try { archiveByYear('submission_log', log.slice(SUBMISSION_LOG_MAX), yearOfEntry); log = log.slice(0, SUBMISSION_LOG_MAX); }
+    catch (e) { console.log('   ⚠ Could not archive older history (kept in the working file): ' + e.message); }
+  }
   writeFileAtomic(SUBMISSION_LOG_FILE, JSON.stringify(log, null, 2));
   return true;
 }
@@ -7005,14 +7581,28 @@ app.post('/api/receipt-snapshot', (req, res) => {
   const prev = map[String(key)];
   if (prev && !snapVisible(req, prev, true)) return res.status(403).json({ success: false, error: 'You do not have access to this business' });
   map[String(key)] = { query: String(query), savedAt: Date.now(), tenantId: reqTenant(req) || undefined, ...actor(req) };
-  // Keep the most recent 1000 snapshots.
+  // Keep the most recent 5000 here; older ones move to the yearly archive (still reprintable).
   const keys = Object.keys(map);
-  if (keys.length > 1000) keys.sort((a, b) => (map[a].savedAt || 0) - (map[b].savedAt || 0)).slice(0, keys.length - 1000).forEach(k => delete map[k]);
+  if (keys.length > 5000) {
+    const old = keys.sort((a, b) => (map[a].savedAt || 0) - (map[b].savedAt || 0)).slice(0, keys.length - 5000);
+    try { archiveByYear('receipt_snapshots', old.map(k => ({ key: k, ...map[k] })), x => new Date(x.savedAt || 0).getFullYear() || 'unknown'); old.forEach(k => delete map[k]); }
+    catch (e) { console.log('   ⚠ Could not archive older printable copies: ' + e.message); }
+  }
   writeFileAtomic(RECEIPT_SNAP_FILE, JSON.stringify(map));
   res.json({ success: true });
 });
+// A copy that moved to the archive (newest year first).
+function archivedSnap(key) {
+  let files = [];
+  try { files = fs.readdirSync(ARCHIVE_DIR).filter(f => /^receipt_snapshots_.*\.json$/.test(f)).sort().reverse(); } catch (_) { return null; }
+  for (const f of files) {
+    try { const list = readJsonDurable(path.join(ARCHIVE_DIR, f), { backup: true }).value; const hit = Array.isArray(list) && list.find(x => x.key === key); if (hit) return hit; } catch (_) {}
+  }
+  return null;
+}
 app.get('/api/receipt-snapshot', (req, res) => {
-  const hit = _readSnaps()[String(req.query.key || '')];
+  const key = String(req.query.key || '');
+  const hit = _readSnaps()[key] || archivedSnap(key);
   if (!hit || !snapVisible(req, hit)) return res.json({ success: false, error: 'No saved document for this reference' });
   res.json({ success: true, query: hit.query });
 });
@@ -7120,7 +7710,8 @@ app.get('/api/z-report', (req, res) => {
     const eatDay = iso => { const t = Date.parse(iso || ''); return isNaN(t) ? String(iso || '').slice(0, 10) : new Date(t + 3 * 3600000).toISOString().slice(0, 10); };
     // Cancelled, rejected or withdrawn credit notes never took effect: leave them out.
     const lapsed = e => e.cancelled || (e.kind === 'credit-note' && (e.approveStatus === '103' || e.approveStatus === '104'));
-    const day = log.filter(view.sees).filter(e => eatDay(e.submittedAt) === date && (e.status ? e.status === 'success' : true) && !lapsed(e));
+    // Only documents with an FDN: a credit note waiting for URA approval has none yet.
+    const day = log.filter(view.sees).filter(e => eatDay(e.submittedAt) === date && (e.status ? e.status === 'success' : true) && !lapsed(e) && !!e.fdn);
     const byCurrency = {};
     let count = 0, credits = 0;
     for (const e of day) {
@@ -7244,8 +7835,18 @@ function publicCfg(config) {
     defaultCommodityCode: c.defaultCommodityCode, defaultCommodityName: c.defaultCommodityName,
     defaultUnitOfMeasure: c.defaultUnitOfMeasure, issuedBy: c.issuedBy, operator: c.operator };
 }
-function loadQueue() { try { return JSON.parse(fs.readFileSync(OFFLINE_QUEUE_FILE, 'utf8')); } catch(e) { return []; } }
-function saveQueue(q) { try { writeFileAtomic(OFFLINE_QUEUE_FILE, JSON.stringify(q, null, 2)); } catch(e) { console.log('offline queue write error: ' + e.message); } }
+// Sales waiting for URA: kept with a .bak copy, restored from it after a power cut.
+function loadQueue() { try { const q = readJsonDurable(OFFLINE_QUEUE_FILE, { backup: true }).value; return Array.isArray(q) ? q : []; } catch(e) { return []; } }
+function saveQueue(q) { try { writeFileAtomic(OFFLINE_QUEUE_FILE, JSON.stringify(q, null, 2), { backup: true }); } catch(e) { console.log('offline queue write error: ' + e.message); } }
+// A sale should not wait for URA for more than a day: past that the business is
+// warned (bell, status pill, at the till) to start the Offline Enabler or call URA.
+const QUEUE_WARN_MS = 24 * 3600000;
+function queueOverdue(q, now = Date.now()) {
+  return q.filter(e => e.status === 'pending' && now - (Date.parse(e.saleAt || e.createdAt) || now) > QUEUE_WARN_MS);
+}
+function overdueWarning(n) {
+  return n + ' sale' + (n === 1 ? ' has' : 's have') + ' waited more than 24 hours for URA. Start the Offline Enabler (Settings) so sales get an FDN, or call URA support if URA is down.';
+}
 function offlineEnqueue(entry) {
   const q = loadQueue();
   const id = 'off_' + crypto.randomUUID();
@@ -7257,10 +7858,14 @@ function offlineEnqueue(entry) {
 
 // Queue entries are per business, like the submission log.
 // perm: what the caller needs in the entry's business ('queue' to see or link, 'log-all' to delete).
+// The status pill shows every user (cashiers too) how many of this business's sales wait.
+function queueOfBusiness(req) { const v = tenantView(req); return loadQueue().filter(e => v.sees({ tenantId: e.tenantId, tin: (e.cfgPublic || {}).tin, userId: e.userId })); }
 function queueView(req, perm) { const v = scopedView(req, perm || 'queue'); return e => v.sees({ tenantId: e.tenantId, tin: (e.cfgPublic || {}).tin, userId: e.userId }); }
 app.get('/api/offline-queue', (req, res) => {
   const q = loadQueue().filter(queueView(req));
+  const overdue = queueOverdue(q).length;
   res.json({ success: true, pending: q.filter(e => e.status === 'pending').length, failed: q.filter(e => e.status === 'failed').length,
+    overdue, warning: overdue ? overdueWarning(overdue) : '',
     items: q.map(e => ({ id: e.id, createdAt: e.createdAt, saleAt: e.saleAt || e.createdAt, kind: e.kind, reference: e.reference, status: e.status, attempts: e.attempts, lastError: e.lastError, fdn: e.fdn || '', uncertain: !!e.uncertain,
       doneAt: e.doneAt || '', result: e.status === 'done' ? (e.result || { fdn: e.fdn }) : undefined, inManager: !!e.mgrWritten })),
     retry: (typeof _retry !== 'undefined') ? { nextAt: _retry.nextAt, lastAt: _retry.lastAt, lastOutcome: _retry.lastOutcome, online: _retry.online, now: Date.now() } : null });
@@ -7344,9 +7949,7 @@ async function findIssuedByReference(entry, cfg, ref) {
   if (!hit) return null;
   const fdn = String(hit.invoiceNo).trim();
   const antifakeCode = hit.antifakeCode || hit.antiFakeCode || '';
-  const efrisPortal = cfg.mode === 'production'
-    ? 'https://efris.ura.go.ug/site_mobile/#/invoiceValidation'
-    : 'https://efristest.ura.go.ug/site_new/#/invoiceValidation';
+  const efrisPortal = validationBase(cfg.mode);
   const validationUrl = antifakeCode ? `${efrisPortal}?invoiceNo=${encodeURIComponent(fdn)}&antiFakeCode=${encodeURIComponent(antifakeCode)}` : null;
   const issuedDate = entry.saleAt || entry.createdAt || new Date().toISOString();
   const invoiceId = String(hit.id || hit.invoiceId || '');
@@ -7401,6 +8004,12 @@ async function flushOne(entry, credsFor, results) {
       }
     }
     if (!r && netErr) throw netErr;
+    // URA already has a document with this reference (sent from here before, or
+    // from another till): take its FDN instead of failing the sale.
+    if (r && !r.ok && String(r.returnCode) === '2254' && ref) {
+      const found = await findIssuedByReference(entry, cfg, ref);
+      if (found) r = found;
+    }
     if (r.ok) {
       entry.status = 'done'; entry.fdn = r.fdn; entry.doneAt = new Date().toISOString(); entry.uncertain = false; entry.lastError = '';
       // Kept for a day so the extension can tell the cashier and print it.
@@ -7414,6 +8023,7 @@ async function flushOne(entry, credsFor, results) {
       // (status failed) until the cashier fixes and resubmits or deletes it.
       entry.status = 'failed'; entry.uncertain = false;
       entry.lastError = 'URA ' + r.returnCode + ': ' + r.returnMessage;
+      { const base = reqCtx.getStore(); reqCtx.run({ user: (base && base.user) || null, tenantId: entry.tenantId || '' }, () => console.log('   Offline queue: ' + (entry.reference || entry.id) + ' was rejected by URA (' + entry.lastError + ')')); }
       results.push({ id: entry.id, tenantId: entry.tenantId || '', reference: entry.reference, ok: false, error: entry.lastError });
     }
   } catch (e) {
@@ -7511,7 +8121,20 @@ async function autoRetryQueue(why) {
   else _retry.lastOutcome = 'error';
   return out;
 }
+// Once a day per business while sales wait over 24 hours: a bell notification.
+const _overdueLogged = new Map();   // tenantId -> EAT day last warned
+function warnOverdueQueue(now = Date.now()) {
+  const byTenant = new Map();
+  for (const e of queueOverdue(loadQueue(), now)) { const t = e.tenantId || ''; byTenant.set(t, (byTenant.get(t) || 0) + 1); }
+  const day = eatParts(now).date;
+  for (const [t, n] of byTenant) {
+    if (_overdueLogged.get(t) === day) continue;
+    _overdueLogged.set(t, day);
+    reqCtx.run({ user: null, tenantId: t }, () => console.log('   Offline queue: ' + overdueWarning(n)));
+  }
+}
 setInterval(async () => {
+  try { warnOverdueQueue(); } catch (e) { console.log('   Offline queue overdue check error: ' + e.message); }
   try {
     const work = loadQueue().filter(e => (e.status === 'pending' || needsWriteBack(e)) && e.tenantId);
     if (!work.length) return;
@@ -7646,6 +8269,71 @@ app.put('/api/goods-catalog', (req, res) => {
   try { writeFileAtomic(GOODS_CATALOG_FILE, JSON.stringify(all)); }
   catch (e) { return res.status(500).json({ success: false, error: 'Could not save My Items: ' + e.message }); }
   res.json({ success: true, updatedAt, count: b.items.length });
+});
+
+// ── Notification centre (the bell) ──
+let _notifications = null;
+function notifications() {
+  if (!_notifications) _notifications = notificationsLib.create({ activity, dataDir: DATA_DIR, writeFileAtomic });
+  return _notifications;
+}
+function notifReader(req, res) {
+  const tid = reqTenant(req), userId = req.auth && (req.auth.id || (req.auth.service ? 'service' : ''));
+  if (!tid) { res.status(400).json({ success: false, error: 'Choose a business first' }); return null; }
+  if (!userId) { res.status(401).json({ success: false, error: 'Sign in first' }); return null; }
+  const perms = auth.permissionsFor(req.auth, tid);
+  return { userId, tenantId: tid, mayRead: p => p === '' || auth.can(perms, p) };
+}
+app.get('/api/notifications', (req, res) => {
+  const r = notifReader(req, res); if (!r) return;
+  try { res.json(Object.assign({ success: true }, notifications().list(Object.assign(r, { limit: parseInt(req.query.limit, 10) || 30, before: String(req.query.before || '') })))); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+app.get('/api/notifications/count', (req, res) => {
+  const r = notifReader(req, res); if (!r) return;
+  try { res.json({ success: true, unread: notifications().count(r) }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+app.post('/api/notifications/read', (req, res) => {
+  const r = notifReader(req, res); if (!r) return;
+  const b = req.body || {};
+  const ids = (Array.isArray(b.ids) ? b.ids : []).map(String).filter(id => /^\d{4}-\d{2}-\d{2}#-?\d+$/.test(id)).slice(0, 200);
+  if (!ids.length) return res.status(400).json({ success: false, error: 'ids required' });
+  try { notifications().mark({ userId: r.userId, ids, read: b.read !== false }); res.json({ success: true, unread: notifications().count(r) }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+app.post('/api/notifications/read-all', (req, res) => {
+  const r = notifReader(req, res); if (!r) return;
+  try { notifications().markAll({ userId: r.userId }); res.json({ success: true, unread: notifications().count(r) }); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+
+// ── Update check (Settings > System, and the bell) ──
+let _updates = null;
+function updates() {
+  if (!_updates) _updates = updateCheckLib.create({ dataDir: DATA_DIR, version: APP_VERSION, log: t => console.log(t) });
+  return _updates;
+}
+app.get('/api/admin/updates', (req, res) => res.json(Object.assign({ success: true }, updates().status())));
+app.post('/api/admin/updates/check', async (req, res) => {
+  try { res.json(Object.assign({ success: true }, await updates().check(true))); }
+  catch (e) { res.status(502).json({ success: false, error: e.message }); }
+});
+app.post('/api/admin/updates', (req, res) => res.json(Object.assign({ success: true }, updates().setEnabled((req.body || {}).enabled !== false))));
+
+// Settings > Offline Mode: the Enabler's services on the computer that runs the relay.
+app.get('/api/admin/enabler', async (req, res) => {
+  try { res.json(Object.assign({ success: true }, await enablerControl.status())); }
+  catch (e) { res.status(500).json({ success: false, error: e.message }); }
+});
+app.post('/api/admin/enabler/:action', async (req, res) => {
+  const action = String(req.params.action || '');
+  if (!['start', 'stop', 'restart'].includes(action)) return res.status(400).json({ success: false, error: 'Unknown action' });
+  try {
+    const r = await enablerControl.control(action);
+    console.log('   Offline Enabler ' + action + (r.success ? ': done' : ' failed: ' + r.error));
+    res.json(r);
+  } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 app.get('/api/number-series', (req, res) => {
@@ -7978,6 +8666,9 @@ app.post('/api/manager/install-theme', async (req, res) => {
   // Form Defaults already point at, instead of creating yet another one.
   let key = bareKey(themeKey || '');
   if (!key) { try { key = await findInstalledThemeKey(ep, accessToken, NAME); if (key) console.log('   Theme: reusing the EFRISConnect theme set in Form Defaults (' + key + ')'); } catch (_) {} }
+  // Still none: any theme in Manager with this name (an earlier install), so a
+  // re-run of setup updates it instead of adding another "EFRISConnect".
+  if (!key) { try { key = await findThemeKeyByName(ep, accessToken, NAME); if (key) console.log('   Theme: reusing the existing ' + NAME + ' theme (' + key + ')'); } catch (_) {} }
   let newKey = null, updated = false;
   const gated = st => st === 401 || st === 403;
   // Settings saves re-send the theme automatically. Skip the push when it is the
@@ -8021,15 +8712,36 @@ const _themePushed = {};
 
 // The key of the theme named `name` that a document type's Form Defaults use
 // (Manager has no theme list endpoint, so this is how an existing one is found).
+// The key of a theme in Manager's theme list whose name is `name` (first match).
+async function findThemeKeyByName(ep, token, name) {
+  for (const lp of ['/custom-themes', '/themes']) {
+    try {
+      const l = await managerCall(ep, token, 'GET', lp, null);
+      if (l.status !== 200 || !l.data) continue;
+      const rows = Array.isArray(l.data) ? l.data : (Object.values(l.data).find(v => Array.isArray(v)) || []);
+      for (const r of rows) {
+        const k = r && (r.key || r.Key); if (!k) continue;
+        let n = r.name || r.Name || '';
+        if (!n) { const t = await managerCall(ep, token, 'GET', '/custom-theme-form/' + bareKey(k), null); n = (t.data && (t.data.Name || t.data.name)) || ''; }
+        if (String(n).trim() === name) return bareKey(k);
+      }
+    } catch (_) {}
+  }
+  return '';
+}
 async function findInstalledThemeKey(ep, token, name) {
   const forms = ['sales-invoice-form-defaults-form', 'receipt-form-defaults-form', 'credit-note-form-defaults-form'];
   for (const f of forms) {
     try {
       const g = await managerCall(ep, token, 'GET', '/' + f, null);
-      const id = g && g.data && typeof g.data === 'object' && (g.data.CustomThemeId || g.data.ThemeKey || g.data.CustomThemeKey);
+      // Manager Desktop answers GETs in camelCase (customThemeId, name): read either case.
+      const d = g && g.data && typeof g.data === 'object' ? g.data : null;
+      const ci = k => { if (!d) return ''; const hit = Object.keys(d).find(x => x.toLowerCase() === k.toLowerCase()); return hit ? d[hit] : ''; };
+      const id = ci('CustomThemeId') || ci('ThemeKey') || ci('CustomThemeKey');
       if (!id || !/^[0-9a-f-]{36}$/i.test(String(id))) continue;
       const t = await managerCall(ep, token, 'GET', '/custom-theme-form/' + bareKey(id), null);
-      if (t.status === 200 && t.data && String(t.data.Name || '').trim() === name) return bareKey(id);
+      const tn = t && t.data && typeof t.data === 'object' ? (t.data.Name || t.data.name || '') : '';
+      if (t.status === 200 && String(tn).trim() === name) return bareKey(id);
     } catch (_) {}
   }
   return '';
@@ -8069,7 +8781,12 @@ async function setThemeAsDefault(ep, token, themeKey) {
       const formPath = '/' + d.form + (key ? '/' + bareKey(key) : '');
       const gf = await managerCall(ep, token, 'GET', formPath, null);
       if (gf.status >= 200 && gf.status < 300 && gf.data && typeof gf.data === 'object' && !gf._html) {
-        const form = { ...gf.data };
+        // Manager Desktop answers in camelCase (customTheme, customThemeId): drop the
+        // theme fields in ANY case first, or the old value is sent alongside ours
+        // and Manager keeps it.
+        const form = {};
+        const themeKeys = ['customtheme', 'customthemeid', 'theme', 'themekey', 'customthemekey'];
+        for (const [k, v] of Object.entries(gf.data)) if (!themeKeys.includes(k.toLowerCase())) form[k] = v;
         // Manager stores the theme choice as CustomTheme (boolean "use a custom theme")
         // + CustomThemeId (the theme's key) - confirmed on the receipt form. Set those;
         // keep the legacy string fields too so older builds still take it.
@@ -8077,7 +8794,14 @@ async function setThemeAsDefault(ep, token, themeKey) {
         form.CustomThemeId = tk;
         for (const f of THEME_FIELDS) if (f !== 'CustomTheme') form[f] = tk;
         const pf = await managerCall(ep, token, 'POST', formPath, form);
-        if (pf.status >= 200 && pf.status < 400) { done = true; note = 'set'; }
+        if (pf.status >= 200 && pf.status < 400) {
+          // Read it back: only "set" when Manager really holds our theme now.
+          const chk = await managerCall(ep, token, 'GET', formPath, null);
+          const cd = chk && chk.data && typeof chk.data === 'object' ? chk.data : {};
+          const got = Object.keys(cd).find(k => k.toLowerCase() === 'customthemeid');
+          if (!got || bareKey(String(cd[got] || '')) === tk) { done = true; note = 'set'; }
+          else note = 'Manager kept another theme';
+        }
         else note = 'POST HTTP ' + pf.status;
       } else { note = gf._html ? 'auth/redirect' : 'form HTTP ' + gf.status; }
     } catch (e) { note = e.message; }
@@ -8265,6 +8989,7 @@ else if (require.main === module) {
     console.log('HTTP running on port ' + PORT + ' (will redirect to HTTPS once it is up)');
     tryStartHTTPS();
     if (LAN_MODE) writeLanTillKit();
+    try { updates().start(); } catch (_) {}
     setTimeout(() => {
       if (!httpsUp) {
         console.log('-------------------------------------------------------');
@@ -8286,4 +9011,4 @@ module.exports._activity = activity;
 module.exports._mailer = mailer;
 module.exports._consoleUi = consoleUi;
 module.exports._routePerms = ROUTE_PERMS.map(r => ({ method: r.method, path: r.path, perm: r.perm }));
-module.exports._test = { lanManagerOrigins, lanRelayUrls, managerPorts, EXTRA_ORIGINS, LAN_URLS, FRAME_ANCESTORS, writeLanTillKit, learnVaultSecrets, networkBindProblem, isLocalRequest, routePerm, efrisDecodeJson, aesDecryptStr, aesEncryptB64, aesAlgo, buildT109, goodsStockOf, t106Kind, cnItem, eatToday, eatParts, uraUrl, uraHost, buildT108, lineDiscount, lookupCommodityTax, commodityTaxRule };
+module.exports._test = { savedBranch, commodityIsService, exciseDutyDetail, annotateLinesWithRegisteredGoods, cnLimitProblem, cnPendingProblem, warnOverdueQueue, queueOverdue, reqCtx, lanManagerOrigins, lanRelayUrls, managerPorts, EXTRA_ORIGINS, LAN_URLS, FRAME_ANCESTORS, writeLanTillKit, learnVaultSecrets, networkBindProblem, isLocalRequest, routePerm, efrisDecodeJson, aesDecryptStr, aesEncryptB64, aesAlgo, buildT109, goodsStockOf, t106Kind, cnItem, eatToday, eatParts, uraUrl, uraHost, buildT108, lineDiscount, lookupCommodityTax, commodityTaxRule };

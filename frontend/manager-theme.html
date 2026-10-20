@@ -75,7 +75,7 @@ table.items tr.total td { font-weight: 700; border-top: 1px solid var(--rule); }
 .footers { font-size: 12px; border-top: 1px solid var(--hair); padding-top: 8px; }
 .sigs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 40px; padding-top: 22px; font-size: 11.5px; break-inside: avoid; }
 .sigs div { border-top: 1px solid var(--rule); padding-top: 4px; }
-.end { display: flex; justify-content: flex-end; font-size: 10.5px; color: var(--muted); border-top: 1px solid var(--hair); padding-top: 8px; }
+.end { display: flex; justify-content: center; font-size: 10.5px; color: var(--muted); border-top: 1px solid var(--hair); padding-top: 8px; }
 .err { max-width: 560px; margin: 40px auto; background: #fff; border: 1px solid var(--hair); border-radius: 10px; padding: 18px; font: 14px 'Segoe UI', system-ui, sans-serif; }
 
 /* A5 / A6: same layout, tighter */
@@ -281,11 +281,20 @@ function renderPage(m) {
     // one unit (e.g. "BS-Bottle, ..."): label it Qty and keep the unit under it.
     var KNOWN = /item|descr|qty|quant|price|total|amount|disc|tax|vat|code|account|unit/i;
     var numeric = function (i) { var n = 0, ok = true; (function walk(l) { (l || []).forEach(function (r) { if (r.rows && r.rows.length) return walk(r.rows); if (r.isTotalRow) return; var t = String(((r.cells || [])[i] || {}).text || '').trim(); if (t) { n++; if (!/^-?[\d,.]+$/.test(t)) ok = false; } }); })(t.rows); return ok && n > 0; };
-    var head = function (i) { var lab = String(cols[i].label || ''); return (i > 0 && lab && !KNOWN.test(lab) && numeric(i)) ? 'Qty<div class="it-sub">' + esc(lab) + '</div>' : esc(lab); };
-    var tb = '<table class="items"><thead><tr>' + main.map(function (i) { return '<th class="' + al(cols[i]) + '">' + head(i) + '</th>'; }).join('') + '</tr></thead><tbody>' +
+    // Manager heads the quantity column with the unit name (e.g. "BO-Bottle, non
+    // protected, cylindrical") when every line has the same unit: head it "Qty" and
+    // show the unit in its own column next to it, as on URA's own document.
+    UNITCOL = null;
+    var head = function (i) { var lab = String(cols[i].label || ''); if (i > 0 && lab && !KNOWN.test(lab) && numeric(i)) { UNITCOL = { i: i, label: lab }; return 'Qty'; } return esc(lab); };
+    var tb = '<table class="items"><thead><tr>' + main.map(function (i) { var hd = head(i); return '<th class="' + al(cols[i]) + '">' + hd + '</th>' + (UNITCOL && UNITCOL.i === i ? '<th>Unit</th>' : ''); }).join('') + '</tr></thead><tbody>' +
       rows(t.rows || [], cols, main, fold, al) + '</tbody></table>';
     h += box('Section D · Goods and services', (t.description ? '<div class="desc">' + esc(t.description) + '</div>' : '') + tb);
   }
+
+  // Section E: the tax lines from Manager's totals (VAT 18%, excise...), as URA's
+  // own documents show a tax breakdown.
+  var taxes = (d.totals || []).filter(function (x) { var l = String(x.label || ''); return /vat|tax|excise|duty/i.test(l) && !/(sub)?total|incl|gross|net/i.test(l); });
+  if (taxes.length) h += box('Section E · Tax details', '<div class="sum">' + taxes.map(function (x) { return '<div class="ln"><span>' + esc(x.label) + '</span><span>' + esc(x.text) + '</span></div>'; }).join('') + '</div>');
 
   var left = '';
   if (d.status && d.status.text) left += box('Payment', '<span class="status">' + esc(d.status.text) + '</span>' + payHow(d.status.tone));
@@ -303,6 +312,7 @@ function renderPage(m) {
   }
   if (Array.isArray(d.footers) && d.footers.length) h += '<div class="footers">' + d.footers.join('') + '</div>';
   if (PREFS.footer) h += '<div class="msg">' + esc(PREFS.footer) + '</div>';
+  if (m.fiscal) h += '<div class="end" style="font-weight:700;letter-spacing:.04em;justify-content:center;border-top:0;"><span>*** END OF ' + (m.kind === 'credit' ? 'CREDIT NOTE' : m.kind === 'invoice' || m.kind === 'debit' ? 'e-INVOICE/TAX INVOICE' : 'e-RECEIPT') + ' ***</span></div>';
   h += '<div class="end"><span>' + esc(stamp()) + '</span></div>';
   return h;
 }
@@ -320,11 +330,12 @@ function payHow(tone) {
   return r.length ? kv(r) : '';
 }
 function m_kind() { return DOC ? DOC.kind : ''; }
+var UNITCOL = null;   // the quantity column whose header Manager filled with the unit name
 function rows(list, cols, main, fold, al) {
   var h = '';
   (list || []).forEach(function (r) {
     if (Array.isArray(r.rows) && r.rows.length) {
-      h += '<tr class="group"><td colspan="' + main.length + '">' + esc((r.cells && r.cells[0] && r.cells[0].text) || '') + '</td></tr>' + rows(r.rows, cols, main, fold, al);
+      h += '<tr class="group"><td colspan="' + (main.length + (UNITCOL ? 1 : 0)) + '">' + esc((r.cells && r.cells[0] && r.cells[0].text) || '') + '</td></tr>' + rows(r.rows, cols, main, fold, al);
       return;
     }
     var cells = r.cells || [], sub = '';
@@ -332,7 +343,7 @@ function rows(list, cols, main, fold, al) {
     h += '<tr' + (r.isTotalRow ? ' class="total"' : '') + '>' + main.map(function (i, pos) {
       var c = cells[i] || {}, inner = (c.image && c.image.url) ? '<img src="' + esc(c.image.url) + '" alt="' + esc(c.text || '') + '" style="max-height:36px;"/>' : esc(c.text || '');
       if (c.link && isUrl(c.link.url)) inner = '<a target="_top" href="' + esc(c.link.url) + '">' + inner + '</a>';
-      return '<td class="' + al(cols[i] || {}) + '">' + inner + (pos === 0 ? sub : '') + '</td>';
+      return '<td class="' + al(cols[i] || {}) + '">' + inner + (pos === 0 ? sub : '') + '</td>' + (UNITCOL && UNITCOL.i === i ? '<td>' + (r.isTotalRow ? '' : esc(UNITCOL.label)) + '</td>' : '');
     }).join('') + '</tr>';
   });
   return h;

@@ -17,6 +17,11 @@ code in this repository (`backend/vault.js`, `backend/auth.js`,
 EFRISConnect is a relay you run yourself, on one computer or on a shop server.
 There is no hosted service and nothing is sent to The Tukei Hope Initiative.
 
+Apart from URA and your own Manager, the relay makes one other request: once a day it asks
+GitHub (api.github.com) for the latest public EFRISConnect release, to show admins that
+an update is available. Nothing about the business, users or sales is sent. The owner can
+turn it off under Settings > System > Updates.
+
 The browser page never receives the EFRIS private key, the EFRIS password or the
 saved Manager token. It refers to a saved business by an id. The relay decrypts a
 secret into memory only for the call to Manager or URA that needs it.

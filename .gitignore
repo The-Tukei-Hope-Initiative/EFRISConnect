@@ -32,6 +32,7 @@ docs/
 docs/*
 !docs/self-hosting.md
 !docs/first-install-checklist.md
+!docs/architecture.svg
 !docs/efris-compliance.md
 
 # Runtime/local data - never commit (may contain real business data or secrets)

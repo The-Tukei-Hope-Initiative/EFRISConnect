@@ -21,6 +21,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { DATA_DIR } = require('./paths');
 const { validEmail } = require('./mailer');
+const { writeDurable, readJsonDurable } = require('./safe-file');
 
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
@@ -57,30 +58,20 @@ let clock = () => Date.now();
 const now = () => clock();
 
 // ── Files ──
-function writeFileAtomic(file, data) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = file + '.' + process.pid + '.' + crypto.randomBytes(4).toString('hex') + '.tmp';
-  try { fs.writeFileSync(tmp, data, { mode: 0o600 }); }
-  catch (e) { try { fs.rmSync(tmp, { force: true }); } catch (_) {} throw e; }
-  try { fs.renameSync(tmp, file); }
-  catch (e) {
-    // Windows: antivirus/indexer can hold the target open for a moment; write in place.
-    try { fs.writeFileSync(file, data, { mode: 0o600 }); } finally { try { fs.rmSync(tmp, { force: true }); } catch (_) {} }
-  }
-}
-// Read a JSON file for a read-modify-write. Missing or empty -> dflt; present but
-// unparsable -> throw, so the caller never replaces it with a near-empty copy.
+// Flushed to disk before they replace the old copy; users.json also keeps a
+// .bak copy that is put back automatically if a power cut damages the file.
+function writeFileAtomic(file, data) { writeDurable(file, data, { mode: 0o600, backup: file === USERS_FILE }); }
+// Read a JSON file for a read-modify-write. Missing or empty -> dflt; damaged ->
+// restored from its .bak when there is a good one, else throw, so the caller
+// never replaces it with a near-empty copy.
 function readJsonStrict(file, dflt) {
-  let raw;
-  try { raw = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return dflt; throw e; }
-  if (!raw.trim()) return dflt;
-  try { return JSON.parse(raw); }
-  catch (e) {
-    const err = new Error('The file ' + path.basename(file) + ' in ' + DATA_DIR + ' is damaged and was not changed. Restore it from a backup or move it aside.');
-    err.code = 'AUTH_FILE_DAMAGED'; err.status = 500; err.expose = true;
-    console.log('   ⚠ ' + err.message + ' (' + e.message + ')');
-    throw err;
-  }
+  const r = readJsonDurable(file, { backup: file === USERS_FILE, keepDamaged: true });
+  if (r.state === 'ok' || r.state === 'restored') return r.value;
+  if (r.state === 'missing' || r.state === 'empty') return dflt;
+  const err = new Error('The file ' + path.basename(file) + ' in ' + DATA_DIR + ' is damaged and was not changed. Restore it from a backup or move it aside.');
+  err.code = 'AUTH_FILE_DAMAGED'; err.status = 500; err.expose = true;
+  console.log('   ⚠ ' + err.message + (r.error ? ' (' + r.error.message + ')' : ''));
+  throw err;
 }
 
 function loadDb() {
