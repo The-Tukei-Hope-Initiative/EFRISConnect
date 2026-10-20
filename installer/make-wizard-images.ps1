@@ -123,4 +123,10 @@ foreach ($pct in 100, 125, 150, 175, 200) {
   $m = [int](4 * $k); $g.DrawImage($ico.ToBitmap(), $m, $m, $s - 2 * $m, $s - 2 * $m); $g.Dispose()
   Save-Bmp $bmp ('wizard-small-' + $pct + '.bmp'); $bmp.Dispose()
 }
-Write-Host 'Wrote installer\wizard-large-*.bmp and wizard-small-*.bmp'
+# The logo alone (green background, white tile), for the side panel Setup draws as
+# text: 120 px, shown at 44 px and scaled down sharply at every display scale.
+$bmp = New-Object Drawing.Bitmap 120, 120
+$g = [Drawing.Graphics]::FromImage($bmp); $g.SmoothingMode = 'AntiAlias'; $g.PixelOffsetMode = 'HighQuality'
+$g.Clear($green); Draw-Logo $g 0 0 120; $g.Dispose()
+Save-Bmp $bmp 'logo-tile.bmp'; $bmp.Dispose()
+Write-Host 'Wrote installer\wizard-large-*.bmp, wizard-small-*.bmp and logo-tile.bmp'

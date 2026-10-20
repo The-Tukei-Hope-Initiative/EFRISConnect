@@ -28,3 +28,15 @@ test('an address that is not EFRISConnect\'s /extension is refused', async () =>
   const r = await ensure('https://evil.example/steal');
   expect(r.status).toBe(400);
 });
+
+test('a button at an older EFRISConnect address is moved to the new one, not duplicated', async () => {
+  mgr.reset();
+  mgr.lists['custom-buttons'] = [{ key: 'b1' }];
+  mgr.forms['custom-button-form'] = { b1: { name: 'Fiscalise receipt', endpoint: 'https://localhost:5443/extension', placement: 'receipt-view' } };
+  const r = await ensure('https://desktop-1:5443/extension');
+  expect(r.body.updated).toEqual(['receipt-view']);
+  expect(r.body.created).not.toContain('receipt-view');
+  const moved = mgr.posts('custom-button-form/b1')[0];
+  expect(moved).toMatchObject({ Endpoint: 'https://desktop-1:5443/extension', name: 'Fiscalise receipt', placement: 'receipt-view' });
+  expect(moved.endpoint).toBeUndefined();
+});

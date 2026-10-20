@@ -590,7 +590,7 @@
     <div id="homeOpenInMgr" class="al ai" style="display:none;margin:6px 0;">
       <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;">
         <div style="flex:1;min-width:220px;"><span class="ico" data-icon="info"></span> <strong>You are using EFRISConnect in a web browser.</strong> Open it from Manager instead: the <strong>EFRISConnect</strong> buttons on receipts, sales invoices and items open it on the document you are working on, ready to fiscalise.</div>
-        <div style="display:flex;gap:6px;flex-wrap:wrap;"><a id="homeOpenMgrLink" class="btn bg bsm" style="width:auto;text-decoration:none;" target="_blank" rel="noopener">Open Manager</a>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;"><a id="homeOpenMgrLink" class="btn bg bsm" style="width:auto;text-decoration:none;" target="_blank" rel="noopener" onclick="homeMgrHref(this)">Open Manager</a>
           <button type="button" class="btn bo bsm" style="width:auto;" onclick="try{localStorage.setItem('efcHideOpenInMgr','1')}catch(_){};$('homeOpenInMgr').style.display='none'">Don't show again</button></div>
       </div>
     </div>
@@ -3119,14 +3119,14 @@ function themeDefaultsText(d){
 }
 // Add the Manager custom buttons that open this EFRISConnect (relay address + /extension).
 async function mgrEnsureButtons(ep,tk){
-  const r=await fetch(RELAY+'/api/manager/ensure-custom-buttons',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({managerEndpoint:ep||CFG.managerEndpoint||MGR_EP,accessToken:tk||CFG.accessToken||MGR_TK,extensionUrl:new URL('/extension',RELAY||location.origin).href})});
+  const r=await fetch(RELAY+'/api/manager/ensure-custom-buttons',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({managerEndpoint:ep||CFG.managerEndpoint||MGR_EP,accessToken:tk||CFG.accessToken||MGR_TK,extensionUrl:(window.__LAN_URL||new URL('/extension',RELAY||location.origin).href)})});
   return r.json();
 }
 async function setAddButtons(btn){
   if(btn){ btn.disabled=true; }
   ht('setButtonsR',SPIN+' Adding…');
   try{ const d=await mgrEnsureButtons();
-    ht('setButtonsR',d.success?('<span style="color:var(--g)">'+ic('check')+' '+((d.created||[]).length?'Added: '+esc(d.created.join(', ')):'All buttons are already there')+'</span>'):('<span style="color:var(--red)">'+ic('x')+' '+esc(d.error||('Could not add: '+(d.failed||[]).join(', ')))+'</span>'));
+    ht('setButtonsR',d.success?('<span style="color:var(--g)">'+ic('check')+' '+([(d.created||[]).length?'Added: '+esc(d.created.join(', ')):'',(d.updated||[]).length?'Moved to '+esc(d.endpoint)+': '+esc(d.updated.join(', ')):''].filter(Boolean).join('. ')||'All buttons are already there')+'</span>'):('<span style="color:var(--red)">'+ic('x')+' '+esc(d.error||('Could not add: '+(d.failed||[]).join(', ')))+'</span>'));
   }catch(e){ ht('setButtonsR','<span style="color:var(--red)">'+esc(e.message)+'</span>'); }
   if(btn) btn.disabled=false;
 }
@@ -9592,6 +9592,13 @@ async function authStartApp(){
   setTimeout(authCashierStart,700); setTimeout(authCashierStart,2500);
 }
 
+// "Open Manager" goes to the Manager address saved NOW (it may have changed in Settings
+// since the page loaded, e.g. from Manager Desktop's port to Manager Server's).
+function homeMgrHref(a){
+  const web=String((CFG&&CFG.managerEndpoint)||MGR_EP||'').replace(/\/api2\/?$/,'');
+  if(!/^https?:\/\//i.test(web)) return '';
+  if(a) a.href=web; return web;
+}
 // ── Init ──────────────────────────────────────────────────────
 // The app itself, started once the user is signed in (authStartApp).
 function appInit(){
@@ -9838,8 +9845,7 @@ function homeInit(){
     const box=$('homeOpenInMgr'); let hidden=false; try{ hidden=localStorage.getItem('efcHideOpenInMgr')==='1'; }catch(_){}
     if(box){
       const outside=!(window.parent&&window.parent!==window);
-      const web=String(ep||'').replace(/\/api2\/?$/,'');
-      const a=$('homeOpenMgrLink'); if(a){ if(/^https?:\/\//i.test(web)){ a.href=web; a.style.display=''; } else a.style.display='none'; }
+      const a=$('homeOpenMgrLink'); if(a){ a.style.display=homeMgrHref(a)?'':'none'; }
       box.style.display=(outside&&!hidden)?'':'none';
     }
   }catch(_){}

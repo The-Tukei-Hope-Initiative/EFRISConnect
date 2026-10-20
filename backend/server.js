@@ -25,6 +25,9 @@ const mailer  = require('./mailer');  // outgoing email: password-reset codes an
 // Mask the exact vault secrets in the activity log whenever a business is read.
 try { vault.setSecretSink(t => activity.noteSecrets([t.efrisPassword, t.efrisPassphrase, t.managerToken])); } catch (_) {}
 try { vault.warm(); } catch (_) {}     // unlock the vault key in the background, not on the first request
+// A relay that stops answering for 2 minutes is ended so run-relay.cmd starts it again
+// (only when this file runs as the relay, not when tests load it).
+if (require.main === module) { try { require('./watchdog').start({ crashLog: require('path').join(require('./paths').DATA_DIR, 'relay-crash.log') }); } catch (_) {} }
 // Once the vault is unlocked, read every business once so all saved secrets are
 // known to the activity masker before anything about them can be logged (not only
 // the businesses a request has touched). Retried every few seconds until unlocked.
@@ -201,6 +204,26 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');   // page URLs can carry the Manager token
   next();
 });
+// Stall monitor: when the relay was stuck (nothing answered) for 5 s or more, say so
+// once it moves again, with the requests that were in progress, so a freeze leaves a
+// trace in the log instead of only a "stopped answering" warning from the tray.
+const _inFlight = new Map(); let _reqSeq = 0;
+app.use((req, res, next) => {
+  const id = ++_reqSeq; _inFlight.set(id, { what: req.method + ' ' + String(req.path || '').slice(0, 80), at: Date.now() });
+  const done = () => _inFlight.delete(id); res.on('finish', done); res.on('close', done);
+  next();
+});
+{
+  let last = Date.now();
+  const t = setInterval(() => {
+    const now = Date.now(), lag = now - last - 1000; last = now;
+    if (lag < 5000) return;
+    const busy = [..._inFlight.values()].map(r => r.what + ' (' + Math.round((now - r.at) / 1000) + ' s)').slice(0, 8);
+    logger.warn('Relay was stuck', { seconds: Math.round(lag / 1000), inProgress: busy });
+    console.log('   ⚠ The relay was stuck for ' + Math.round(lag / 1000) + ' s' + (busy.length ? '; requests in progress: ' + busy.join(', ') : '; no request in progress'));
+  }, 1000);
+  if (t.unref) t.unref();
+}
 app.use(express.json({ limit: '5mb' }));   // cap request bodies to guard against oversized-payload DoS
 // Learn the secrets a request carries (body fields named like a password, token or
 // key, and the credential headers) before any route can log them, so the activity
@@ -4645,16 +4668,25 @@ app.post('/api/manager/ensure-custom-buttons', async (req, res) => {
       const key = ciGet(r, 'key'); if (!key) continue;
       const f = await managerCall(ep, accessToken, 'GET', '/custom-button-form/' + key, null);
       const d = (f.status === 200 && f.data) || r;
-      have.push({ placement: String(ciGet(d, 'placement') || '').toLowerCase(), endpoint: String(ciGet(d, 'endpoint') || '').replace(/\/+$/, '').toLowerCase() });
+      have.push({ key, form: d, placement: String(ciGet(d, 'placement') || '').toLowerCase(), endpoint: String(ciGet(d, 'endpoint') || '').replace(/\/+$/, '').toLowerCase() });
     }
-    const created = [], existed = [], failed = [];
+    const created = [], existed = [], updated = [], failed = [];
     for (const b of EFC_BUTTONS) {
       if (have.some(h => h.placement === b.Placement && h.endpoint === endpoint.toLowerCase())) { existed.push(b.Placement); continue; }
+      // Our button with an older EFRISConnect address (e.g. localhost before this PC became
+      // the shop server): point it at the address in use now instead of adding a second one.
+      const old = have.find(h => h.placement === b.Placement && /\/extension$/.test(h.endpoint));
+      if (old) {
+        const r = await managerCall(ep, accessToken, 'POST', '/custom-button-form/' + old.key, Object.assign(Object.fromEntries(Object.entries(old.form || {}).filter(([k]) => k.toLowerCase() !== 'endpoint')), { Endpoint: endpoint }));
+        if (r.status === 200 || r.status === 201) { updated.push(b.Placement); old.endpoint = endpoint.toLowerCase(); } else failed.push(b.Placement + ' (HTTP ' + r.status + ')');
+        continue;
+      }
       const r = await managerCall(ep, accessToken, 'POST', '/custom-button-form', { Name: b.Name, Endpoint: endpoint, Placement: b.Placement });
       if (r.status === 200 || r.status === 201) created.push(b.Placement); else failed.push(b.Placement + ' (HTTP ' + r.status + ')');
     }
     if (created.length) console.log('   Manager custom buttons added: ' + created.join(', '));
-    res.json({ success: !failed.length, created, existed, failed, endpoint });
+    if (updated.length) console.log('   Manager custom buttons moved to ' + endpoint + ': ' + updated.join(', '));
+    res.json({ success: !failed.length, created, existed, updated, failed, endpoint });
   } catch (e) { res.status(502).json({ success: false, error: e.message }); }
 });
 app.post('/api/manager/create-cash-account', async (req, res) => {

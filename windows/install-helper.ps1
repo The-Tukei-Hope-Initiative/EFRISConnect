@@ -69,8 +69,11 @@ function Register-RelayTask {
   $act = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument "/d /c `"`"$WinDir\run-relay.cmd`"`"" -WorkingDirectory "$AppDir\backend"
   $trg = New-ScheduledTaskTrigger -AtStartup
   $pri = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+  # Priority 4 = normal. Task Scheduler's default (7) runs the relay below normal, and on a
+  # busy 2-core PC (Manager Server starting, a virus scan) it then got no CPU for minutes:
+  # it stopped answering without any error.
   $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-         -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+         -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -Priority 4
   Register-ScheduledTask -TaskName $RelayTask -Action $act -Trigger $trg -Principal $pri -Settings $set `
     -Description 'EFRISConnect relay (Manager.io <-> URA EFRIS). Installed by EFRISConnect Setup.' -Force | Out-Null
   Log "Startup task '$RelayTask' registered (runs at Windows startup, before anyone signs in)."
@@ -87,7 +90,7 @@ function Register-ManagerTask([string]$exe, [int]$port, [string]$who) {
          -Argument "/d /c start `"Manager Server`" /min /D `"$dir`" `"$exe`" --urls http://127.0.0.1:$port$dataArg" -WorkingDirectory $dir
   $trg = New-ScheduledTaskTrigger -AtLogOn -User $who
   $pri = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive -RunLevel Limited
-  $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+  $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -Priority 4
   Register-ScheduledTask -TaskName $ManagerTask -Action $act -Trigger $trg -Principal $pri -Settings $set `
     -Description "Manager Server Edition for the shop network (port $port). Installed by EFRISConnect Setup." -Force | Out-Null
   Log "Logon task '$ManagerTask' registered for $who (http://127.0.0.1:$port, tills use https on port + 1)."
@@ -180,6 +183,11 @@ switch ($Action) {
         # Manager Server listens on this PC only; tills use the relay's encrypted front.
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $WinDir 'lan.ps1') -Action manager-unfirewall
         Register-ManagerTask $ManagerExe $ManagerPort $User
+        # Start it now too (the task otherwise waits for the next Windows sign-in, and
+        # EFRISConnect shows "Manager: error" until then). Not when it already runs.
+        if (!(Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue)) {
+          try { Start-ScheduledTask -TaskName $ManagerTask; Log 'Manager Server started.' } catch { Log "Manager Server did not start now ($($_.Exception.Message)); it starts at the next Windows sign-in." }
+        }
       }
     }
 

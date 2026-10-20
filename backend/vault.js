@@ -59,6 +59,8 @@ function dpapiPS(op, b64) {
     { input: b64, encoding: 'utf8', windowsHide: true, timeout: ms }).trim();
   // PowerShell can take over a minute to start on a busy or freshly booted PC; that
   // is a slow start, not a wrong key, so give it longer and try once more.
+  // Waiting for Windows on purpose: tell the watchdog this is not a hang.
+  try { require('./watchdog').expectBlock(90000 + 180000 + 10000); } catch (_) {}
   try { return run(90000); }
   catch (e) { if (!/ETIMEDOUT|timed out/i.test(String(e && (e.code || e.message)))) throw e; console.log('   Vault: Windows was slow to unlock the key, trying again...'); return run(180000); }
 }

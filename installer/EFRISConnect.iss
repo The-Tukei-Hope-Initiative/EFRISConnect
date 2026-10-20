@@ -53,10 +53,12 @@ Source: "{#StageDir}\windows\install-helper.ps1"; DestDir: "{app}\windows"; Flag
 Source: "{#StageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion; Check: IsTill
 ; The EFRISConnect icon, for the shortcuts, the tray and Apps & features (every mode).
 Source: "efrisconnect.ico"; DestDir: "{app}"; Flags: ignoreversion
+; The logo for the side panel Setup draws as text (used by Setup only, not installed).
+Source: "logo-tile.bmp"; Flags: dontcopy
 
 [Messages]
 WelcomeLabel1=Welcome to EFRISConnect
-WelcomeLabel2=EFRISConnect connects Manager.io to URA EFRIS. It fiscalises your receipts, invoices and credit notes, registers your goods with URA, keeps URA stock in step with Manager, and prints documents with the URA QR code.%n%nSales still work when the internet is down: they are saved and sent to URA later, or issued by the URA Offline Enabler.%n%nBefore you start: Manager open on this computer, and your URA EFRIS TIN, device number, password and private key.%n%nEFRISConnect - Free & Open Source (MIT licence). A project of The Tukei Hope Initiative - Community Based Organisation, Entebbe, Uganda. Registration No. EMC/CBO/025 | Your Hope, Our Mission.
+WelcomeLabel2=EFRISConnect connects Manager.io to URA EFRIS. It fiscalises your receipts, invoices and credit notes, registers your goods with URA, keeps URA stock in step with Manager, and prints documents with the URA QR code.%n%nSales still work when the internet is down: they are saved and sent to URA later, or issued by the URA Offline Enabler.%n%nBefore you start: Manager open on this computer, and your URA EFRIS TIN, device number, password and private key.%n%nFree and open source (MIT licence).
 
 [Tasks]
 Name: "desktopicon"; Description: "A desktop shortcut to EFRISConnect"; Check: not IsTill
@@ -96,7 +98,8 @@ Type: dirifempty; Name: "{autoprograms}\EFRISConnect"
 
 [Run]
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\tray.vbs"""; Description: "Show the EFRISConnect icon next to the clock"; Flags: postinstall nowait runasoriginaluser; Tasks: trayicon; Check: not IsTill
-Filename: "https://localhost:5443/extension"; Description: "Open EFRISConnect now to create the owner account"; Flags: postinstall shellexec nowait runasoriginaluser unchecked; Check: not IsTill
+Filename: "https://localhost:5443/extension"; Description: "Open EFRISConnect now to create the owner account"; Flags: postinstall shellexec nowait runasoriginaluser unchecked; Check: (not IsTill) and (not WasInstalled)
+Filename: "https://localhost:5443/extension"; Description: "Open EFRISConnect now"; Flags: postinstall shellexec nowait runasoriginaluser unchecked; Check: (not IsTill) and WasInstalled
 Filename: "{code:TillManagerUrl}"; Description: "Open Manager on the shop server"; Flags: postinstall shellexec nowait runasoriginaluser; Check: IsTill
 
 [Code]
@@ -106,9 +109,14 @@ var
   PortPage: TInputQueryWizardPage;
   DataPage: TInputDirWizardPage;
   CopyDataBox: TNewCheckBox;
+  CopyNote: TNewStaticText;
   TillCertPage: TInputFileWizardPage;
   TillServerPage: TInputQueryWizardPage;
   SetupOk: Boolean;
+  Upgrading: Boolean;
+
+// An earlier EFRISConnect on this computer (an upgrade or a re-run, not a first install).
+function WasInstalled: Boolean; begin Result := Upgrading; end;
 
 function IsSingle: Boolean; begin Result := ModePage.SelectedValueIndex = 0; end;
 function IsServer: Boolean; begin Result := ModePage.SelectedValueIndex = 1; end;
@@ -160,9 +168,94 @@ begin
   ShellExec('open', 'https://tukeihopeinitiative.org/', '', '', SW_SHOWNORMAL, ewNoWait, Code);
 end;
 
-procedure InitializeWizard;
-var PrevMode: String; SavedData: AnsiString; Site: TNewStaticText;
+// The green side panel of the Welcome and Finish pages, drawn as text (sharp at any
+// display scale, read by screen readers) over the place of the wizard picture.
+// Colours as in the extension: header green, light green, gold; Uganda's colours as
+// a thin rule. TColor is $BBGGRR.
+function SideText(Parent: TWinControl; Text: String; L, T, W, H: Integer; Size: Integer; Bold: Boolean; Color: TColor; Centre: Boolean): TLabel;
 begin
+  Result := TLabel.Create(WizardForm);
+  Result.Parent := Parent;
+  Result.AutoSize := False;
+  Result.WordWrap := True;
+  Result.Transparent := True;
+  Result.SetBounds(L, T, W, H);
+  Result.Font.Name := 'Segoe UI';
+  Result.Font.Size := Size;
+  Result.Font.Color := Color;
+  if Bold then Result.Font.Style := [fsBold];
+  if Centre then Result.Alignment := taCenter;
+  Result.Caption := Text;
+end;
+
+procedure SideBar(Parent: TWinControl; L, T, W, H: Integer; Color: TColor);
+var P: TPanel;
+begin
+  P := TPanel.Create(WizardForm);
+  P.Parent := Parent;
+  P.BevelOuter := bvNone;
+  P.ParentBackground := False;
+  P.Color := Color;
+  P.SetBounds(L, T, W, H);
+end;
+
+procedure SidePanel(Pic: TBitmapImage);
+var P: TPanel; Logo: TBitmapImage; Pad, W, Y, I, Seg: Integer; Points: array[0..2] of String;
+begin
+  Pic.Visible := False;
+  P := TPanel.Create(WizardForm);
+  P.Parent := Pic.Parent;
+  P.BevelOuter := bvNone;
+  P.ParentBackground := False;
+  P.Color := $205E1B;
+  P.SetBounds(Pic.Left, Pic.Top, Pic.Width, Pic.Height);
+  Pad := ScaleX(18); W := P.Width - 2 * Pad;
+
+  Logo := TBitmapImage.Create(WizardForm);
+  Logo.Parent := P;
+  Logo.Stretch := True;
+  Logo.SetBounds(Pad, ScaleY(22), ScaleX(44), ScaleY(44));
+  Logo.Bitmap.LoadFromFile(ExpandConstant('{tmp}\logo-tile.bmp'));
+
+  SideText(P, 'EFRISConnect', Pad, ScaleY(76), W, ScaleY(28), 15, True, $FFFFFF, False);
+  SideText(P, 'URA EFRIS e-receipts and e-invoices for Manager.io', Pad, ScaleY(106), W, ScaleY(36), 9, False, $C9E6C8, False);
+  SideBar(P, Pad, ScaleY(148), ScaleX(28), ScaleY(3), $25A8F9);
+
+  Points[0] := 'Receipts, invoices and credit notes';
+  Points[1] := 'Keeps selling when the internet is down';
+  Points[2] := 'Your data stays on your computer';
+  Y := ScaleY(162);
+  for I := 0 to 2 do begin
+    SideText(P, #$2713, Pad, Y, ScaleX(16), ScaleY(18), 10, True, $25A8F9, False);
+    SideText(P, Points[I], Pad + ScaleX(18), Y, W - ScaleX(18), ScaleY(34), 9, False, $FFFFFF, False);
+    Y := Y + ScaleY(36);
+  end;
+
+  // Foot: Uganda's colours as a thin rule, then the credit as in the extension's footer.
+  Y := P.Height - ScaleY(118);
+  Seg := W div 3;
+  SideBar(P, Pad, Y, Seg, ScaleY(3), $000000);
+  SideBar(P, Pad + Seg, Y, Seg, ScaleY(3), $04DCFC);
+  SideBar(P, Pad + 2 * Seg, Y, W - 2 * Seg, ScaleY(3), $0000D9);
+  Y := Y + ScaleY(9);
+  SideText(P, 'EFRISConnect - Free & Open Source', ScaleX(4), Y, P.Width - ScaleX(8), ScaleY(16), 8, True, $FFFFFF, True);
+  SideText(P, 'A project of', ScaleX(4), Y + ScaleY(16), P.Width - ScaleX(8), ScaleY(15), 8, False, $C9E6C8, True);
+  SideText(P, 'The Tukei Hope Initiative', ScaleX(4), Y + ScaleY(31), P.Width - ScaleX(8), ScaleY(15), 8, True, $25A8F9, True);
+  SideText(P, 'Community Based Organisation, Entebbe, Uganda', ScaleX(4), Y + ScaleY(46), P.Width - ScaleX(8), ScaleY(28), 8, False, $C9E6C8, True);
+  SideText(P, 'Registration No. EMC/CBO/025' + #13#10 + 'Your Hope, Our Mission', ScaleX(4), Y + ScaleY(74), P.Width - ScaleX(8), ScaleY(30), 8, False, $C9E6C8, True);
+end;
+
+procedure InitializeWizard;
+var PrevMode, PrevVersion: String; SavedData: AnsiString; Site: TNewStaticText;
+begin
+  Upgrading := RegQueryStringValue(HKLM, 'Software\EFRISConnect', 'Version', PrevVersion);
+  ExtractTemporaryFile('logo-tile.bmp');
+  SidePanel(WizardForm.WizardBitmapImage);
+  SidePanel(WizardForm.WizardBitmapImage2);
+  // Long lines in the "Ready to Install" summary wrap instead of running off the edge.
+  WizardForm.ReadyMemo.WordWrap := True;
+  WizardForm.ReadyMemo.ScrollBars := ssVertical;
+
   // The website as a link under the welcome text.
   Site := TNewStaticText.Create(WizardForm);
   Site.Parent := WizardForm.WelcomePage;
@@ -215,10 +308,19 @@ begin
   CopyDataBox.Parent := DataPage.Surface;
   CopyDataBox.Top := DataPage.Edits[0].Top + DataPage.Edits[0].Height + ScaleY(16);
   CopyDataBox.Width := DataPage.SurfaceWidth;
-  CopyDataBox.Height := ScaleY(34);
-  CopyDataBox.Caption := 'Copy my current Manager data (Documents\Manager.io) into this folder if it is empty. ' +
-    'Close Manager first. The original is kept as a backup.';
+  CopyDataBox.Height := ScaleY(20);
+  CopyDataBox.Caption := 'Copy my current Manager data into this folder if it is empty';
   CopyDataBox.Checked := True;
+  // The detail on its own wrapping line (a tick box caption does not wrap).
+  CopyNote := TNewStaticText.Create(DataPage);
+  CopyNote.Parent := DataPage.Surface;
+  CopyNote.Top := CopyDataBox.Top + CopyDataBox.Height + ScaleY(4);
+  CopyNote.Left := ScaleX(18);
+  CopyNote.AutoSize := False;
+  CopyNote.WordWrap := True;
+  CopyNote.Width := DataPage.SurfaceWidth - ScaleX(18);
+  CopyNote.Height := ScaleY(32);
+  CopyNote.Caption := 'From Documents\Manager.io. Close Manager first. The original is kept as a backup.';
 
   // No page for the EFRIS private key: it is pasted in EFRISConnect (Settings >
   // EFRIS Credentials), where it is stored encrypted, never as a plain file.
@@ -260,6 +362,13 @@ begin
   if IsTill then Result := Result + 'Till (trusts the shop server, nothing runs here)'
   else if IsServer then Result := Result + 'Shop server (other computers connect to it)'
   else Result := Result + 'This computer only';
+  if IsServer then begin
+    Result := Result + NewLine + NewLine + 'Manager Server:' + NewLine + Space;
+    if Trim(ManagerPage.Values[0]) = '' then Result := Result + 'started by you (not by EFRISConnect)'
+    else Result := Result + ManagerPage.Values[0] + NewLine + Space + 'Data folder: ' + DataPage.Values[0] +
+      NewLine + Space + 'Started now and whenever you sign in to Windows';
+    Result := Result + NewLine + Space + 'Port: ' + MgrPort('') + ' (tills use https://' + Lowercase(GetComputerNameString) + ':' + MgrHttpsPort('') + ')';
+  end;
   if MemoDirInfo <> '' then Result := Result + NewLine + NewLine + MemoDirInfo;
   if MemoTasksInfo <> '' then Result := Result + NewLine + NewLine + MemoTasksInfo;
   if not IsTill then begin
@@ -350,15 +459,16 @@ begin
       '    https://' + Host + ':5443/extension' + #13#10 +
       'Tills open Manager (encrypted) at:' + #13#10 +
       '    https://' + Host + ':' + MgrHttpsPort('') + #13#10#13#10 +
-      'Tills: copy C:\ProgramData\EFRISConnect\data\till-kit to a USB stick and run this Setup on each till ' +
-      '(choose "Till"), or run "Trust EFRISConnect server.bat" from the kit.' + #13#10#13#10 +
-      'The icon next to the clock shows the status and has Restart, Logs and Copy URL.'
+      'For each till: copy C:\ProgramData\EFRISConnect\data\till-kit to a USB stick and run this Setup there (choose "Till").'
   else
     WizardForm.FinishedLabel.Caption :=
       'EFRISConnect starts with Windows.' + #13#10#13#10 +
       'Manager custom button URL (every EFRISConnect button):' + #13#10 +
       '    https://localhost:5443/extension' + #13#10#13#10 +
       'The icon next to the clock shows the status and has Restart, Logs and Copy URL.';
+  // Size the text to its lines and put the options below it (they covered the last lines).
+  WizardForm.AdjustLabelHeight(WizardForm.FinishedLabel);
+  WizardForm.RunList.Top := WizardForm.FinishedLabel.Top + WizardForm.FinishedLabel.Height + ScaleY(12);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
