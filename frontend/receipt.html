@@ -81,8 +81,11 @@ button, input, select, textarea { font: inherit; }
 
 /* page header */
 .hd { display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center; padding-bottom: 12px; border-bottom: 3px double var(--rule); }
-.hd-left { display: flex; gap: 14px; align-items: center; min-width: 0; }
-.hd-logo { width: 68px; height: 68px; object-fit: contain; flex-shrink: 0; }
+.hd-left { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; min-width: 0; }
+/* The name keeps a readable width: with a wide logo it moves under the logo instead of being squeezed. */
+.hd-left > div { flex: 1 1 200px; min-width: 0; }
+/* Square and wide logos alike: fixed height, width follows the logo up to a limit. */
+.hd-logo { width: auto; height: 64px; max-width: 220px; object-fit: contain; object-position: left center; flex-shrink: 0; }
 .hd-name { font-size: 22px; font-weight: 700; letter-spacing: -.2px; line-height: 1.15; }
 .hd-name2 { font-size: 12.5px; font-weight: 600; margin-top: 1px; }
 .hd-lines { font-size: 11.5px; margin-top: 3px; line-height: 1.5; }
@@ -101,7 +104,8 @@ button, input, select, textarea { font: inherit; }
 .kv .k:nth-last-child(2), .kv .v:last-child { border-bottom: 0; }
 .kv .v { overflow-wrap: anywhere; }
 .kv .v.strong { font-weight: 700; }
-.mono { letter-spacing: .3px; }
+.mono { font-family: var(--docmono); letter-spacing: 0; }
+.kv .v.code { font-size: 11px; }
 .notice { padding: 8px 10px; font-size: 12px; }
 
 /* items */
@@ -126,6 +130,8 @@ table.items .c { text-align: center; }
 .sum { padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
 .sum .ln { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
 .sum .ln span:last-child { text-align: right; white-space: nowrap; }
+.sum .ln span:first-child { white-space: nowrap; }
+#sheet.a5 .sum .ln { gap: 6px; }
 .sum .gross { font-size: 15px; font-weight: 700; border-top: 1px solid var(--rule); padding-top: 5px; margin-top: 2px; }
 .sum .bal { font-weight: 700; }
 .words { font-size: 11px; color: var(--muted); font-style: italic; padding: 0 10px 8px; }
@@ -149,35 +155,58 @@ table.items .c { text-align: center; }
 #sheet.a5 .kv { grid-template-columns: 106px minmax(0, 1fr); font-size: 11px; }
 #sheet.a5 table.items, #sheet.a5 .tax-t, #sheet.a5 .sum { font-size: 11px; }
 /* A5: tighter rows and a smaller QR so a typical receipt fits one sheet */
-#sheet.a5 .hd { padding-bottom: 8px; } #sheet.a5 .hd-logo { width: 52px; height: 52px; }
+#sheet.a5 .hd { padding-bottom: 8px; } #sheet.a5 .hd-logo { width: auto; height: 48px; max-width: 160px; }
 #sheet.a5 .box-h { padding: 3px 8px; font-size: 9.5px; }
-#sheet.a5 .kv .v.code { font-size: 10px; white-space: nowrap; }
+#sheet.a5 .kv .v.code { font-size: 9.5px; }
 #sheet.a5 .kv { padding: 2px 8px 4px; line-height: 1.3; } #sheet.a5 .kv .k, #sheet.a5 .kv .v { padding: 2px 0; }
 #sheet.a5 table.items th, #sheet.a5 table.items td { padding: 4px 6px; }
 #sheet.a5 .tax-t th, #sheet.a5 .tax-t td { padding: 4px 8px; }
-#sheet.a5 .sum { padding: 6px 8px; gap: 2px; } #sheet.a5 .sum .gross { font-size: 12px; }
-.tax-t td:first-child { white-space: nowrap; }
+#sheet.a5 .sum { padding: 6px 8px; gap: 2px; } #sheet.a5 .sum .gross { font-size: 11.5px; }
+.tax-t td:first-child { white-space: normal; }
+.tax-t th.r { white-space: nowrap; }
+.tax-t { font-variant-numeric: tabular-nums; }
 #sheet.a5 .tax-t th, #sheet.a5 .tax-t td:not(:first-child) { padding-left: 4px; }
 #sheet.a5 .verify { padding: 8px; gap: 12px; } #sheet.a5 .verify .vt { font-size: 10.5px; }
 #sheet.a5 .qr img { width: 84px; height: 84px; }
 #sheet.a5 .sigs { padding-top: 16px; }
-#sheet.a6 { padding: 16px 16px 14px; gap: 9px; }
-#sheet.a6 .hd { grid-template-columns: 1fr; text-align: left; }
-#sheet.a6 .hd-right { text-align: left; }
-#sheet.a6 .hd-logo { width: 44px; height: 44px; }
-#sheet.a6 .hd-name { font-size: 15px; } #sheet.a6 .hd-title { font-size: 14px; letter-spacing: 1px; }
-#sheet.a6 .grid2 { grid-template-columns: 1fr; gap: 8px; }
-#sheet.a6 .kv { grid-template-columns: 1fr; row-gap: 0; font-size: 10.5px; }
-#sheet.a6 .kv .k { margin-top: 3px; }
-#sheet.a6 table.items, #sheet.a6 .tax-t, #sheet.a6 .sum { font-size: 10.5px; }
-#sheet.a6 table.items td, #sheet.a6 table.items th { padding: 5px 4px; }
-#sheet.a6 .verify { grid-template-columns: 1fr; justify-items: center; text-align: center; }
-#sheet.a6 .wm span { font-size: 70px; }
+/* A6 (105 x 148 mm): a compact card, not a shrunken A4. Slim section labels instead of
+   dark bands, label and value on one line, no outer boxes, items without No. and URA
+   code columns, QR centred with the fiscal details. */
+#sheet.a6 { padding: 14px 14px 12px; gap: 8px; }
+#sheet.a6 .hd { grid-template-columns: 1fr; gap: 6px; padding-bottom: 8px; border-bottom: 2px solid var(--rule); }
+#sheet.a6 .hd-left { gap: 10px; }
+#sheet.a6 .hd-logo { width: auto; height: 34px; max-width: 130px; }
+#sheet.a6 .hd-name { font-size: 14px; }
+#sheet.a6 .hd-name2 { font-size: 10.5px; }
+#sheet.a6 .hd-lines { font-size: 9.5px; line-height: 1.4; }
+#sheet.a6 .hd-right { text-align: left; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+#sheet.a6 .hd-title { font-size: 12px; letter-spacing: 1.5px; }
+#sheet.a6 .hd-sub { font-size: 9px; margin: 0; }
+#sheet.a6 .grid2 { grid-template-columns: 1fr; gap: 6px; }
+#sheet.a6 .box { border: 0; }
+#sheet.a6 .box-h { background: none; color: var(--band); border-bottom: 1.5px solid var(--band); font-size: 8.5px; letter-spacing: 1.2px; padding: 0 0 2px; }
+#sheet.a6 .kv { grid-template-columns: auto minmax(0, 1fr); column-gap: 0; padding: 2px 0 0; font-size: 10px; line-height: 1.3; }
+#sheet.a6 .kv .k { padding-right: 10px; }
+#sheet.a6 .kv .k, #sheet.a6 .kv .v { padding: 2px 0; border-bottom: 1px solid var(--hair); }
+#sheet.a6 .kv .k { font-size: 9px; color: var(--muted); }
+#sheet.a6 .kv .v { text-align: right; }
+#sheet.a6 .kv .v.code { font-size: 9.5px; }
+#sheet.a6 table.items, #sheet.a6 .tax-t, #sheet.a6 .sum { font-size: 9.5px; }
+#sheet.a6 table.items th:first-child, #sheet.a6 table.items td:first-child { display: none; }
+#sheet.a6 table.items thead th { font-size: 8.5px; padding: 3px 3px; }
+#sheet.a6 table.items td { padding: 4px 3px; }
+#sheet.a6 .it-sub { font-size: 8.5px; }
+#sheet.a6 .tax-t th, #sheet.a6 .tax-t td { padding: 3px 3px; }
+#sheet.a6 .verify { grid-template-columns: 1fr; justify-items: center; text-align: center; gap: 6px; padding: 8px 0; }
+#sheet.a6 .verify .vt { font-size: 9px; }
+#sheet.a6 .qr img { width: 92px; height: 92px; }
+#sheet.a6 .wm span { font-size: 60px; }
 
 /* ── Thermal slip (80mm / 58mm) ── */
 #sheet.slip { width: 302px; padding: 14px 12px 18px; font-family: var(--docmono); color: #000; font-size: 11.5px; line-height: 1.45; display: flex; flex-direction: column; gap: 8px; }
 #sheet.slip.w58 { width: 219px; padding: 10px 8px 14px; font-size: 10.5px; }
 .sl-c { text-align: center; }
+.sl-logo { display: block; margin: 0 auto 6px; max-width: 62%; max-height: 64px; object-fit: contain; }
 .sl-b { font-weight: 700; }
 .sl-big { font-size: 14px; font-weight: 700; }
 .sl-row { display: flex; justify-content: space-between; gap: 6px; }
@@ -232,6 +261,8 @@ table.items .c { text-align: center; }
       </div>
     </div>
     <label><input type="checkbox" id="czShowLogo" onchange="czSet('showLogo',this.checked)"/> Show logo</label>
+    <label><input type="checkbox" id="czLogoMono" onchange="czSet('logoMono',this.checked)"/> Black and white logo (A4, A5, A6)</label>
+    <label><input type="checkbox" id="czSlipLogo" onchange="czSet('slipLogo',this.checked)"/> Logo on 80mm and 58mm slips (always black and white)</label>
     <div class="hint">PNG or JPG up to 300 KB. Saved for this business.</div>
     <h3 style="margin-top:12px;">SECTION BAND COLOUR</h3>
     <div class="row" id="czBands"></div>
@@ -373,7 +404,7 @@ const CUR = /^[A-Z]{3}$/.test(D.currency) ? D.currency : 'UGX';
 const PAPERS = ['A4', 'A5', 'Letter', 'A6', '80mm', '58mm'];
 const BANDS = [['#1f2937', 'Charcoal'], ['#14532d', 'Forest green'], ['#1e3a8a', 'Navy'], ['#7c2d12', 'Rust']];
 const DEF = {
-  band: '#1f2937', showLogo: true, logo: '', nameMode: 'legal', footer: '',
+  band: '#1f2937', showLogo: true, logo: '', logoMono: false, slipLogo: true, nameMode: 'legal', footer: '',
   header: { address: true, phone: true, email: true, website: false, websiteText: '', pobox: false, poboxText: '' },
   pay: { bank: '', accName: '', accNo: '', momo: '', terms: '' },
   show: { itemCodes: true, uraCode: true, unit: true, discount: true, servedBy: true, signatures: false, notes: true },
@@ -486,8 +517,9 @@ window.addEventListener('resize', () => { if (!window.matchMedia || !window.matc
 
 function renderPage() {
   const [nm, nm2] = bizTitle(), lines = headerLines(), S = P.show;
-  const logo = P.showLogo ? safeImg(P.logo || D.logoUrl) : '';
-  const showUra = S.uraCode && LINES.some(l => l.commodityCode);
+  const logo0 = P.showLogo ? safeImg(P.logo || D.logoUrl) : '';
+  const logo = logo0 && P.logoMono ? (monoLogo(logo0) || logo0) : logo0;
+  const showUra = S.uraCode && PAPER !== 'A6' && LINES.some(l => l.commodityCode);
   const showDisc = S.discount && LINES.some(l => l.discN > 0);
   const showUnit = S.unit && LINES.some(l => l.unitTxt);
   let h = '';
@@ -576,7 +608,9 @@ function renderPage() {
 
 function renderSlip() {
   const [nm] = bizTitle(), lines = headerLines(), S = P.show;
-  let h = '<div class="sl-c"><div class="sl-big">' + esc(nm.toUpperCase()) + '</div>' + lines.map(l => '<div class="sl-wrap">' + esc(l) + '</div>').join('') +
+  const slipLg = P.showLogo && P.slipLogo !== false ? safeImg(P.logo || D.logoUrl) : '';
+  const slipMono = slipLg ? monoLogo(slipLg) : '';
+  let h = (slipMono ? '<img class="sl-logo" alt="" src="' + slipMono + '"/>' : '') + '<div class="sl-c"><div class="sl-big">' + esc(nm.toUpperCase()) + '</div>' + lines.map(l => '<div class="sl-wrap">' + esc(l) + '</div>').join('') +
     (D.bizTin ? '<div class="sl-b">TIN: ' + esc(D.bizTin) + '</div>' : '') + (D.bizBrn ? '<div>BRN: ' + esc(D.bizBrn) + '</div>' : '') + '</div>';
   h += '<div class="sl-c sl-b sl-band">' + esc(docTitle().toUpperCase()) + '</div>';
   h += '<div>' + srow(KIND === 'invoice' ? 'Invoice' : KIND === 'credit' ? 'Credit note' : 'Receipt', D.ref || '-') + srow('Date', D.date) +
@@ -826,6 +860,39 @@ function czBandCustom(v, live) { if (!/^#[0-9a-f]{6}$/i.test(v)) return; P.band 
   if (!live) syncCz(); }
 function czBandHex(v) { v = v.trim(); if (v && v[0] !== '#') v = '#' + v; if (/^#[0-9a-f]{6}$/i.test(v)) { const pk = el('czBandPick'); if (pk) pk.value = v.toLowerCase(); czBandCustom(v, 1); } }
 function czSetH(k, v) { P.header[k] = v; savePrefs(); render(); }
+// Any logo as pure black and white: thermal printers print one colour, and a grey or
+// colour logo comes out as a muddy patch. Pixels darker than the logo's own average
+// become black, the rest (and transparent areas) white. Made once per logo, in the
+// background; the document draws again when it is ready.
+const _mono = {};
+function monoLogo(src) {
+  if (_mono[src]) return _mono[src] === 1 ? '' : _mono[src];
+  _mono[src] = 1;
+  const im = new Image();
+  im.onload = () => {
+    try {
+      const k = Math.min(1, 360 / Math.max(im.width, im.height));
+      const w = Math.max(1, Math.round(im.width * k)), h = Math.max(1, Math.round(im.height * k));
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const g = c.getContext('2d'); g.drawImage(im, 0, 0, w, h);
+      const d = g.getImageData(0, 0, w, h), px = d.data;
+      let sum = 0, n = 0;
+      for (let i = 0; i < px.length; i += 4) if (px[i + 3] > 127) { sum += 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]; n++; }
+      const cut = n ? Math.min(200, Math.max(60, sum / n)) : 128;
+      for (let i = 0; i < px.length; i += 4) {
+        const lum = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+        const ink = px[i + 3] > 127 && lum < cut;
+        px[i] = px[i + 1] = px[i + 2] = ink ? 0 : 255; px[i + 3] = ink ? 255 : 0;
+      }
+      g.putImageData(d, 0, 0);
+      _mono[src] = c.toDataURL('image/png');
+      render();
+    } catch (_) { _mono[src] = 1; }
+  };
+  im.onerror = () => { _mono[src] = 1; };
+  im.src = src;
+  return '';
+}
 function czSetP(k, v) { P.pay[k] = v; savePrefs(); render(); }
 function czSetS(k, v) { P.show[k] = v; savePrefs(); render(); }
 function czSetPaper(kind, v) { P.paper[kind] = v; savePrefs(); }
@@ -843,6 +910,8 @@ function syncCz() {
   const lg = safeImg(P.logo || D.logoUrl);
   el('czLogoPrev').innerHTML = lg ? '<img alt="Logo" src="' + lg + '"/>' : 'LOGO';
   el('czShowLogo').checked = !!P.showLogo;
+  el('czLogoMono').checked = !!P.logoMono;
+  el('czSlipLogo').checked = P.slipLogo !== false;
   el('czNameMode').value = P.nameMode;
   el('czBands').innerHTML = BANDS.map(b => '<button type="button" class="sw' + (P.band === b[0] ? ' on' : '') + '" style="background:' + b[0] + '" aria-label="' + esc(b[1]) + '" data-c="' + b[0] + '"></button>').join('') +
     '<span class="czCustom' + (BANDS.some(b => b[0] === P.band) ? '' : ' on') + '" title="Custom colour"><input type="color" id="czBandPick" aria-label="Pick a custom colour" value="' + esc(P.band) + '" oninput="czBandCustom(this.value,1)" onchange="czBandCustom(this.value)"/>' +
