@@ -55,6 +55,8 @@ Source: "{#StageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion; Check: Is
 Source: "efrisconnect.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; The logo for the side panel Setup draws as text (used by Setup only, not installed).
 Source: "logo-tile.bmp"; Flags: dontcopy
+; The brand word mark (Inter, white on green), from brand/EFRISConnect-logos.
+Source: "wordmark-panel.bmp"; Flags: dontcopy
 
 [Messages]
 WelcomeLabel1=Welcome to EFRISConnect
@@ -185,6 +187,7 @@ begin
   Result.Font.Color := Color;
   if Bold then Result.Font.Style := [fsBold];
   if Centre then Result.Alignment := taCenter;
+  Result.ShowAccelChar := False;   // show '&' as itself, not as a shortcut-key underline
   Result.Caption := Text;
 end;
 
@@ -200,7 +203,7 @@ begin
 end;
 
 procedure SidePanel(Pic: TBitmapImage);
-var P: TPanel; Logo: TBitmapImage; Pad, W, Y, I, Seg: Integer; Points: array[0..2] of String;
+var P: TPanel; Logo, WordMark: TBitmapImage; Org: TLabel; Pad, W, Y, I, Seg: Integer; Points: array[0..2] of String;
 begin
   Pic.Visible := False;
   P := TPanel.Create(WizardForm);
@@ -217,22 +220,32 @@ begin
   Logo.SetBounds(Pad, ScaleY(22), ScaleX(44), ScaleY(44));
   Logo.Bitmap.LoadFromFile(ExpandConstant('{tmp}\logo-tile.bmp'));
 
-  SideText(P, 'EFRISConnect', Pad, ScaleY(76), W, ScaleY(28), 15, True, $FFFFFF, False);
-  SideText(P, 'URA EFRIS e-receipts and e-invoices for Manager.io', Pad, ScaleY(106), W, ScaleY(36), 9, False, $C9E6C8, False);
-  SideBar(P, Pad, ScaleY(148), ScaleX(28), ScaleY(3), $25A8F9);
+  // The name as the brand word mark (480 x 53 px picture), not typed text, so Setup
+  // matches the logo pack.
+  WordMark := TBitmapImage.Create(WizardForm);
+  WordMark.Parent := P;
+  WordMark.Stretch := True;
+  I := W; if I > ScaleX(176) then I := ScaleX(176);
+  WordMark.SetBounds(Pad, ScaleY(76), I, I * 53 div 480);
+  WordMark.Bitmap.LoadFromFile(ExpandConstant('{tmp}\wordmark-panel.bmp'));
+  SideText(P, 'URA EFRIS e-receipts and e-invoices for Manager.io', Pad, ScaleY(100), W, ScaleY(32), 9, False, $C9E6C8, False);
+  SideBar(P, Pad, ScaleY(136), ScaleX(28), ScaleY(3), $25A8F9);
 
   Points[0] := 'Receipts, invoices and credit notes';
   Points[1] := 'Keeps selling when the internet is down';
   Points[2] := 'Your data stays on your computer';
-  Y := ScaleY(162);
+  Y := ScaleY(148);
   for I := 0 to 2 do begin
     SideText(P, #$2713, Pad, Y, ScaleX(16), ScaleY(18), 10, True, $25A8F9, False);
-    SideText(P, Points[I], Pad + ScaleX(18), Y, W - ScaleX(18), ScaleY(34), 9, False, $FFFFFF, False);
-    Y := Y + ScaleY(36);
+    SideText(P, Points[I], Pad + ScaleX(18), Y, W - ScaleX(18), ScaleY(30), 9, False, $FFFFFF, False);
+    Y := Y + ScaleY(32);
   end;
 
   // Foot: Uganda's colours as a thin rule, then the credit as in the extension's footer.
-  Y := P.Height - ScaleY(118);
+  // Anchored to the bottom, but never over the points (the panel is shorter on some screens).
+  I := Y + ScaleY(6);
+  Y := P.Height - ScaleY(114);
+  if Y < I then Y := I;
   Seg := W div 3;
   SideBar(P, Pad, Y, Seg, ScaleY(3), $000000);
   SideBar(P, Pad + Seg, Y, Seg, ScaleY(3), $04DCFC);
@@ -240,33 +253,52 @@ begin
   Y := Y + ScaleY(9);
   SideText(P, 'EFRISConnect - Free & Open Source', ScaleX(4), Y, P.Width - ScaleX(8), ScaleY(16), 8, True, $FFFFFF, True);
   SideText(P, 'A project of', ScaleX(4), Y + ScaleY(16), P.Width - ScaleX(8), ScaleY(15), 8, False, $C9E6C8, True);
-  SideText(P, 'The Tukei Hope Initiative', ScaleX(4), Y + ScaleY(31), P.Width - ScaleX(8), ScaleY(15), 8, True, $25A8F9, True);
+  Org := SideText(P, 'The Tukei Hope Initiative', ScaleX(4), Y + ScaleY(31), P.Width - ScaleX(8), ScaleY(15), 8, True, $25A8F9, True);
+  Org.Font.Style := [fsBold, fsUnderline];
+  Org.Cursor := crHand;
+  Org.OnClick := @OpenWebsite;
   SideText(P, 'Community Based Organisation, Entebbe, Uganda', ScaleX(4), Y + ScaleY(46), P.Width - ScaleX(8), ScaleY(28), 8, False, $C9E6C8, True);
   SideText(P, 'Registration No. EMC/CBO/025' + #13#10 + 'Your Hope, Our Mission', ScaleX(4), Y + ScaleY(74), P.Width - ScaleX(8), ScaleY(30), 8, False, $C9E6C8, True);
 end;
 
 procedure InitializeWizard;
-var PrevMode, PrevVersion: String; SavedData: AnsiString; Site: TNewStaticText;
+var PrevMode, PrevVersion: String; SavedData: AnsiString; Site, Ask, AskHint: TNewStaticText;
 begin
   Upgrading := RegQueryStringValue(HKLM, 'Software\EFRISConnect', 'Version', PrevVersion);
   ExtractTemporaryFile('logo-tile.bmp');
+  ExtractTemporaryFile('wordmark-panel.bmp');
   SidePanel(WizardForm.WizardBitmapImage);
   SidePanel(WizardForm.WizardBitmapImage2);
   // Long lines in the "Ready to Install" summary wrap instead of running off the edge.
   WizardForm.ReadyMemo.WordWrap := True;
   WizardForm.ReadyMemo.ScrollBars := ssVertical;
 
-  // The website as a link under the welcome text.
+  // Under the welcome text: a call to support the work, with the organisation's name
+  // as the link to its website (ways to give, contact details).
+  WizardForm.AdjustLabelHeight(WizardForm.WelcomeLabel2);
+  Ask := TNewStaticText.Create(WizardForm);
+  Ask.Parent := WizardForm.WelcomePage;
+  Ask.AutoSize := False;
+  Ask.WordWrap := True;
+  Ask.Left := WizardForm.WelcomeLabel2.Left;
+  Ask.Width := WizardForm.WelcomeLabel2.Width;
+  Ask.Top := WizardForm.WelcomeLabel2.Top + WizardForm.WelcomeLabel2.Height + ScaleY(10);
+  Ask.Height := ScaleY(30);
+  Ask.Caption := 'EFRISConnect is free. You can help keep it that way by supporting the work of';
   Site := TNewStaticText.Create(WizardForm);
   Site.Parent := WizardForm.WelcomePage;
-  Site.Caption := 'The Tukei Hope Initiative (tukeihopeinitiative.org)';
+  Site.Caption := 'The Tukei Hope Initiative';
   Site.Cursor := crHand;
   Site.Font.Color := clBlue;
-  Site.Font.Style := [fsUnderline];
+  Site.Font.Style := [fsUnderline, fsBold];
   Site.OnClick := @OpenWebsite;
-  WizardForm.AdjustLabelHeight(WizardForm.WelcomeLabel2);
-  Site.Left := WizardForm.WelcomeLabel2.Left;
-  Site.Top := WizardForm.WelcomeLabel2.Top + WizardForm.WelcomeLabel2.Height + ScaleY(8);
+  Site.Left := Ask.Left;
+  Site.Top := Ask.Top + Ask.Height;
+  AskHint := TNewStaticText.Create(WizardForm);
+  AskHint.Parent := WizardForm.WelcomePage;
+  AskHint.Caption := 'Click the name to donate or to get in touch.';
+  AskHint.Left := Ask.Left;
+  AskHint.Top := Site.Top + Site.Height + ScaleY(2);
 
   ModePage := CreateInputOptionPage(wpLicense,
     'How will this computer be used?', 'You can run Setup again later to change this.',

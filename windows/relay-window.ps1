@@ -190,7 +190,7 @@ function Ago($t) {
 }
 function Read-Json($name) { try { return @((Get-Content (Join-Path $DataDir $name) -Raw | ConvertFrom-Json) | ForEach-Object { $_ }) } catch { return @() } }
 
-# ── Status and setup ──
+# -- Status and setup --
 $script:state = ''
 function Update-Status {
   $health = $null
@@ -208,7 +208,7 @@ function Update-Status {
   $ui.BtnStop.IsEnabled = ($state -ne 'stopped')
 
   $since = if ($health -and $health.startedAt) { (When $health.startedAt) + ' (' + (Ago $health.startedAt) + ')' } elseif ($state -eq 'starting') { 'Starting ...' } else { 'Not running' }
-  $last = if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 2000) { When $info.LastRunTime.ToString('o') } else { '' }
+  $last = if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 2000) { When $info.LastRunTime.ToString('o') } elseif ($health -and $health.startedAt) { When $health.startedAt } else { '' }
   $sent = @(Read-Json 'submission_log.json' | Where-Object { $_.status -eq 'success' -and $_.submittedAt -and $_.importedFromUra -ne 'True' })
   $lastSent = ''; if ($sent.Count) { $t = ($sent | Sort-Object { $_.submittedAt } | Select-Object -Last 1).submittedAt; $lastSent = (When $t) + ' (' + (Ago $t) + ' ago)' -replace ' \(just now ago\)', ' (just now)' }
   $today = @($sent | Where-Object { try { ([DateTime]::Parse($_.submittedAt)).ToLocalTime().Date -eq (Get-Date).Date } catch { $false } }).Count
@@ -229,14 +229,40 @@ function Update-Status {
     @('Address', $Address),
     @('Data folder', $DataDir),
     @('Logs folder', $LogDir),
-    @('Runs as', $(if ($task) { 'Windows task, starts with the computer' } else { 'Task not found: run Setup again' }), $(if ($task) { '' } else { '#B71C1C' }))
+    # Windows shows a task that runs as SYSTEM only to administrators, so "not visible"
+    # is normal here; a relay that answers is proof enough that the task works.
+    @('Runs as', $(if ($task -or $health) { 'Windows task, starts with the computer' } else { 'Windows task (status needs administrator rights)' }), $(if ($task -or $health) { '' } else { '#8D5A00' }))
   )
   if ($svc) { $setup += , @('Offline Enabler', $(if ($svc.Status -eq 'Running') { 'Running' } else { 'Stopped' })) }
   Set-Rows $ui.SetupGrid $setup
 }
 
-# ── Activity: the relay's activity log (plain lines), newest at the bottom ──
+# -- Activity: the relay's activity log (plain lines), newest at the bottom --
 $script:logSig = ''
+# The log is written for support; this turns its technical lines into plain words.
+# Returns '' for lines that are only noise here (automatic retries).
+function Plain-Text([string]$t) {
+  $t = $t -replace '[\p{So}\p{Cs}\uFE0F]', '' -replace '^\s*\[(ERROR|INFO|WARN)\]\s*', ''
+  $t = $t.Trim() -replace '^[-*\s\u2022]+', ''
+  if ($t -match 'transient error .* retry \d/\d' -or $t -match '^=+$') { return '' }
+  if ($t -match '^(Manager\.io|EFRIS) network call failed\s*(\{.*\})\s*$') {
+    $who = $Matches[1]; $m = $null; try { $m = $Matches[2] | ConvertFrom-Json } catch {}
+    $msg = if ($m) { [string]$m.message } else { '' }
+    $hostPart = ''; if ($m -and $m.url) { try { $u = [Uri]$m.url; $hostPart = $u.Host + ':' + $u.Port } catch {} }
+    if ($who -eq 'EFRIS') {
+      if ($msg -match 'ENOTFOUND|EAI_AGAIN') { return 'URA could not be reached (no internet connection?).' }
+      if ($msg -match 'ETIMEDOUT|timed out') { return 'URA took too long to answer.' }
+      return 'URA could not be reached: ' + $msg
+    }
+    if ($msg -match 'ECONNREFUSED') { return "Manager did not answer at $hostPart. Is Manager (or Manager Server) open?" }
+    if ($msg -match 'ETIMEDOUT|timed out') { return "Manager at $hostPart took too long to answer." }
+    return "Manager could not be reached at ${hostPart}: $msg"
+  }
+  if ($t -match 'vault placeholders but tenant') { return 'A saved password or access token for a business is missing on this computer. Enter it again in EFRISConnect Settings.' }
+  if ($t -match '^Manager detected at (\S+)') { return 'Found Manager at ' + ($Matches[1] -replace '/api2$', '') + '.' }
+  if ($t -match '^(\S.*?)\s*\{".*\}\s*$') { return $Matches[1] }   # drop a trailing technical detail block
+  return $t
+}
 function Tag-Of($text, $level) {
   if ($level -eq 'error') { return @('Problem', '#FFEBEE', '#B71C1C', 'p') }
   if ($level -eq 'warn' -or $text -match '(?i)\b(failed|refused|rejected|could not|not reachable|unreachable|offline)\b') { return @('Check', '#FFF8E1', '#8D5A00', 'p') }
@@ -254,12 +280,12 @@ function Update-Log([switch]$Force) {
   $script:logSig = $sig
   $atEnd = $ui.LogScroll.VerticalOffset -ge ($ui.LogScroll.ScrollableHeight - 4)
   $ui.LogList.Children.Clear()
-  $lines = if ($f) { Get-Content $f.FullName -Tail 600 } else { @() }
+  $lines = if ($f) { Get-Content $f.FullName -Tail 600 -Encoding UTF8 } else { @() }
   $shown = 0
   foreach ($ln in $lines) {
     try { $e = $ln | ConvertFrom-Json } catch { continue }
     if ($e.debug -eq $true) { continue }
-    $text = ([string]$e.text).Trim() -replace '^[•\-\*\s]+', ''
+    $text = Plain-Text ([string]$e.text)
     if (!$text) { continue }
     $tag = Tag-Of $text $e.level
     if ($filter -and $tag[3] -ne $filter) { continue }
@@ -283,7 +309,7 @@ function Update-Log([switch]$Force) {
   if ($atEnd -or $Force) { $ui.LogScroll.ScrollToEnd() }
 }
 
-# ── Actions ──
+# -- Actions --
 function Run-Elevated([string]$action) {
   try { Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Helper`" -Action $action" }
   catch { return }   # the Administrator prompt was declined
