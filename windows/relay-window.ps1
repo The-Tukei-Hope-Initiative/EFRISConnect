@@ -385,7 +385,9 @@ $MgrPort = Read-Setting 'lan-manager-port.txt' '5000'
 $MgrExe  = Read-Setting 'manager-server-path.txt' ''
 $MgrData = Read-Setting 'manager-server-data.txt' ''
 $TrayLnk = Join-Path ([Environment]::GetFolderPath('CommonStartup')) 'EFRISConnect tray icon.lnk'
+# Manager Desktop: the Microsoft Store app (opened by its app ID) or a classic install.
 function Find-ManagerDesktop {
+  try { $sa = Get-StartApps | Where-Object { $_.Name -eq 'Manager' -and $_.AppID -like 'Manager_*!*' } | Select-Object -First 1; if ($sa) { return 'shell:AppsFolder\' + $sa.AppID } } catch {}
   foreach ($c in @("$env:LOCALAPPDATA\Programs\Manager\ManagerDesktop.exe", "$env:LOCALAPPDATA\Programs\Manager\Manager.exe", "$env:ProgramFiles\Manager\ManagerDesktop.exe", "$env:ProgramFiles\Manager.io\ManagerDesktop.exe")) { if (Test-Path $c) { return $c } }
   return ''
 }
@@ -431,14 +433,14 @@ function Update-Controls($health, $task) {
     $mt = Get-ScheduledTask -TaskName 'EFRISConnect Manager Server' -ErrorAction SilentlyContinue
     $mgrAuto = if ($mt) { $mt.State -ne 'Disabled' } else { $true }
     Ctl-Row 'Manager Server Edition' $(if ($mgrUp) { "Running on port $MgrPort" } else { 'Stopped' }) $mgrUp ("Tills open it at https://$($env:COMPUTERNAME.ToLower()):$([int]$MgrPort + 1)") @(
-        @('Start', { if (Port-Open ([int]$MgrPort)) { Show-Note "Manager Server is already running on port $MgrPort." 'ok'; return }; if (!(Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue)) { $a = "--urls http://127.0.0.1:$MgrPort"; if ($MgrData) { $a += " --path `"$MgrData`"" }; Start-Process -FilePath $MgrExe -ArgumentList $a -WorkingDirectory (Split-Path -Parent $MgrExe) -WindowStyle Minimized }; Watch-Job 'Starting Manager Server. It is usually ready in 20 to 40 seconds; this message changes when it is.' { Port-Open ([int]$MgrPort) } "Manager Server is running on port $MgrPort. Tills and EFRISConnect can use it now." 120 $null }),
+        @('Start', { if (Port-Open ([int]$MgrPort)) { Show-Note "Manager Server is already running on port $MgrPort." 'ok'; return }; Run-Elevated 'manager-start' }),
         @('Open Manager', { Start-Process "http://localhost:$MgrPort" }),
-        @('Stop', { $a = [Windows.MessageBox]::Show($win, 'Tills and this computer cannot open Manager while it is stopped.', 'Stop Manager Server?', 'OKCancel', 'Warning'); if ($a -eq 'OK') { Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue | Stop-Process -Force; Watch-Job 'Stopping Manager Server.' { -not (Port-Open ([int]$MgrPort)) } 'Manager Server is stopped. Tills cannot open Manager until you start it again.' 30 $null } }, 'danger')
-      ) 'Start when I sign in' $mgrAuto 'manager-autostart-on' 'manager-autostart-off'
+        @('Stop', { $a = [Windows.MessageBox]::Show($win, 'Tills and this computer cannot open Manager while it is stopped.', 'Stop Manager Server?', 'OKCancel', 'Warning'); if ($a -eq 'OK') { Run-Elevated 'manager-stop' } }, 'danger')
+      ) 'Start with Windows (in the background)' $mgrAuto 'manager-autostart-on' 'manager-autostart-off'
   } else {
     $md = Find-ManagerDesktop
     $mgrUp = [bool](Get-Process -Name 'ManagerDesktop', 'Manager' -ErrorAction SilentlyContinue)
-    $btns = @(); if ($md) { $btns += , @('Open Manager Desktop', { Start-Process (Find-ManagerDesktop) }) }
+    $btns = @(); if ($md) { $btns += , @('Open Manager Desktop', { $t = Find-ManagerDesktop; if ($t -like 'shell:*') { Start-Process explorer.exe $t } else { Start-Process $t }; Show-Note 'Opening Manager Desktop. It is ready in a few seconds.' 'ok' }) }
     Ctl-Row 'Manager Desktop' $(if ($mgrUp) { 'Open' } else { 'Closed' }) $(if ($mgrUp) { $true } else { $null }) 'To use Manager Server Edition and serve tills, run Setup again and choose Shop server (your data is kept).' $btns '' $false '' ''
   }
   # URA Offline Enabler, when installed.
@@ -499,6 +501,8 @@ $Expect = @{
   'enabler-restart'= @('Restarting the URA Offline Enabler. It usually takes 1 to 2 minutes.', { (Get-Service TcsTomcat).Status -eq 'Running' }, 'The Offline Enabler is running again.', 180)
   'enabler-stop'   = @('Stopping the URA Offline Enabler.', { (Get-Service TcsTomcat).Status -eq 'Stopped' }, 'The Offline Enabler is stopped.', 90)
   'firewall-repair'= @('Setting the shop network firewall rules again.', $null, 'Firewall rules are set. Tills can reach this computer.', 60)
+  'manager-start'  = @('Starting Manager Server in the background. Approve the Windows prompt; it is usually ready in 20 to 40 seconds.', { Port-Open ([int]$MgrPort) }, 'Manager Server is running. Tills and EFRISConnect can use it now.', 120)
+  'manager-stop'   = @('Stopping Manager Server. Approve the Windows prompt.', { -not (Port-Open ([int]$MgrPort)) }, 'Manager Server is stopped. Tills cannot open Manager until you start it again.', 60)
   'reset-owner'    = @('Making a one-time owner reset code. It opens in Notepad.', $null, 'The reset code is in Notepad. Use it under "Forgot password" on this computer.', 60)
 }
 function Run-Elevated([string]$action) {

@@ -19,7 +19,7 @@
 param(
   [ValidateSet('setup', 'till', 'stop', 'start', 'relay-stop', 'restart', 'reset-owner', 'enabler-start', 'enabler-stop', 'enabler-restart', 'uninstall',
     'relay-autostart-on', 'relay-autostart-off', 'manager-autostart-on', 'manager-autostart-off', 'enabler-autostart-on', 'enabler-autostart-off',
-    'tray-autostart-on', 'tray-autostart-off', 'firewall-repair')][string]$Action = 'setup',
+    'tray-autostart-on', 'tray-autostart-off', 'firewall-repair', 'manager-start', 'manager-stop')][string]$Action = 'setup',
   [ValidateSet('single', 'server')][string]$Mode = 'single',
   [string]$ManagerExe = '',
   [int]$ManagerPort = 5000,
@@ -88,14 +88,17 @@ function Register-ManagerTask([string]$exe, [int]$port, [string]$who) {
   $dataArg = ''
   $df = Join-Path $DataDir 'manager-server-data.txt'
   if (Test-Path $df) { $d = (Get-Content $df -TotalCount 1).Trim(); if ($d) { $dataArg = " --path `"$d`"" } }
-  $act = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" `
-         -Argument "/d /c start `"Manager Server`" /min /D `"$dir`" `"$exe`" --urls http://127.0.0.1:$port$dataArg" -WorkingDirectory $dir
-  $trg = New-ScheduledTaskTrigger -AtLogOn -User $who
-  $pri = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive -RunLevel Limited
-  $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -Priority 4
+  # Runs in the background from Windows start-up (system account, no window and no
+  # taskbar button), before anyone signs in; restarted if it stops. Its data folder
+  # (--path) is in ProgramData, which the system account can use.
+  $act = New-ScheduledTaskAction -Execute $exe -Argument "--urls http://127.0.0.1:$port$dataArg" -WorkingDirectory $dir
+  $trg = New-ScheduledTaskTrigger -AtStartup
+  $pri = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+  $set = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -Priority 4 `
+         -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
   Register-ScheduledTask -TaskName $ManagerTask -Action $act -Trigger $trg -Principal $pri -Settings $set `
     -Description "Manager Server Edition for the shop network (port $port). Installed by EFRISConnect Setup." -Force | Out-Null
-  Log "Logon task '$ManagerTask' registered for $who (http://127.0.0.1:$port, tills use https on port + 1)."
+  Log "Start-up task '$ManagerTask' registered: Manager Server runs in the background (http://127.0.0.1:$port, tills use https on port + 1)."
 }
 
 # Manager Server's business data in a local folder (not the user's Documents, which
@@ -187,9 +190,9 @@ switch ($Action) {
         Register-ManagerTask $ManagerExe $ManagerPort $User
         # Start it now too (the task otherwise waits for the next Windows sign-in, and
         # EFRISConnect shows "Manager: error" until then). Not when it already runs.
-        if (!(Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue)) {
-          try { Start-ScheduledTask -TaskName $ManagerTask; Log 'Manager Server started.' } catch { Log "Manager Server did not start now ($($_.Exception.Message)); it starts at the next Windows sign-in." }
-        }
+        # Replace a copy running in someone's session with the background one.
+        Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 } | Stop-Process -Force -ErrorAction SilentlyContinue
+        try { Start-ScheduledTask -TaskName $ManagerTask; Log 'Manager Server started in the background.' } catch { Log "Manager Server did not start now ($($_.Exception.Message)); it starts with Windows." }
       }
     }
 
@@ -265,6 +268,16 @@ switch ($Action) {
   'enabler-autostart-off' {
     foreach ($s in @('TcsTomcat', 'TcsData')) { & sc.exe config $s start= demand | Out-Null }
     Log 'Offline Enabler: does not start with Windows.'
+  }
+  'manager-start' {
+    # A copy started by hand in someone's session would hold the port: end it first.
+    Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 } | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-ScheduledTask -TaskName $ManagerTask; Log 'Manager Server started.'
+  }
+  'manager-stop' {
+    Stop-ScheduledTask -TaskName $ManagerTask -ErrorAction SilentlyContinue
+    Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Log 'Manager Server stopped.'
   }
   'tray-autostart-on' {
     $lnk = Join-Path ([Environment]::GetFolderPath('CommonStartup')) 'EFRISConnect tray icon.lnk'

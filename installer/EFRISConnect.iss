@@ -327,8 +327,8 @@ begin
 
   ManagerPage := CreateInputFilePage(ModePage.ID,
     'Manager Server', 'Tills open Manager from this computer.',
-    'If Manager Server Edition is installed here, select ManagerServer.exe. EFRISConnect then starts it ' +
-    'when you sign in to Windows. Leave it empty if you start Manager Server yourself or it runs elsewhere.');
+    'If Manager Server Edition is installed here, select ManagerServer.exe. EFRISConnect then runs it ' +
+    'in the background from Windows start-up, with no window. Leave it empty if you start Manager Server yourself or it runs elsewhere.');
   ManagerPage.Add('ManagerServer.exe:', 'ManagerServer.exe|ManagerServer.exe|Programs (*.exe)|*.exe', '.exe');
   ManagerPage.Values[0] := FindManagerServer;
 
@@ -410,7 +410,7 @@ begin
     Result := Result + NewLine + NewLine + 'Manager Server:' + NewLine + Space;
     if Trim(ManagerPage.Values[0]) = '' then Result := Result + 'started by you (not by EFRISConnect)'
     else Result := Result + ManagerPage.Values[0] + NewLine + Space + 'Data folder: ' + DataPage.Values[0] +
-      NewLine + Space + 'Started now and whenever you sign in to Windows';
+      NewLine + Space + 'Runs in the background from Windows start-up (no window)';
     Result := Result + NewLine + Space + 'Port: ' + MgrPort('') + ' (tills use https://' + Lowercase(GetComputerNameString) + ':' + MgrHttpsPort('') + ')';
   end;
   if MemoDirInfo <> '' then Result := Result + NewLine + NewLine + MemoDirInfo;

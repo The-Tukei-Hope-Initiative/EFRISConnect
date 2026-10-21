@@ -84,11 +84,7 @@ $rw.Font = New-Object Drawing.Font($rw.Font, [Drawing.FontStyle]::Bold)
 if ($Mode -eq 'server') {
   [void](Add-Item 'Open Manager' { Start-Process "https://localhost:$([int]$MgrPort + 1)" })
   if ($MgrExe) {
-    [void](Add-Item 'Start Manager Server' {
-      if (Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue) { $tray.ShowBalloonTip(4000, 'EFRISConnect', 'Manager Server is already running.', 'Info'); return }
-      $msArgs = "--urls http://127.0.0.1:$MgrPort"; if ($MgrData) { $msArgs += " --path `"$MgrData`"" }
-      Start-Process -FilePath $MgrExe -ArgumentList $msArgs -WorkingDirectory (Split-Path -Parent $MgrExe) -WindowStyle Minimized
-    })
+    [void](Add-Item 'Start Manager Server' { Run-Elevated 'manager-start' })
   }
 }
 [void](Add-Item 'Copy Manager button URL' {
