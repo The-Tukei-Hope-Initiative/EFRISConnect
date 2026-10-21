@@ -4616,7 +4616,9 @@ app.post('/api/manager/readiness-audit', async (req, res) => {
   // 8. The EFRISConnect receipt theme (the URA QR code and fiscal details on printouts).
   try {
     const key = await findInstalledThemeKey(ep, tk, 'EFRISConnect');
+    const installed = key || await findThemeKeyByName(ep, tk, 'EFRISConnect');
     if (key) add('theme', 'Receipt theme', 'ok', 'The EFRISConnect theme is set on Manager documents.');
+    else if (installed) add('theme', 'Receipt theme', 'ok', 'The EFRISConnect theme is installed, and EFRISConnect uses it on every document it records. For receipts typed straight into Manager, also choose it under Form Defaults.');
     else checks.push({ id: 'theme', title: 'Receipt theme', status: 'warn', detail: 'Receipts printed from Manager do not show the URA QR code and fiscal details yet.',
       fix: 'Use the button to install the EFRISConnect theme into Manager.', action: 'install-theme' });
   } catch (e) { add('theme', 'Receipt theme', 'warn', 'Could not check the theme now.'); }
@@ -4646,6 +4648,16 @@ const EFC_BUTTONS = [
   { Name: 'Fiscalise invoice', Placement: 'sales-invoice-form' },
   { Name: 'EFRISConnect', Placement: 'receipts' },
   { Name: 'EFRISConnect', Placement: 'sales-invoices' },
+  // The plain EFRISConnect button on every document view too (status, print, credit note),
+  // next to Fiscalise on receipts and invoices.
+  { Name: 'EFRISConnect', Placement: 'receipt-view' },
+  { Name: 'EFRISConnect', Placement: 'sales-invoice-view' },
+  { Name: 'EFRISConnect', Placement: 'credit-notes' },
+  { Name: 'EFRISConnect', Placement: 'credit-note-view' },
+  { Name: 'EFRISConnect', Placement: 'debit-notes' },
+  { Name: 'EFRISConnect', Placement: 'debit-note-view' },
+  { Name: 'EFRISConnect', Placement: 'customers' },
+  { Name: 'EFRISConnect', Placement: 'customer-view' },
   { Name: 'EFRIS goods', Placement: 'inventory-items' },
   { Name: 'EFRIS goods', Placement: 'inventory-item-view' },
   { Name: 'EFRIS services', Placement: 'non-inventory-items' },
@@ -4668,14 +4680,18 @@ app.post('/api/manager/ensure-custom-buttons', async (req, res) => {
       const key = ciGet(r, 'key'); if (!key) continue;
       const f = await managerCall(ep, accessToken, 'GET', '/custom-button-form/' + key, null);
       const d = (f.status === 200 && f.data) || r;
-      have.push({ key, form: d, placement: String(ciGet(d, 'placement') || '').toLowerCase(), endpoint: String(ciGet(d, 'endpoint') || '').replace(/\/+$/, '').toLowerCase() });
+      have.push({ key, form: d, name: String(ciGet(d, 'name') || '').trim().toLowerCase(), placement: String(ciGet(d, 'placement') || '').toLowerCase(), endpoint: String(ciGet(d, 'endpoint') || '').replace(/\/+$/, '').toLowerCase() });
     }
     const created = [], existed = [], updated = [], failed = [];
+    // Where a page gets one EFRISConnect button, any of ours there counts (whatever its
+    // name); where it gets two, each is matched by its name as well.
+    const perPlacement = p => EFC_BUTTONS.filter(x => x.Placement === p).length;
+    const same = (h, b) => h.placement === b.Placement && (perPlacement(b.Placement) === 1 || h.name === b.Name.toLowerCase());
     for (const b of EFC_BUTTONS) {
-      if (have.some(h => h.placement === b.Placement && h.endpoint === endpoint.toLowerCase())) { existed.push(b.Placement); continue; }
+      if (have.some(h => same(h, b) && h.endpoint === endpoint.toLowerCase())) { existed.push(b.Placement); continue; }
       // Our button with an older EFRISConnect address (e.g. localhost before this PC became
       // the shop server): point it at the address in use now instead of adding a second one.
-      const old = have.find(h => h.placement === b.Placement && /\/extension$/.test(h.endpoint));
+      const old = have.find(h => same(h, b) && /\/extension$/.test(h.endpoint));
       if (old) {
         const r = await managerCall(ep, accessToken, 'POST', '/custom-button-form/' + old.key, Object.assign(Object.fromEntries(Object.entries(old.form || {}).filter(([k]) => k.toLowerCase() !== 'endpoint')), { Endpoint: endpoint }));
         if (r.status === 200 || r.status === 201) { updated.push(b.Placement); old.endpoint = endpoint.toLowerCase(); } else failed.push(b.Placement + ' (HTTP ' + r.status + ')');
@@ -8755,7 +8771,7 @@ async function findThemeKeyByName(ep, token, name) {
         const k = r && (r.key || r.Key); if (!k) continue;
         let n = r.name || r.Name || '';
         if (!n) { const t = await managerCall(ep, token, 'GET', '/custom-theme-form/' + bareKey(k), null); n = (t.data && (t.data.Name || t.data.name)) || ''; }
-        if (String(n).trim() === name) return bareKey(k);
+        if (String(n).trim().toLowerCase() === String(name).toLowerCase()) return bareKey(k);
       }
     } catch (_) {}
   }
@@ -8769,11 +8785,12 @@ async function findInstalledThemeKey(ep, token, name) {
       // Manager Desktop answers GETs in camelCase (customThemeId, name): read either case.
       const d = g && g.data && typeof g.data === 'object' ? g.data : null;
       const ci = k => { if (!d) return ''; const hit = Object.keys(d).find(x => x.toLowerCase() === k.toLowerCase()); return hit ? d[hit] : ''; };
-      const id = ci('CustomThemeId') || ci('ThemeKey') || ci('CustomThemeKey');
+      let id = ci('CustomThemeId') || ci('ThemeKey') || ci('CustomThemeKey');
+      if (!id && d) { const k = Object.keys(d).find(x => /theme/i.test(x) && /^[0-9a-f-]{36}$/i.test(String(d[x]))); if (k) id = d[k]; }
       if (!id || !/^[0-9a-f-]{36}$/i.test(String(id))) continue;
       const t = await managerCall(ep, token, 'GET', '/custom-theme-form/' + bareKey(id), null);
       const tn = t && t.data && typeof t.data === 'object' ? (t.data.Name || t.data.name || '') : '';
-      if (t.status === 200 && String(tn).trim() === name) return bareKey(id);
+      if (t.status === 200 && String(tn).trim().toLowerCase() === String(name).toLowerCase()) return bareKey(id);
     } catch (_) {}
   }
   return '';

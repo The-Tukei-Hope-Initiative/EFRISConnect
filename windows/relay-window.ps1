@@ -9,6 +9,9 @@
 param([string]$Snapshot)
 $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
+# Draw at the display's real resolution (otherwise Windows scales the window as a bitmap
+# and the text looks blurred, like a screenshot).
+try { Add-Type -Namespace EFC -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'; [void][EFC.Dpi]::SetProcessDPIAware() } catch {}
 
 # One window per signed-in user.
 $created = $false
@@ -35,7 +38,7 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="EFRISConnect Control Centre" Width="880" Height="760" MinWidth="680" MinHeight="520"
+        Title="EFRISConnect Control Centre" Width="860" Height="600" MinWidth="680" MinHeight="460" UseLayoutRounding="True" TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="ClearType"
         WindowStartupLocation="CenterScreen" Background="#F1F8E9" FontFamily="Segoe UI" FontSize="13" Foreground="#1A2E1A">
   <Window.Resources>
     <Style x:Key="Card" TargetType="Border">
@@ -85,6 +88,20 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
         </ControlTemplate>
       </Setter.Value></Setter>
     </Style>
+    <Style x:Key="Tab" TargetType="TabItem">
+      <Setter Property="Cursor" Value="Hand"/><Setter Property="FontSize" Value="12.5"/><Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="TabItem">
+          <Border x:Name="b" Background="Transparent" CornerRadius="9" Padding="14,6" Margin="0,0,6,0">
+            <ContentPresenter x:Name="c" ContentSource="Header" TextElement.Foreground="#4A6741"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsSelected" Value="True"><Setter TargetName="b" Property="Background" Value="#2E7D32"/><Setter TargetName="c" Property="TextElement.Foreground" Value="White"/></Trigger>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#C8E6C9"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
   </Window.Resources>
   <DockPanel>
     <!-- Header: the app's dark green gradient with the gold line under it. -->
@@ -105,6 +122,12 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
         </StackPanel>
       </DockPanel>
     </Border>
+    <Border x:Name="Note" DockPanel.Dock="Top" Visibility="Collapsed" Background="#E3F2FD" BorderBrush="#90CAF9" BorderThickness="0,0,0,1" Padding="16,8">
+      <DockPanel>
+        <ProgressBar x:Name="NoteBar" DockPanel.Dock="Right" Width="120" Height="6" IsIndeterminate="True" Foreground="#2E7D32" Background="#E3EAD9" BorderThickness="0" VerticalAlignment="Center"/>
+        <TextBlock x:Name="NoteText" TextWrapping="Wrap" FontSize="12.5" Foreground="#0D47A1" Margin="0,0,12,0"/>
+      </DockPanel>
+    </Border>
     <!-- Actions -->
     <DockPanel DockPanel.Dock="Bottom" Margin="16,0,16,14" LastChildFill="False">
       <Button x:Name="BtnStart" Content="Start" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
@@ -114,9 +137,22 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
       <Button x:Name="BtnData" DockPanel.Dock="Right" Content="Open data folder" Style="{StaticResource Btn}"/>
       <Button x:Name="BtnLogs" DockPanel.Dock="Right" Content="Open logs folder" Style="{StaticResource Btn}"/>
     </DockPanel>
-    <ScrollViewer VerticalScrollBarVisibility="Auto"><Grid Margin="16,14,16,12">
-      <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="10"/><ColumnDefinition/></Grid.ColumnDefinitions>
-      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="300"/></Grid.RowDefinitions>
+    <TabControl x:Name="Tabs" Margin="12,10,12,8" Background="Transparent" BorderThickness="0" Padding="0,8,0,0">
+      <TabItem Header="Controls" Style="{StaticResource Tab}">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,0">
+      <Border Style="{StaticResource Card}">
+        <StackPanel>
+          <TextBlock Text="Controls" Style="{StaticResource CardTitle}"/>
+          <Border Height="1" Background="#E3EAD9" Margin="0,8,0,4"/>
+          <StackPanel x:Name="Controls"/>
+        </StackPanel>
+      </Border>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="Status" Style="{StaticResource Tab}">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,0">
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="10"/><ColumnDefinition/></Grid.ColumnDefinitions>
       <Border Style="{StaticResource Card}">
         <StackPanel>
           <TextBlock Text="Status" Style="{StaticResource CardTitle}"/>
@@ -135,14 +171,12 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
           <Grid x:Name="SetupGrid"><Grid.ColumnDefinitions><ColumnDefinition Width="118"/><ColumnDefinition/></Grid.ColumnDefinitions></Grid>
         </StackPanel>
       </Border>
-      <Border Grid.Row="2" Grid.ColumnSpan="3" Style="{StaticResource Card}">
-        <StackPanel>
-          <TextBlock Text="Controls" Style="{StaticResource CardTitle}"/>
-          <Border Height="1" Background="#E3EAD9" Margin="0,8,0,4"/>
-          <StackPanel x:Name="Controls"/>
-        </StackPanel>
-      </Border>
-      <Border Grid.Row="4" Grid.ColumnSpan="3" Style="{StaticResource Card}">
+          </Grid>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="Activity" Style="{StaticResource Tab}">
+        <Grid Margin="4,0">
+      <Border Style="{StaticResource Card}">
         <DockPanel>
           <DockPanel DockPanel.Dock="Top">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
@@ -161,13 +195,15 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
           </Border>
         </DockPanel>
       </Border>
-    </Grid></ScrollViewer>
+        </Grid>
+      </TabItem>
+    </TabControl>
   </DockPanel>
 </Window>
 '@
 $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $ui = @{}
-foreach ($n in 'Controls','Pill','Dot','PillText','StatusGrid','SetupGrid','LogList','LogScroll','BtnStart','BtnRestart','BtnStop','BtnOpen','BtnData','BtnLogs','ChangeSetup','FAll','FUra','FMgr','FProb') { $ui[$n] = $win.FindName($n) }
+foreach ($n in 'Note','NoteBar','NoteText','Tabs','Controls','Pill','Dot','PillText','StatusGrid','SetupGrid','LogList','LogScroll','BtnStart','BtnRestart','BtnStop','BtnOpen','BtnData','BtnLogs','ChangeSetup','FAll','FUra','FMgr','FProb') { $ui[$n] = $win.FindName($n) }
 try { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create((New-Object Uri (Join-Path $AppDir 'efrisconnect.ico'))) } catch {}
 
 function Brush([string]$hex) { [Windows.Media.BrushConverter]::new().ConvertFromString($hex) }
@@ -369,9 +405,9 @@ function Update-Controls($health, $task) {
     $mt = Get-ScheduledTask -TaskName 'EFRISConnect Manager Server' -ErrorAction SilentlyContinue
     $mgrAuto = if ($mt) { $mt.State -ne 'Disabled' } else { $true }
     Ctl-Row 'Manager Server Edition' $(if ($mgrUp) { "Running on port $MgrPort" } else { 'Stopped' }) $mgrUp ("Tills open it at https://$($env:COMPUTERNAME.ToLower()):$([int]$MgrPort + 1)") @(
-        @('Start', { if (!(Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue)) { $a = "--urls http://127.0.0.1:$MgrPort"; if ($MgrData) { $a += " --path `"$MgrData`"" }; Start-Process -FilePath $MgrExe -ArgumentList $a -WorkingDirectory (Split-Path -Parent $MgrExe) -WindowStyle Minimized } }),
+        @('Start', { if (Port-Open ([int]$MgrPort)) { Show-Note "Manager Server is already running on port $MgrPort." 'ok'; return }; if (!(Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue)) { $a = "--urls http://127.0.0.1:$MgrPort"; if ($MgrData) { $a += " --path `"$MgrData`"" }; Start-Process -FilePath $MgrExe -ArgumentList $a -WorkingDirectory (Split-Path -Parent $MgrExe) -WindowStyle Minimized }; Watch-Job 'Starting Manager Server. It is usually ready in 20 to 40 seconds; this message changes when it is.' { Port-Open ([int]$MgrPort) } "Manager Server is running on port $MgrPort. Tills and EFRISConnect can use it now." 120 $null }),
         @('Open Manager', { Start-Process "http://localhost:$MgrPort" }),
-        @('Stop', { $a = [Windows.MessageBox]::Show($win, 'Tills and this computer cannot open Manager while it is stopped.', 'Stop Manager Server?', 'OKCancel', 'Warning'); if ($a -eq 'OK') { Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue | Stop-Process -Force } }, 'danger')
+        @('Stop', { $a = [Windows.MessageBox]::Show($win, 'Tills and this computer cannot open Manager while it is stopped.', 'Stop Manager Server?', 'OKCancel', 'Warning'); if ($a -eq 'OK') { Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue | Stop-Process -Force; Watch-Job 'Stopping Manager Server.' { -not (Port-Open ([int]$MgrPort)) } 'Manager Server is stopped. Tills cannot open Manager until you start it again.' 30 $null } }, 'danger')
       ) 'Start when I sign in' $mgrAuto 'manager-autostart-on' 'manager-autostart-off'
   } else {
     $md = Find-ManagerDesktop
@@ -391,18 +427,63 @@ function Update-Controls($health, $task) {
   if ($Mode -eq 'server') {
     Ctl-Row 'Shop network' "Tills use $Address" $true 'Copy the till kit to a USB stick and run Setup on each till (choose Till).' @(
         @('Open till kit folder', { Start-Process explorer.exe (Join-Path $DataDir 'till-kit') }),
+        @('Copy Manager button URL', { [Windows.Clipboard]::SetText("$Address/extension"); Show-Note "Copied $Address/extension. Paste it as the address of each EFRISConnect custom button in Manager." 'ok' }),
         @('Repair firewall rules', { Run-Elevated 'firewall-repair' })
       ) '' $false '' ''
   }
   Ctl-Row 'Maintenance' "Version $Version" $true '' @(
-      @('EFRISConnect Settings', { Start-Process 'https://localhost:5443/extension' }),
+      @('EFRISConnect Settings', { Open-App 'https://localhost:5443/extension' }),
       @('Reset owner password', { $a = [Windows.MessageBox]::Show($win, 'Create a one-time code to reset the owner password? Use it on this computer under "Forgot password".', 'Reset owner password', 'OKCancel', 'Question'); if ($a -eq 'OK') { Run-Elevated 'reset-owner' } })
     ) '' $false '' ''
 }
+# EFRISConnect in its own app window (Edge app mode: no address bar or tabs), or the
+# default browser when Edge is missing.
+function Open-App([string]$url) {
+  $edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if ($edge) { Start-Process $edge -ArgumentList "--app=$url" } else { Start-Process $url }
+}
+$script:job = $null
+function Show-Note([string]$text, [string]$kind) {
+  $look = @{ busy = @('#E3F2FD', '#90CAF9', '#0D47A1'); ok = @('#E8F5E9', '#A5D6A7', '#1B5E20'); fail = @('#FFEBEE', '#EF9A9A', '#B71C1C') }[$kind]
+  $ui.Note.Background = Brush $look[0]; $ui.Note.BorderBrush = Brush $look[1]; $ui.NoteText.Foreground = Brush $look[2]
+  $ui.NoteText.Text = $text; $ui.NoteBar.Visibility = if ($kind -eq 'busy') { 'Visible' } else { 'Collapsed' }
+  $ui.Note.Visibility = 'Visible'
+}
+# Watch an action: $check returns $true when it is done; the message changes when it is,
+# or when it takes longer than expected.
+function Watch-Job($busy, $check, $done, $secs, $proc) {
+  Show-Note $busy 'busy'
+  $script:job = @{ check = $check; done = $done; until = (Get-Date).AddSeconds($secs); proc = $proc; started = Get-Date }
+}
+function Tick-Job {
+  $j = $script:job; if (!$j) { return }
+  $ok = $false; try { $ok = [bool](& $j.check) } catch {}
+  if ($ok) { $script:job = $null; Show-Note $j.done 'ok'; Update-Status; $t = New-Object Windows.Threading.DispatcherTimer; $t.Interval = [TimeSpan]::FromSeconds(8); $t.add_Tick({ param($sender, $e) $sender.Stop(); if (!$script:job) { $ui.Note.Visibility = 'Collapsed' } }); $t.Start(); return }
+  if ($j.proc -and $j.proc.HasExited -and $j.proc.ExitCode -ne 0 -and ((Get-Date) - $j.started).TotalSeconds -gt 3) { $script:job = $null; Show-Note 'That did not work. See the Activity tab or the logs folder for the reason.' 'fail'; return }
+  if ((Get-Date) -gt $j.until) { $script:job = $null; Show-Note 'This is taking longer than usual. It may still finish; check again in a minute, or see the Activity tab.' 'fail' }
+}
+function Relay-Up { try { $null = Invoke-RestMethod -Uri 'https://localhost:5443/api/health' -TimeoutSec 3; $true } catch { $false } }
+function Port-Open([int]$port) { $c = New-Object Net.Sockets.TcpClient; try { $c.ConnectAsync('127.0.0.1', $port).Wait(800) -and $c.Connected } catch { $false } finally { $c.Close() } }
+# What each action does, how long it usually takes, and how to tell it is done.
+$Expect = @{
+  'start'          = @('Starting EFRISConnect. Approve the Windows prompt; it is ready in about 30 seconds.', { Relay-Up }, 'EFRISConnect is running.', 120)
+  'restart'        = @('Restarting EFRISConnect. Approve the Windows prompt; it is back in about 30 seconds.', { Relay-Up }, 'EFRISConnect is running again.', 120)
+  'relay-stop'     = @('Stopping EFRISConnect. Approve the Windows prompt.', { -not (Relay-Up) }, 'EFRISConnect is stopped. Sales are not fiscalised until you start it again.', 60)
+  'enabler-start'  = @('Starting the URA Offline Enabler. Approve the Windows prompt; it usually takes 1 to 2 minutes.', { (Get-Service TcsTomcat).Status -eq 'Running' }, 'The Offline Enabler is running.', 180)
+  'enabler-restart'= @('Restarting the URA Offline Enabler. It usually takes 1 to 2 minutes.', { (Get-Service TcsTomcat).Status -eq 'Running' }, 'The Offline Enabler is running again.', 180)
+  'enabler-stop'   = @('Stopping the URA Offline Enabler.', { (Get-Service TcsTomcat).Status -eq 'Stopped' }, 'The Offline Enabler is stopped.', 90)
+  'firewall-repair'= @('Setting the shop network firewall rules again.', $null, 'Firewall rules are set. Tills can reach this computer.', 60)
+  'reset-owner'    = @('Making a one-time owner reset code. It opens in Notepad.', $null, 'The reset code is in Notepad. Use it under "Forgot password" on this computer.', 60)
+}
 function Run-Elevated([string]$action) {
-  try { Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Helper`" -Action $action" }
-  catch { return }   # the Administrator prompt was declined
-  $ui.PillText.Text = 'Working ...'
+  $p = $null
+  try { $p = Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Helper`" -Action $action" }
+  catch { Show-Note 'Nothing was changed: the Windows approval was declined.' 'fail'; return }
+  $e = $Expect[$action]
+  if ($e -and $e[1]) { Watch-Job $e[0] $e[1] $e[2] $e[3] $p; return }
+  $msg = if ($e) { $e[0] } else { 'Saving the change. Approve the Windows prompt.' }
+  $done = if ($e) { $e[2] } elseif ($action -like '*-autostart-*') { 'Saved. It applies from the next time Windows starts or you sign in.' } else { 'Done.' }
+  Watch-Job $msg ({ $script:job.proc.HasExited -and $script:job.proc.ExitCode -eq 0 }.GetNewClosure()) $done 90 $p
 }
 $ui.BtnStart.add_Click({ Run-Elevated 'start' })
 $ui.BtnRestart.add_Click({ Run-Elevated 'restart' })
@@ -410,7 +491,7 @@ $ui.BtnStop.add_Click({
   $a = [Windows.MessageBox]::Show($win, 'While it is stopped, sales cannot be fiscalised. You can start it again from this window or the tray icon.', 'Stop the relay?', 'OKCancel', 'Warning')
   if ($a -eq 'OK') { Run-Elevated 'relay-stop' }
 })
-$ui.BtnOpen.add_Click({ Start-Process 'https://localhost:5443/extension' })
+$ui.BtnOpen.add_Click({ Open-App 'https://localhost:5443/extension' })
 $ui.BtnData.add_Click({ Start-Process explorer.exe $DataDir })
 $ui.BtnLogs.add_Click({ Start-Process explorer.exe $LogDir })
 $ui.ChangeSetup.add_MouseLeftButtonUp({
@@ -418,6 +499,10 @@ $ui.ChangeSetup.add_MouseLeftButtonUp({
 })
 foreach ($c in 'FAll', 'FUra', 'FMgr', 'FProb') { $ui[$c].add_Checked({ Update-Log -Force }) }
 
+$jobTimer = New-Object Windows.Threading.DispatcherTimer
+$jobTimer.Interval = [TimeSpan]::FromSeconds(1)
+$jobTimer.add_Tick({ Tick-Job })
+$jobTimer.Start()
 $timer = New-Object Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds(5)
 $tick = 0

@@ -42,7 +42,7 @@ function unavailablePage(port) {
     '<body style="font-family:system-ui,sans-serif;max-width:560px;margin:60px auto;line-height:1.5;color:#222">' +
     '<h2 style="color:#1b5e20">Manager Server is not running</h2>' +
     '<p>EFRISConnect could not reach Manager Server on the shop server (port ' + port + ').</p>' +
-    '<p>On the shop server, start it with the launcher (option 9) or the tray icon (Start Manager Server), then reload this page.</p></body>';
+    '<p>On the shop server, open the EFRISConnect Control Centre (desktop shortcut or the icon next to the clock) and click Start next to Manager Server Edition. It is ready in about 30 seconds; then reload this page.</p></body>';
 }
 
 // Someone typed http:// for the encrypted port: answer with a redirect to https://
