@@ -71,7 +71,9 @@ Root: HKLM; Subkey: "Software\EFRISConnect"; ValueType: string; ValueName: "Inst
 Root: HKLM; Subkey: "Software\EFRISConnect"; ValueType: string; ValueName: "Version"; ValueData: "{#AppVersion}"
 
 [Icons]
-Name: "{autoprograms}\EFRISConnect\EFRISConnect Relay"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\relay-window.vbs"""; IconFilename: "{app}\efrisconnect.ico"; Comment: "Status and activity of the EFRISConnect relay"; Check: not IsTill
+Name: "{commondesktop}\EFRISConnect"; Filename: "{win}\explorer.exe"; Parameters: "https://localhost:5443/extension"; IconFilename: "{app}\efrisconnect.ico"; Comment: "Open EFRISConnect"; Tasks: desktopicon; Check: not IsTill
+Name: "{commondesktop}\EFRISConnect Control Centre"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\relay-window.vbs"""; IconFilename: "{app}\efrisconnect.ico"; Tasks: desktopicon; Check: not IsTill
+Name: "{autoprograms}\EFRISConnect\EFRISConnect Control Centre"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\relay-window.vbs"""; IconFilename: "{app}\efrisconnect.ico"; Comment: "Start, stop and switch on or off everything EFRISConnect runs"; Check: not IsTill
 Name: "{autoprograms}\EFRISConnect\EFRISConnect tray icon"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\tray.vbs"""; IconFilename: "{app}\efrisconnect.ico"; AppUserModelID: "TukeiHope.EFRISConnect"; Check: not IsTill
 Name: "{commonstartup}\EFRISConnect tray icon"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\tray.vbs"""; IconFilename: "{app}\efrisconnect.ico"; Tasks: trayicon; Check: not IsTill
 
@@ -80,15 +82,16 @@ Name: "{commonstartup}\EFRISConnect tray icon"; Filename: "{sys}\wscript.exe"; P
 Filename: "{autoprograms}\EFRISConnect\EFRISConnect.url"; Section: "InternetShortcut"; Key: "URL"; String: "https://localhost:5443/extension"; Check: not IsTill
 Filename: "{autoprograms}\EFRISConnect\EFRISConnect.url"; Section: "InternetShortcut"; Key: "IconFile"; String: "{app}\efrisconnect.ico"; Check: not IsTill
 Filename: "{autoprograms}\EFRISConnect\EFRISConnect.url"; Section: "InternetShortcut"; Key: "IconIndex"; String: "0"; Check: not IsTill
-Filename: "{commondesktop}\EFRISConnect.url"; Section: "InternetShortcut"; Key: "URL"; String: "https://localhost:5443/extension"; Tasks: desktopicon; Check: not IsTill
-Filename: "{commondesktop}\EFRISConnect.url"; Section: "InternetShortcut"; Key: "IconFile"; String: "{app}\efrisconnect.ico"; Tasks: desktopicon; Check: not IsTill
-Filename: "{commondesktop}\EFRISConnect.url"; Section: "InternetShortcut"; Key: "IconIndex"; String: "0"; Tasks: desktopicon; Check: not IsTill
 Filename: "{autoprograms}\EFRISConnect\Open Manager.url"; Section: "InternetShortcut"; Key: "URL"; String: "https://localhost:{code:MgrHttpsPort}"; Check: IsServer
 Filename: "{commondesktop}\Manager (shop).url"; Section: "InternetShortcut"; Key: "URL"; String: "{code:TillManagerUrl}"; Check: IsTill
 
 [InstallDelete]
 ; The shortcut was renamed in 1.0.8.
 Type: files; Name: "{autoprograms}\EFRISConnect\Open EFRISConnect.url"
+; 1.0.13: the desktop shortcut is a real shortcut (.lnk) that shows its icon, and the
+; Relay window became the Control Centre.
+Type: files; Name: "{commondesktop}\EFRISConnect.url"
+Type: files; Name: "{autoprograms}\EFRISConnect\EFRISConnect Relay.lnk"
 
 [UninstallDelete]
 Type: files; Name: "{autoprograms}\EFRISConnect\Open EFRISConnect.url"

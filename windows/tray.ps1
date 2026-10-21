@@ -71,9 +71,10 @@ function Run-Elevated([string]$action) {
 $status = $menu.Items.Add('Checking ...'); $status.Enabled = $false
 [void]$menu.Items.Add('-')
 [void](Add-Item 'Open EFRISConnect' { Start-Process $ExtUrl })
-# The Relay window: status, setup and live activity, with Start / Restart / Stop.
+# The Control Centre: status, on/off switches and live activity for everything EFRISConnect runs.
 function Open-RelayWindow { Start-Process wscript.exe -ArgumentList "`"$(Join-Path $PSScriptRoot 'relay-window.vbs')`"" }
-$rw = Add-Item 'Relay window (status and activity)' { Open-RelayWindow }
+$rw = Add-Item 'Control Centre ...' { Open-RelayWindow }
+$rw.Font = New-Object Drawing.Font($rw.Font, [Drawing.FontStyle]::Bold)
 if ($Mode -eq 'server') {
   [void](Add-Item 'Open Manager' { Start-Process "https://localhost:$([int]$MgrPort + 1)" })
   if ($MgrExe) {
@@ -91,7 +92,7 @@ if ($Mode -eq 'server') {
 [void]$menu.Items.Add('-')
 # The relay runs as a Windows scheduled task (EFRISConnect Relay, as SYSTEM, at start-up).
 $relayMenu = New-Object Windows.Forms.ToolStripMenuItem 'EFRISConnect (the relay)'
-[void]$relayMenu.DropDownItems.Add('Relay window ...').add_Click({ Open-RelayWindow })
+[void]$relayMenu.DropDownItems.Add('Control Centre ...').add_Click({ Open-RelayWindow })
 [void]$relayMenu.DropDownItems.Add('-')
 foreach ($pair in @(@('Start', 'start'), @('Restart', 'restart'), @('Stop', 'relay-stop'))) {
   $it = $relayMenu.DropDownItems.Add($pair[0]); $act = $pair[1]

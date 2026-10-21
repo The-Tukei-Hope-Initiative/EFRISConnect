@@ -32,7 +32,9 @@ function Copy-Tree([string]$from, [string]$to, [string[]]$xd = @(), [string[]]$x
   if ($LASTEXITCODE -ge 8) { throw "Copy failed: $from" }
 }
 Copy-Tree (Join-Path $Repo 'frontend') (Join-Path $Stage 'frontend') @('Old*')
-Copy-Tree (Join-Path $Repo 'windows')  (Join-Path $Stage 'windows')
+# Not the developer launcher (EFRISConnect.bat and its old Windows service): the
+# installed copy is run by its startup task and the Control Centre.
+Copy-Tree (Join-Path $Repo 'windows')  (Join-Path $Stage 'windows') @() @('EFRISConnect.bat', 'install-service.js', 'uninstall-service.js', 'no-quickedit.ps1', 'README.md')
 Copy-Tree (Join-Path $Repo 'backend')  (Join-Path $Stage 'backend') `
   @('__tests__', 'node_modules', 'keys', 'Old*', 'data') @('Dockerfile', '*.pem', '*.key', '*.pfx', '*.log')
 # Only the reference data that ships with the code; everything else in backend\data is runtime.

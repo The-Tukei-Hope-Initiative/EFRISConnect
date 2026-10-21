@@ -17,7 +17,9 @@
 #   -Action uninstall [-RemoveCert] [-RemoveData]
 #       Removes the tasks and firewall rules; optionally the certificate and data.
 param(
-  [ValidateSet('setup', 'till', 'stop', 'start', 'relay-stop', 'restart', 'reset-owner', 'enabler-start', 'enabler-stop', 'enabler-restart', 'uninstall')][string]$Action = 'setup',
+  [ValidateSet('setup', 'till', 'stop', 'start', 'relay-stop', 'restart', 'reset-owner', 'enabler-start', 'enabler-stop', 'enabler-restart', 'uninstall',
+    'relay-autostart-on', 'relay-autostart-off', 'manager-autostart-on', 'manager-autostart-off', 'enabler-autostart-on', 'enabler-autostart-off',
+    'tray-autostart-on', 'tray-autostart-off', 'firewall-repair')][string]$Action = 'setup',
   [ValidateSet('single', 'server')][string]$Mode = 'single',
   [string]$ManagerExe = '',
   [int]$ManagerPort = 5000,
@@ -252,6 +254,33 @@ switch ($Action) {
     foreach ($s in @('TcsTomcat', 'TcsData')) { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue }
     foreach ($s in $EnablerServices) { Start-Service -Name $s; (Get-Service $s).WaitForStatus('Running', '00:01:30') }
     Log 'Offline Enabler restarted.'
+  }
+
+  # Control Centre switches (each one asks for Administrator approval once).
+  'relay-autostart-on'  { Enable-ScheduledTask -TaskName $RelayTask | Out-Null; Log 'Relay: starts with Windows.' }
+  'relay-autostart-off' { Disable-ScheduledTask -TaskName $RelayTask | Out-Null; Log 'Relay: does not start with Windows.' }
+  'manager-autostart-on'  { Enable-ScheduledTask -TaskName $ManagerTask | Out-Null; Log 'Manager Server: starts at sign-in.' }
+  'manager-autostart-off' { Disable-ScheduledTask -TaskName $ManagerTask | Out-Null; Log 'Manager Server: does not start at sign-in.' }
+  'enabler-autostart-on'  { Set-EnablerServices }
+  'enabler-autostart-off' {
+    foreach ($s in @('TcsTomcat', 'TcsData')) { & sc.exe config $s start= demand | Out-Null }
+    Log 'Offline Enabler: does not start with Windows.'
+  }
+  'tray-autostart-on' {
+    $lnk = Join-Path ([Environment]::GetFolderPath('CommonStartup')) 'EFRISConnect tray icon.lnk'
+    $w = New-Object -ComObject WScript.Shell; $sc = $w.CreateShortcut($lnk)
+    $sc.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'; $sc.Arguments = '"' + (Join-Path $WinDir 'tray.vbs') + '"'
+    $sc.IconLocation = (Join-Path $AppDir 'efrisconnect.ico') + ',0'; $sc.Save()
+    Log 'Tray icon: shown from sign-in.'
+  }
+  'tray-autostart-off' {
+    Remove-Item (Join-Path ([Environment]::GetFolderPath('CommonStartup')) 'EFRISConnect tray icon.lnk') -Force -ErrorAction SilentlyContinue
+    Log 'Tray icon: not started at sign-in.'
+  }
+  'firewall-repair' {
+    $port = 5000; $f = Join-Path $DataDir 'lan-manager-port.txt'; if (Test-Path $f) { $port = [int](Get-Content $f -TotalCount 1) }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $WinDir 'lan.ps1') -Action firewall -ManagerHttpsPort ($port + 1)
+    Log 'Shop network firewall rules set again.'
   }
 
   'reset-owner' {

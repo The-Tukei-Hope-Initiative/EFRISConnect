@@ -1,4 +1,5 @@
-# EFRISConnect Relay window: what the relay is doing, in place of a console.
+# EFRISConnect Control Centre: the relay, Manager, the Offline Enabler and start-up in
+# one window, with on/off switches, plus what the relay is doing, in place of a console.
 # Opened from the tray icon or the Start menu (relay-window.vbs, no console).
 # Reads only what the signed-in user can read: the relay's public health check,
 # the data folder (offline queue, submission log, activity log) and the scheduled
@@ -34,7 +35,7 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="EFRISConnect Relay" Width="820" Height="680" MinWidth="640" MinHeight="520"
+        Title="EFRISConnect Control Centre" Width="880" Height="760" MinWidth="680" MinHeight="520"
         WindowStartupLocation="CenterScreen" Background="#F1F8E9" FontFamily="Segoe UI" FontSize="13" Foreground="#1A2E1A">
   <Window.Resources>
     <Style x:Key="Card" TargetType="Border">
@@ -99,8 +100,8 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
           </StackPanel>
         </Border>
         <StackPanel>
-          <TextBlock Text="EFRISConnect Relay" Foreground="White" FontSize="15" FontWeight="Bold"/>
-          <TextBlock Text="The background part that talks to URA and Manager" Foreground="White" Opacity="0.85" FontSize="11"/>
+          <TextBlock Text="EFRISConnect Control Centre" Foreground="White" FontSize="15" FontWeight="Bold"/>
+          <TextBlock Text="Start, stop and switch on or off everything EFRISConnect runs on this computer" Foreground="White" Opacity="0.85" FontSize="11"/>
         </StackPanel>
       </DockPanel>
     </Border>
@@ -113,9 +114,9 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
       <Button x:Name="BtnData" DockPanel.Dock="Right" Content="Open data folder" Style="{StaticResource Btn}"/>
       <Button x:Name="BtnLogs" DockPanel.Dock="Right" Content="Open logs folder" Style="{StaticResource Btn}"/>
     </DockPanel>
-    <Grid Margin="16,14,16,12">
+    <ScrollViewer VerticalScrollBarVisibility="Auto"><Grid Margin="16,14,16,12">
       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="10"/><ColumnDefinition/></Grid.ColumnDefinitions>
-      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition/></Grid.RowDefinitions>
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="Auto"/><RowDefinition Height="10"/><RowDefinition Height="300"/></Grid.RowDefinitions>
       <Border Style="{StaticResource Card}">
         <StackPanel>
           <TextBlock Text="Status" Style="{StaticResource CardTitle}"/>
@@ -135,6 +136,13 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
         </StackPanel>
       </Border>
       <Border Grid.Row="2" Grid.ColumnSpan="3" Style="{StaticResource Card}">
+        <StackPanel>
+          <TextBlock Text="Controls" Style="{StaticResource CardTitle}"/>
+          <Border Height="1" Background="#E3EAD9" Margin="0,8,0,4"/>
+          <StackPanel x:Name="Controls"/>
+        </StackPanel>
+      </Border>
+      <Border Grid.Row="4" Grid.ColumnSpan="3" Style="{StaticResource Card}">
         <DockPanel>
           <DockPanel DockPanel.Dock="Top">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
@@ -153,13 +161,13 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
           </Border>
         </DockPanel>
       </Border>
-    </Grid>
+    </Grid></ScrollViewer>
   </DockPanel>
 </Window>
 '@
 $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $ui = @{}
-foreach ($n in 'Pill','Dot','PillText','StatusGrid','SetupGrid','LogList','LogScroll','BtnStart','BtnRestart','BtnStop','BtnOpen','BtnData','BtnLogs','ChangeSetup','FAll','FUra','FMgr','FProb') { $ui[$n] = $win.FindName($n) }
+foreach ($n in 'Controls','Pill','Dot','PillText','StatusGrid','SetupGrid','LogList','LogScroll','BtnStart','BtnRestart','BtnStop','BtnOpen','BtnData','BtnLogs','ChangeSetup','FAll','FUra','FMgr','FProb') { $ui[$n] = $win.FindName($n) }
 try { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create((New-Object Uri (Join-Path $AppDir 'efrisconnect.ico'))) } catch {}
 
 function Brush([string]$hex) { [Windows.Media.BrushConverter]::new().ConvertFromString($hex) }
@@ -235,6 +243,7 @@ function Update-Status {
   )
   if ($svc) { $setup += , @('Offline Enabler', $(if ($svc.Status -eq 'Running') { 'Running' } else { 'Stopped' })) }
   Set-Rows $ui.SetupGrid $setup
+  Update-Controls $health $task
 }
 
 # -- Activity: the relay's activity log (plain lines), newest at the bottom --
@@ -310,6 +319,86 @@ function Update-Log([switch]$Force) {
 }
 
 # -- Actions --
+$MgrPort = Read-Setting 'lan-manager-port.txt' '5000'
+$MgrExe  = Read-Setting 'manager-server-path.txt' ''
+$MgrData = Read-Setting 'manager-server-data.txt' ''
+$TrayLnk = Join-Path ([Environment]::GetFolderPath('CommonStartup')) 'EFRISConnect tray icon.lnk'
+function Find-ManagerDesktop {
+  foreach ($c in @("$env:LOCALAPPDATA\Programs\Manager\ManagerDesktop.exe", "$env:LOCALAPPDATA\Programs\Manager\Manager.exe", "$env:ProgramFiles\Manager\ManagerDesktop.exe", "$env:ProgramFiles\Manager.io\ManagerDesktop.exe")) { if (Test-Path $c) { return $c } }
+  return ''
+}
+# One row: name, state in colour, a short note, buttons and an on/off switch.
+function Ctl-Row($name, $state, $ok, $note, $buttons, $switchText, $switchOn, $onAction, $offAction) {
+  $row = New-Object Windows.Controls.DockPanel; $row.Margin = '0,6,0,6'
+  $left = New-Object Windows.Controls.StackPanel; $left.Width = 260
+  $t = New-Object Windows.Controls.TextBlock; $t.Text = $name; $t.FontWeight = 'SemiBold'; $t.FontSize = 13
+  $st = New-Object Windows.Controls.TextBlock; $st.Text = $state; $st.FontSize = 12; $st.FontWeight = 'SemiBold'
+  $st.Foreground = Brush $(if ($ok -eq $true) { '#1B5E20' } elseif ($ok -eq $false) { '#B71C1C' } else { '#8D5A00' })
+  [void]$left.Children.Add($t); [void]$left.Children.Add($st)
+  if ($note) { $n = New-Object Windows.Controls.TextBlock; $n.Text = $note; $n.FontSize = 11; $n.Foreground = Brush '#6B7280'; $n.TextWrapping = 'Wrap'; [void]$left.Children.Add($n) }
+  [Windows.Controls.DockPanel]::SetDock($left, 'Left'); [void]$row.Children.Add($left)
+  $right = New-Object Windows.Controls.WrapPanel; $right.VerticalAlignment = 'Center'
+  foreach ($b in $buttons) {
+    $btn = New-Object Windows.Controls.Button; $btn.Content = $b[0]; $btn.Style = $win.Resources['Btn']; $btn.Margin = '0,2,8,2'; $btn.Padding = '12,5'
+    if ($b.Count -gt 2 -and $b[2] -eq 'danger') { $btn.Foreground = Brush '#C62828'; $btn.BorderBrush = Brush '#C62828' }
+    $btn.Tag = $b[1]; $btn.add_Click({ param($sender, $e) & $sender.Tag })
+    [void]$right.Children.Add($btn)
+  }
+  if ($switchText) {
+    $cb = New-Object Windows.Controls.CheckBox; $cb.Content = $switchText; $cb.IsChecked = $switchOn; $cb.Margin = '4,6,0,2'; $cb.VerticalAlignment = 'Center'
+    $cb.Tag = @($onAction, $offAction)
+    $cb.add_Click({ param($sender, $e) if ($sender.IsChecked) { Run-Elevated $sender.Tag[0] } else { Run-Elevated $sender.Tag[1] } })
+    [void]$right.Children.Add($cb)
+  }
+  [void]$row.Children.Add($right)
+  $sep = New-Object Windows.Controls.Border; $sep.Height = 1; $sep.Background = Brush '#E3EAD9'
+  [void]$ui.Controls.Children.Add($row); [void]$ui.Controls.Children.Add($sep)
+}
+function Update-Controls($health, $task) {
+  $ui.Controls.Children.Clear()
+  # The relay task is visible only to administrators: "start with Windows" shows as on
+  # when the task is enabled or, when it cannot be read, while the relay runs.
+  $relayAuto = if ($task) { $task.State -ne 'Disabled' } else { [bool]$health }
+  Ctl-Row 'EFRISConnect (the relay)' $(if ($health) { 'Running' } else { 'Stopped' }) ([bool]$health) 'Talks to URA and Manager. Sales cannot be fiscalised while it is stopped.' @(
+      @('Start', { Run-Elevated 'start' }), @('Restart', { Run-Elevated 'restart' }),
+      @('Stop', { $a = [Windows.MessageBox]::Show($win, 'While it is stopped, sales cannot be fiscalised.', 'Stop the relay?', 'OKCancel', 'Warning'); if ($a -eq 'OK') { Run-Elevated 'relay-stop' } }, 'danger')
+    ) 'Start with Windows' $relayAuto 'relay-autostart-on' 'relay-autostart-off'
+  # Manager: Server Edition on a shop server, Desktop otherwise.
+  if ($Mode -eq 'server' -and $MgrExe) {
+    $mgrUp = [bool](Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue)
+    $mt = Get-ScheduledTask -TaskName 'EFRISConnect Manager Server' -ErrorAction SilentlyContinue
+    $mgrAuto = if ($mt) { $mt.State -ne 'Disabled' } else { $true }
+    Ctl-Row 'Manager Server Edition' $(if ($mgrUp) { "Running on port $MgrPort" } else { 'Stopped' }) $mgrUp ("Tills open it at https://$($env:COMPUTERNAME.ToLower()):$([int]$MgrPort + 1)") @(
+        @('Start', { if (!(Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue)) { $a = "--urls http://127.0.0.1:$MgrPort"; if ($MgrData) { $a += " --path `"$MgrData`"" }; Start-Process -FilePath $MgrExe -ArgumentList $a -WorkingDirectory (Split-Path -Parent $MgrExe) -WindowStyle Minimized } }),
+        @('Open Manager', { Start-Process "http://localhost:$MgrPort" }),
+        @('Stop', { $a = [Windows.MessageBox]::Show($win, 'Tills and this computer cannot open Manager while it is stopped.', 'Stop Manager Server?', 'OKCancel', 'Warning'); if ($a -eq 'OK') { Get-Process -Name 'ManagerServer' -ErrorAction SilentlyContinue | Stop-Process -Force } }, 'danger')
+      ) 'Start when I sign in' $mgrAuto 'manager-autostart-on' 'manager-autostart-off'
+  } else {
+    $md = Find-ManagerDesktop
+    $mgrUp = [bool](Get-Process -Name 'ManagerDesktop', 'Manager' -ErrorAction SilentlyContinue)
+    $btns = @(); if ($md) { $btns += , @('Open Manager Desktop', { Start-Process (Find-ManagerDesktop) }) }
+    Ctl-Row 'Manager Desktop' $(if ($mgrUp) { 'Open' } else { 'Closed' }) $(if ($mgrUp) { $true } else { $null }) 'To use Manager Server Edition and serve tills, run Setup again and choose Shop server (your data is kept).' $btns '' $false '' ''
+  }
+  # URA Offline Enabler, when installed.
+  $svc = Get-Service -Name 'TcsTomcat' -ErrorAction SilentlyContinue
+  if ($svc) {
+    $enUp = $svc.Status -eq 'Running'
+    Ctl-Row 'URA Offline Enabler' $(if ($enUp) { 'Running' } else { 'Stopped' }) $enUp 'Issues receipts with no internet at all and uploads them to URA later.' @(
+        @('Start', { Run-Elevated 'enabler-start' }), @('Restart', { Run-Elevated 'enabler-restart' }), @('Stop', { Run-Elevated 'enabler-stop' }, 'danger')
+      ) 'Start with Windows' ($svc.StartType -ne 'Manual' -and $svc.StartType -ne 'Disabled') 'enabler-autostart-on' 'enabler-autostart-off'
+  }
+  Ctl-Row 'Icon next to the clock' 'Status and quick actions' $true '' @() 'Show it when I sign in' (Test-Path $TrayLnk) 'tray-autostart-on' 'tray-autostart-off'
+  if ($Mode -eq 'server') {
+    Ctl-Row 'Shop network' "Tills use $Address" $true 'Copy the till kit to a USB stick and run Setup on each till (choose Till).' @(
+        @('Open till kit folder', { Start-Process explorer.exe (Join-Path $DataDir 'till-kit') }),
+        @('Repair firewall rules', { Run-Elevated 'firewall-repair' })
+      ) '' $false '' ''
+  }
+  Ctl-Row 'Maintenance' "Version $Version" $true '' @(
+      @('EFRISConnect Settings', { Start-Process 'https://localhost:5443/extension' }),
+      @('Reset owner password', { $a = [Windows.MessageBox]::Show($win, 'Create a one-time code to reset the owner password? Use it on this computer under "Forgot password".', 'Reset owner password', 'OKCancel', 'Question'); if ($a -eq 'OK') { Run-Elevated 'reset-owner' } })
+    ) '' $false '' ''
+}
 function Run-Elevated([string]$action) {
   try { Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Helper`" -Action $action" }
   catch { return }   # the Administrator prompt was declined
