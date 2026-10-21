@@ -140,6 +140,22 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
     <TabControl x:Name="Tabs" Margin="12,10,12,8" Background="Transparent" BorderThickness="0" Padding="0,8,0,0">
       <TabItem Header="Controls" Style="{StaticResource Tab}">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,0">
+          <StackPanel>
+          <Border x:Name="Lock" Style="{StaticResource Card}" HorizontalAlignment="Left" Width="420" Margin="0,0,0,10">
+            <StackPanel>
+              <TextBlock Text="Sign in to change settings" Style="{StaticResource CardTitle}"/>
+              <Border Height="1" Background="#E3EAD9" Margin="0,8,0,8"/>
+              <TextBlock x:Name="LockWhy" TextWrapping="Wrap" FontSize="12" Foreground="#4A6741" Text="Only an owner or admin of EFRISConnect can start, stop or switch things here. Use the same name and password as in EFRISConnect. Status and Activity stay open to everyone."/>
+              <TextBlock Text="SIGN-IN NAME" Style="{StaticResource Label}" Margin="0,10,0,3"/>
+              <TextBox x:Name="LockName" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
+              <TextBlock Text="PASSWORD" Style="{StaticResource Label}" Margin="0,8,0,3"/>
+              <PasswordBox x:Name="LockPw" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
+              <DockPanel Margin="0,10,0,0">
+                <Button x:Name="LockGo" Content="Sign in" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
+                <TextBlock x:Name="LockMsg" TextWrapping="Wrap" FontSize="12" Foreground="#B71C1C" VerticalAlignment="Center" Margin="8,0,0,0"/>
+              </DockPanel>
+            </StackPanel>
+          </Border>
       <Border Style="{StaticResource Card}">
         <StackPanel>
           <TextBlock Text="Controls" Style="{StaticResource CardTitle}"/>
@@ -147,6 +163,7 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
           <StackPanel x:Name="Controls"/>
         </StackPanel>
       </Border>
+          </StackPanel>
         </ScrollViewer>
       </TabItem>
       <TabItem Header="Status" Style="{StaticResource Tab}">
@@ -203,7 +220,7 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
 '@
 $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $ui = @{}
-foreach ($n in 'Note','NoteBar','NoteText','Tabs','Controls','Pill','Dot','PillText','StatusGrid','SetupGrid','LogList','LogScroll','BtnStart','BtnRestart','BtnStop','BtnOpen','BtnData','BtnLogs','ChangeSetup','FAll','FUra','FMgr','FProb') { $ui[$n] = $win.FindName($n) }
+foreach ($n in 'Lock','LockWhy','LockName','LockPw','LockGo','LockMsg','Note','NoteBar','NoteText','Tabs','Controls','Pill','Dot','PillText','StatusGrid','SetupGrid','LogList','LogScroll','BtnStart','BtnRestart','BtnStop','BtnOpen','BtnData','BtnLogs','ChangeSetup','FAll','FUra','FMgr','FProb') { $ui[$n] = $win.FindName($n) }
 try { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create((New-Object Uri (Join-Path $AppDir 'efrisconnect.ico'))) } catch {}
 
 function Brush([string]$hex) { [Windows.Media.BrushConverter]::new().ConvertFromString($hex) }
@@ -280,6 +297,7 @@ function Update-Status {
   if ($svc) { $setup += , @('Offline Enabler', $(if ($svc.Status -eq 'Running') { 'Running' } else { 'Stopped' })) }
   Set-Rows $ui.SetupGrid $setup
   Update-Controls $health $task
+  Apply-Lock $health
 }
 
 # -- Activity: the relay's activity log (plain lines), newest at the bottom --
@@ -499,6 +517,46 @@ $ui.ChangeSetup.add_MouseLeftButtonUp({
 })
 foreach ($c in 'FAll', 'FUra', 'FMgr', 'FProb') { $ui[$c].add_Checked({ Update-Log -Force }) }
 
+$script:unlockedUntil = [DateTime]::MinValue
+$script:unlockedBy = ''
+function Is-Unlocked { (Get-Date) -lt $script:unlockedUntil }
+function Check-Admin([string]$name, [string]$pw) {
+  try {
+    $r = Invoke-RestMethod -Method Post -Uri 'https://localhost:5443/api/auth/login' -ContentType 'application/json' -TimeoutSec 8 -Body (@{ name = $name; password = $pw; remember = $false } | ConvertTo-Json)
+  } catch { return @{ ok = $false; error = 'EFRISConnect did not answer. Start it first (it needs to run to check your password).' } }
+  if (!$r.success -or !$r.token) { return @{ ok = $false; error = $(if ($r.lockedUntil) { 'Too many wrong passwords. Try again in a few minutes.' } elseif ($r.error) { [string]$r.error } else { 'Wrong name or password.' }) } }
+  $h = @{ Authorization = 'Bearer ' + $r.token }
+  $ok = [bool]$r.user.owner
+  if (!$ok) { try { $st = Invoke-RestMethod -Uri 'https://localhost:5443/api/auth/status' -Headers $h -TimeoutSec 8; $ok = @($st.tenants | Where-Object { $_.role -eq 'admin' }).Count -gt 0 } catch {} }
+  try { $null = Invoke-RestMethod -Method Post -Uri 'https://localhost:5443/api/auth/logout' -Headers $h -TimeoutSec 5 } catch {}
+  if (!$ok) { return @{ ok = $false; error = 'Only an owner or admin of EFRISConnect can change settings here.' } }
+  return @{ ok = $true; who = [string]$(if ($r.user.displayName) { $r.user.displayName } else { $r.user.name }) }
+}
+function Apply-Lock($health) {
+  $open = Is-Unlocked
+  $ui.Lock.Visibility = if ($open) { 'Collapsed' } else { 'Visible' }
+  $ui.Controls.IsEnabled = $open
+  $ui.Controls.Opacity = if ($open) { 1 } else { 0.45 }
+  # The relay cannot check a password while it is stopped: then Start stays available
+  # (Windows still asks for an administrator).
+  $ui.BtnRestart.IsEnabled = $open; $ui.BtnStop.IsEnabled = $open -and [bool]$health
+  $ui.BtnStart.IsEnabled = $open -or -not $health
+  if (!$open -and -not $health) { $ui.LockWhy.Text = 'EFRISConnect is not running, so a password cannot be checked. Use Start at the bottom (Windows asks for an administrator), then sign in here.' }
+}
+function Do-Unlock {
+  $ui.LockMsg.Text = 'Checking...'
+  $res = Check-Admin $ui.LockName.Text $ui.LockPw.Password
+  $ui.LockPw.Password = ''
+  if (!$res.ok) { $ui.LockMsg.Text = $res.error; return }
+  $script:unlockedUntil = (Get-Date).AddMinutes(15); $script:unlockedBy = $res.who
+  $ui.LockMsg.Text = ''
+  Show-Note ("Signed in as " + $res.who + ". Controls are unlocked for 15 minutes after your last click.") 'ok'
+  Update-Status
+}
+$ui.LockGo.add_Click({ Do-Unlock })
+$ui.LockPw.add_KeyDown({ param($sender, $e) if ($e.Key -eq 'Return') { Do-Unlock } })
+# Every click while unlocked keeps it open another 15 minutes.
+$win.add_PreviewMouseDown({ if (Is-Unlocked) { $script:unlockedUntil = (Get-Date).AddMinutes(15) } })
 $jobTimer = New-Object Windows.Threading.DispatcherTimer
 $jobTimer.Interval = [TimeSpan]::FromSeconds(1)
 $jobTimer.add_Tick({ Tick-Job })
