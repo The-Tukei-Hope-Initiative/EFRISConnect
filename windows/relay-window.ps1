@@ -137,11 +137,19 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
       <Button x:Name="BtnData" DockPanel.Dock="Right" Content="Open data folder" Style="{StaticResource Btn}"/>
       <Button x:Name="BtnLogs" DockPanel.Dock="Right" Content="Open logs folder" Style="{StaticResource Btn}"/>
     </DockPanel>
-    <TabControl x:Name="Tabs" Margin="12,10,12,8" Background="Transparent" BorderThickness="0" Padding="0,8,0,0">
+    <TabControl x:Name="Tabs" Margin="12,10,12,8" Background="Transparent" BorderThickness="0" Padding="0">
+      <TabControl.Template>
+        <ControlTemplate TargetType="TabControl">
+          <DockPanel>
+            <TabPanel DockPanel.Dock="Top" IsItemsHost="True" HorizontalAlignment="Center" Margin="0,0,0,10"/>
+            <ContentPresenter ContentSource="SelectedContent"/>
+          </DockPanel>
+        </ControlTemplate>
+      </TabControl.Template>
       <TabItem Header="Controls" Style="{StaticResource Tab}">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,0">
-          <StackPanel>
-          <Border x:Name="Lock" Style="{StaticResource Card}" HorizontalAlignment="Left" Width="420" Margin="0,0,0,10">
+          <StackPanel MaxWidth="820" HorizontalAlignment="Center">
+          <Border x:Name="Lock" Style="{StaticResource Card}" HorizontalAlignment="Center" Width="420" Margin="0,0,0,10">
             <StackPanel>
               <TextBlock Text="Sign in to change settings" Style="{StaticResource CardTitle}"/>
               <Border Height="1" Background="#E3EAD9" Margin="0,8,0,8"/>
@@ -168,7 +176,7 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
       </TabItem>
       <TabItem Header="Status" Style="{StaticResource Tab}">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,0">
-          <Grid>
+          <Grid MaxWidth="820" HorizontalAlignment="Center">
             <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="10"/><ColumnDefinition/></Grid.ColumnDefinitions>
       <Border Style="{StaticResource Card}">
         <StackPanel>
@@ -192,7 +200,7 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
         </ScrollViewer>
       </TabItem>
       <TabItem Header="Activity" Style="{StaticResource Tab}">
-        <Grid Margin="4,0">
+        <Grid Margin="4,0" MaxWidth="820">
       <Border Style="{StaticResource Card}">
         <DockPanel>
           <DockPanel DockPanel.Dock="Top">
