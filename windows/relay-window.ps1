@@ -170,7 +170,7 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
         <Button x:Name="BtnRestart" Content="Restart" Visibility="Collapsed" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
         <Button x:Name="BtnStop" Content="Stop" Visibility="Collapsed" Style="{StaticResource Btn}" Foreground="#C62828" BorderBrush="#C62828" BorderThickness="1.5"/>
       </StackPanel>
-      <Border Grid.Column="1" Background="White" BorderBrush="#E3EAD9" BorderThickness="1" CornerRadius="11" Padding="3" VerticalAlignment="Center">
+      <Border x:Name="TabBar" Grid.Column="1" Visibility="Hidden" Background="White" BorderBrush="#E3EAD9" BorderThickness="1" CornerRadius="11" Padding="3" VerticalAlignment="Center">
         <StackPanel Orientation="Horizontal">
           <RadioButton x:Name="TabStatus" Content="Status" GroupName="tabs" IsChecked="True" Style="{StaticResource TabBtn}"/>
           <RadioButton x:Name="TabControls" Content="Controls" GroupName="tabs" Style="{StaticResource TabBtn}"/>
@@ -179,7 +179,30 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
       </Border>
       <Button x:Name="BtnOpen" Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" Content="Open EFRISConnect" Style="{StaticResource Btn}" Margin="0" Foreground="#2E7D32" BorderBrush="#2E7D32" BorderThickness="1.5"/>
     </Grid>
-    <TabControl x:Name="Tabs" Margin="12,14,12,10" Background="Transparent" BorderThickness="0" Padding="0">
+    <!-- Signed out: only the sign-in card. Signed in: Status, Controls and Activity. -->
+    <Grid>
+    <ScrollViewer x:Name="LockPane" VerticalScrollBarVisibility="Auto" Margin="12,14,12,10" Visibility="Collapsed">
+          <Border x:Name="Lock" Style="{StaticResource Card}" HorizontalAlignment="Center" VerticalAlignment="Top" Width="420" Margin="0,4,0,10">
+            <StackPanel>
+              <TextBlock Text="Sign in to the Control Centre" Style="{StaticResource CardTitle}"/>
+              <Border Height="1" Background="#E3EAD9" Margin="0,8,0,8"/>
+              <TextBox x:Name="LockWhy" Style="{StaticResource Sel}" FontSize="12" Foreground="#4A6741"/>
+              <TextBlock Text="SIGN-IN NAME" Style="{StaticResource Label}" Margin="0,10,0,3"/>
+              <TextBox x:Name="LockName" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
+              <TextBlock Text="PASSWORD" Style="{StaticResource Label}" Margin="0,8,0,3"/>
+              <Grid>
+                <PasswordBox x:Name="LockPw" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
+                <TextBox x:Name="LockPwText" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9" Visibility="Collapsed"/>
+              </Grid>
+              <CheckBox x:Name="LockShow" Content="Show password" FontSize="12" Foreground="#4A6741" Margin="0,7,0,0"/>
+              <DockPanel Margin="0,10,0,0">
+                <Button x:Name="LockGo" Content="Sign in" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
+                <TextBox x:Name="LockMsg" Style="{StaticResource Sel}" FontSize="12" Foreground="#B71C1C" VerticalAlignment="Center" Margin="8,0,0,0"/>
+              </DockPanel>
+            </StackPanel>
+          </Border>
+    </ScrollViewer>
+    <TabControl x:Name="Tabs" Margin="12,14,12,10" Background="Transparent" BorderThickness="0" Padding="0" Visibility="Hidden">
       <TabControl.Template>
         <ControlTemplate TargetType="TabControl">
           <DockPanel>
@@ -216,27 +239,7 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
       <TabItem Header="Controls">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,0">
           <StackPanel MaxWidth="820" HorizontalAlignment="Center">
-          <!-- Signed out: only this card shows. Signed in: only the controls. -->
-          <Border x:Name="Lock" Style="{StaticResource Card}" HorizontalAlignment="Center" Width="420" Margin="0,0,0,10" Visibility="Collapsed">
-            <StackPanel>
-              <TextBlock Text="Sign in to change settings" Style="{StaticResource CardTitle}"/>
-              <Border Height="1" Background="#E3EAD9" Margin="0,8,0,8"/>
-              <TextBox x:Name="LockWhy" Style="{StaticResource Sel}" FontSize="12" Foreground="#4A6741"/>
-              <TextBlock Text="SIGN-IN NAME" Style="{StaticResource Label}" Margin="0,10,0,3"/>
-              <TextBox x:Name="LockName" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
-              <TextBlock Text="PASSWORD" Style="{StaticResource Label}" Margin="0,8,0,3"/>
-              <Grid>
-                <PasswordBox x:Name="LockPw" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
-                <TextBox x:Name="LockPwText" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9" Visibility="Collapsed"/>
-              </Grid>
-              <CheckBox x:Name="LockShow" Content="Show password" FontSize="12" Foreground="#4A6741" Margin="0,7,0,0"/>
-              <DockPanel Margin="0,10,0,0">
-                <Button x:Name="LockGo" Content="Sign in" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
-                <TextBox x:Name="LockMsg" Style="{StaticResource Sel}" FontSize="12" Foreground="#B71C1C" VerticalAlignment="Center" Margin="8,0,0,0"/>
-              </DockPanel>
-            </StackPanel>
-          </Border>
-          <Border x:Name="CtlCard" Style="{StaticResource Card}" Visibility="Collapsed">
+          <Border x:Name="CtlCard" Style="{StaticResource Card}">
             <StackPanel>
               <DockPanel>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
@@ -276,12 +279,13 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
         </Grid>
       </TabItem>
     </TabControl>
+    </Grid>
   </DockPanel>
 </Window>
 '@
 $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $ui = @{}
-foreach ($n in 'Lock','LockWhy','LockName','LockPw','LockPwText','LockShow','LockGo','LockMsg','CtlCard','WhoText','SignOut','Note','NoteBar','NoteText','Tabs','TabStatus','TabControls','TabActivity','Controls','Pill','Dot','PillText','StatusGrid','SetupGrid','LogList','LogScroll','BtnStart','BtnRestart','BtnStop','BtnOpen','ChangeSetup','FAll','FUra','FMgr','FProb') { $ui[$n] = $win.FindName($n) }
+foreach ($n in 'LockPane','TabBar','Lock','LockWhy','LockName','LockPw','LockPwText','LockShow','LockGo','LockMsg','CtlCard','WhoText','SignOut','Note','NoteBar','NoteText','Tabs','TabStatus','TabControls','TabActivity','Controls','Pill','Dot','PillText','StatusGrid','SetupGrid','LogList','LogScroll','BtnStart','BtnRestart','BtnStop','BtnOpen','ChangeSetup','FAll','FUra','FMgr','FProb') { $ui[$n] = $win.FindName($n) }
 try { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create((New-Object Uri (Join-Path $AppDir 'efrisconnect.ico'))) } catch {}
 
 function Brush([string]$hex) { [Windows.Media.BrushConverter]::new().ConvertFromString($hex) }
@@ -667,13 +671,15 @@ function Apply-Lock($health) {
   $open = Is-Unlocked
   if ($script:wasOpen -and !$open) { Show-Note 'Controls locked again after 15 minutes without a click. Sign in to change settings.' 'ok' }
   $script:wasOpen = $open
-  $ui.Lock.Visibility = if ($open) { 'Collapsed' } else { 'Visible' }
-  $ui.CtlCard.Visibility = if ($open) { 'Visible' } else { 'Collapsed' }
+  # Signed out, the whole window is the sign-in card (Status and Activity too).
+  $ui.LockPane.Visibility = if ($open) { 'Collapsed' } else { 'Visible' }
+  $ui.Tabs.Visibility = if ($open) { 'Visible' } else { 'Hidden' }
+  $ui.TabBar.Visibility = if ($open) { 'Visible' } else { 'Hidden' }
   $ui.WhoText.Text = if ($open) { 'Signed in as ' + $script:unlockedBy } else { '' }
   # Signed out, the relay's Restart and Stop are hidden. Start stays while the relay is
   # stopped, as it cannot check a password then (Windows still asks for an administrator).
   if (!$open) { $ui.BtnRestart.Visibility = 'Collapsed'; $ui.BtnStop.Visibility = 'Collapsed' }
-  $ui.LockWhy.Text = if ($health) { 'Only an owner or admin of EFRISConnect can start, stop or switch things here. Use the same name and password as in EFRISConnect. Status and Activity stay open to everyone.' } else { 'EFRISConnect is not running, so a password cannot be checked. Use Start at the bottom (Windows asks for an administrator), then sign in here.' }
+  $ui.LockWhy.Text = if ($health) { 'Only an owner or admin of EFRISConnect can open the Control Centre. Use the same name and password as in EFRISConnect.' } else { 'EFRISConnect is not running, so a password cannot be checked. Use Start at the bottom (Windows asks for an administrator), then sign in here.' }
 }
 function Do-Unlock {
   $ui.LockMsg.Text = 'Checking...'

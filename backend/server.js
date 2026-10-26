@@ -3984,7 +3984,8 @@ app.post('/api/manager/create-receipt', async (req, res) => {
     // installed EFRISConnect theme; else the theme of the latest receipt.
     try {
       let themeId = bareKey(receipt.themeKey || '');
-      if (themeId) { const tg = await managerCall(ep, accessToken, 'GET', '/custom-theme-form/' + themeId, null); if (tg.status !== 200) { console.log('   Receipt theme ' + themeId + ' not found in Manager (reinstall the theme)'); themeId = ''; } }
+      if (!themeId) themeId = savedThemeKey(ep, accessToken);
+      if (themeId) { const tg = await managerCall(ep, accessToken, 'GET', '/custom-theme-form/' + themeId, null); if (tg.status !== 200) { console.log('   Receipt theme ' + themeId + ' not found in Manager (reinstall the theme)'); themeId = ''; } else saveThemeKey(ep, accessToken, themeId); }
       // The saved key may point at a theme deleted in Manager (duplicates removed by
       // hand): find the EFRISConnect theme by the Form Defaults, then by its name.
       if (!themeId) { try { themeId = await findInstalledThemeKey(ep, accessToken, 'EFRISConnect'); } catch (_) {} }
@@ -4630,8 +4631,9 @@ app.post('/api/manager/readiness-audit', async (req, res) => {
     // The theme EFRISConnect installed (its key is saved in Settings) counts too: some
     // Manager builds list neither the theme nor the Form Defaults' theme to the API.
     let stored = '';
-    if (!key && themeKey && /^[0-9a-f-]{36}$/i.test(bareKey(themeKey))) {
-      try { const t = await managerCall(ep, tk, 'GET', '/custom-theme-form/' + bareKey(themeKey), null); if (t.status === 200) stored = bareKey(themeKey); } catch (_) {}
+    for (const k of [bareKey(themeKey || ''), savedThemeKey(ep, tk)]) {
+      if (key || stored || !/^[0-9A-Za-z-]{6,64}$/.test(k)) continue;
+      try { const t = await managerCall(ep, tk, 'GET', '/custom-theme-form/' + k, null); if (t.status === 200) { stored = k; saveThemeKey(ep, tk, k); } } catch (_) {}
     }
     const installed = key || stored || await findThemeKeyByName(ep, tk, 'EFRISConnect');
     if (key) add('theme', 'Receipt theme', 'ok', 'The EFRISConnect theme is set on Manager documents.');
@@ -8738,7 +8740,7 @@ app.post('/api/manager/install-theme', async (req, res) => {
   const body = { Name: NAME, Content: html, Template: html, Html: html, Theme: html, Body: html, Value: html };
   // No stored key (it was never captured): reuse the EFRISConnect theme that the
   // Form Defaults already point at, instead of creating yet another one.
-  let key = bareKey(themeKey || '');
+  let key = bareKey(themeKey || '') || savedThemeKey(ep, accessToken);
   if (!key) { try { key = await findInstalledThemeKey(ep, accessToken, NAME); if (key) console.log('   Theme: reusing the EFRISConnect theme set in Form Defaults (' + key + ')'); } catch (_) {} }
   // Still none: any theme in Manager with this name (an earlier install), so a
   // re-run of setup updates it instead of adding another "EFRISConnect".
@@ -8779,7 +8781,7 @@ app.post('/api/manager/install-theme', async (req, res) => {
     try { defaults = await setThemeAsDefault(ep, accessToken, newKey); }
     catch (e) { defaults = { error: e.message }; }
   }
-  if (newKey) _themePushed[ep + '|' + newKey] = themeHash;
+  if (newKey) { _themePushed[ep + '|' + newKey] = themeHash; saveThemeKey(ep, accessToken, newKey); }
   return res.json({ success: true, key: newKey, updated, defaults });
 });
 const _themePushed = {};
@@ -8787,6 +8789,23 @@ const _themePushed = {};
 // The key of the theme named `name` that a document type's Form Defaults use
 // (Manager has no theme list endpoint, so this is how an existing one is found).
 // The key of a theme in Manager's theme list whose name is `name` (first match).
+// The EFRISConnect theme's key in each Manager business, kept on the relay. Manager's
+// API has no theme list and no Form Defaults endpoint (only create, get, update and
+// delete by key), so the key saved at install is the only way to find the theme
+// again; a browser's copy is lost in a new browser or app window. Stored per Manager
+// address and access token (hashed: the token itself is never written here).
+const THEME_KEYS_FILE = path.join(DATA_DIR, 'manager-theme-keys.json');
+function themeKeyId(ep, token) { return crypto.createHash('sha256').update(normEp(ep) + '|' + String(token || '')).digest('hex').slice(0, 32); }
+function savedThemeKey(ep, token) {
+  try { const m = readJsonDurable(THEME_KEYS_FILE).value; return (m && typeof m === 'object' && m[themeKeyId(ep, token)]) || ''; } catch (_) { return ''; }
+}
+function saveThemeKey(ep, token, key) {
+  key = bareKey(key || '');
+  if (!/^[0-9A-Za-z-]{6,64}$/.test(key) || savedThemeKey(ep, token) === key) return;
+  let m = {}; try { const v = readJsonDurable(THEME_KEYS_FILE).value; if (v && typeof v === 'object') m = v; } catch (_) {}
+  m[themeKeyId(ep, token)] = key;
+  try { writeFileAtomic(THEME_KEYS_FILE, JSON.stringify(m, null, 2)); } catch (e) { console.log('   Theme key not saved: ' + e.message); }
+}
 async function findThemeKeyByName(ep, token, name) {
   for (const lp of ['/custom-themes', '/themes']) {
     try {
