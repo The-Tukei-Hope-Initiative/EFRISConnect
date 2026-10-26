@@ -11326,7 +11326,7 @@ async function _runAuditInto(ep, tk, targetId){
   if(!ep||!tk){ ht(targetId,'<div class="st se">Enter the Manager endpoint and access token first.</div>'); return; }
   ht(targetId,'<div class="st si"><span class="sp ico" style="vertical-align:-.15em;width:1em;height:1em;display:inline-block;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9" stroke-opacity=".25"/><path d="M21 12a9 9 0 0 0-9-9"/></svg></span> Running checks against Manager…</div>');
   try{
-    const r=await fetch(RELAY+'/api/manager/readiness-audit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({managerEndpoint:ep,accessToken:tk})});
+    const r=await fetch(RELAY+'/api/manager/readiness-audit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({managerEndpoint:ep,accessToken:tk,themeKey:CFG.themeKey||''})});
     const d=await r.json();
     // In Goods Configurator mode (EFRIS off) the FDN/commodity fields are
     // irrelevant, so don't check for or nag about them.

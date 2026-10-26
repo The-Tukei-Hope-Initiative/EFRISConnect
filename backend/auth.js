@@ -223,6 +223,7 @@ function createSession(userId, remember, opts) {
   const t = now();
   sessions()[sha256(token)] = { userId, createdAt: t, lastSeen: t, remember: !!remember };
   if (opts && opts.localAuto) sessions()[sha256(token)].localAuto = true;
+  if (opts && opts.local) sessions()[sha256(token)].local = true;
   saveSessions();
   return { token, expiresAt: sessionExpiry(sessions()[sha256(token)]) };
 }
@@ -260,6 +261,16 @@ function revokeLocalAutoSessions() {
   if (n) saveSessions();
   return n;
 }
+// The one person signed in anywhere (a session used in the last `withinMs`), when
+// exactly one is and they signed in on the relay's own computer; otherwise null.
+function soleActiveUser(withinMs) {
+  purgeSessions();
+  const live = Object.values(sessions()).filter(s => s && now() - s.lastSeen <= withinMs);
+  const ids = [...new Set(live.map(s => s.userId))];
+  if (ids.length !== 1 || !live.some(s => s.local || s.localAuto)) return null;
+  const u = getUser(ids[0]);
+  return u && !u.disabled ? u : null;
+}
 function revokeUserSessions(userId, exceptHash) {
   let n = 0;
   for (const [h, s] of Object.entries(sessions())) if (s.userId === userId && h !== exceptHash) { delete sessions()[h]; n++; }
@@ -269,7 +280,7 @@ function revokeUserSessions(userId, exceptHash) {
 
 // ── Sign-in ──
 const GENERIC = 'Wrong sign-in name or password.';
-function login(name, password, remember) {
+function login(name, password, remember, opts) {
   const db = loadDb();
   const u = db.users.find(x => normName(x.name) === normName(name));
   if (!u) { checkSecret(String(password || ''), DUMMY.salt, DUMMY.hash); return { success: false, error: GENERIC }; }
@@ -286,7 +297,7 @@ function login(name, password, remember) {
   if (u.disabled) return { success: false, error: 'This account is disabled. Ask your administrator.' };
   u.failedCount = 0; u.lockedUntil = 0; u.lastLogin = new Date(now()).toISOString();
   saveDb(db);
-  const s = createSession(u.id, remember);
+  const s = createSession(u.id, remember, opts);
   return { success: true, token: s.token, expiresAt: s.expiresAt, user: publicUser(u) };
 }
 
@@ -456,7 +467,7 @@ module.exports = {
   ROLE_PERMS, ROLES, MIN_PASSWORD, CODE_FILE, USERS_FILE, SESSIONS_FILE, RESET_FILE,
   hasUsers, getUser, findByName, listUsers, publicUser, validatePassword,
   ensureSetupCode, checkSetupCode, createOwner,
-  createSession, sessionFromToken, logout, revokeUserSessions, revokeLocalAutoSessions, purgeSessions,
+  createSession, sessionFromToken, logout, revokeUserSessions, revokeLocalAutoSessions, purgeSessions, soleActiveUser,
   login, recover, writeResetCode, changeOwnPassword, issueEmailCode, setOwnEmail, listOwners, EMAIL_CODE_TTL_MS, EMAIL_CODE_MAX_PER_HOUR,
   addUser, updateUser, removeTenantRoles, grantRole,
   permissionsFor, can, roleIn,

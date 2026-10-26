@@ -88,16 +88,49 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
         </ControlTemplate>
       </Setter.Value></Setter>
     </Style>
-    <Style x:Key="Tab" TargetType="TabItem">
+    <!-- Text people can select and copy, looking like plain text. -->
+    <Style x:Key="Sel" TargetType="TextBox">
+      <Setter Property="IsReadOnly" Value="True"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Padding" Value="0"/><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="IsTabStop" Value="False"/>
+      <Setter Property="Foreground" Value="#1A2E1A"/><Setter Property="SelectionBrush" Value="#A5D6A7"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="TextBox"><ScrollViewer x:Name="PART_ContentHost" Padding="0" Margin="0" Focusable="False" VerticalScrollBarVisibility="Disabled" HorizontalScrollBarVisibility="Disabled"/></ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <!-- On/off switch (the design system's toggle): green track when on. -->
+    <Style x:Key="Switch" TargetType="CheckBox">
+      <Setter Property="Cursor" Value="Hand"/><Setter Property="FontSize" Value="12.5"/><Setter Property="Foreground" Value="#1A2E1A"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="CheckBox">
+          <StackPanel Orientation="Horizontal" Background="Transparent">
+            <Border x:Name="track" Width="34" Height="18" CornerRadius="9" Background="#CFD8CC" VerticalAlignment="Center">
+              <Ellipse x:Name="thumb" Width="14" Height="14" Fill="White" HorizontalAlignment="Left" Margin="2,0,0,0">
+                <Ellipse.Effect><DropShadowEffect Color="#142E14" Opacity="0.25" BlurRadius="3" ShadowDepth="1" Direction="270"/></Ellipse.Effect>
+              </Ellipse>
+            </Border>
+            <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"/>
+          </StackPanel>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+              <Setter TargetName="track" Property="Background" Value="#2E7D32"/>
+              <Setter TargetName="thumb" Property="HorizontalAlignment" Value="Right"/><Setter TargetName="thumb" Property="Margin" Value="0,0,2,0"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter TargetName="track" Property="Opacity" Value="0.5"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <!-- The tab switch at the bottom of the window (Status, Controls, Activity). -->
+    <Style x:Key="TabBtn" TargetType="RadioButton">
       <Setter Property="Cursor" Value="Hand"/><Setter Property="FontSize" Value="12.5"/><Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Template"><Setter.Value>
-        <ControlTemplate TargetType="TabItem">
-          <Border x:Name="b" Background="Transparent" CornerRadius="9" Padding="14,6" Margin="0,0,6,0">
-            <ContentPresenter x:Name="c" ContentSource="Header" TextElement.Foreground="#4A6741"/>
+        <ControlTemplate TargetType="RadioButton">
+          <Border x:Name="b" Background="Transparent" CornerRadius="8" Padding="14,5">
+            <ContentPresenter x:Name="c" TextElement.Foreground="#4A6741"/>
           </Border>
           <ControlTemplate.Triggers>
-            <Trigger Property="IsSelected" Value="True"><Setter TargetName="b" Property="Background" Value="#2E7D32"/><Setter TargetName="c" Property="TextElement.Foreground" Value="White"/></Trigger>
-            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="BorderBrush" Value="#C8E6C9"/></Trigger>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#F1F8E9"/></Trigger>
+            <Trigger Property="IsChecked" Value="True"><Setter TargetName="b" Property="Background" Value="#2E7D32"/><Setter TargetName="c" Property="TextElement.Foreground" Value="White"/></Trigger>
           </ControlTemplate.Triggers>
         </ControlTemplate>
       </Setter.Value></Setter>
@@ -110,10 +143,10 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
         <GradientStop Color="#14431F" Offset="0"/><GradientStop Color="#1B5E20" Offset="0.42"/><GradientStop Color="#2E7D32" Offset="1"/>
       </LinearGradientBrush></Border.Background>
       <DockPanel>
-        <Border x:Name="Pill" DockPanel.Dock="Right" CornerRadius="13" Padding="12,4,13,5" MinHeight="26" BorderThickness="1" VerticalAlignment="Center">
+        <Border x:Name="Pill" DockPanel.Dock="Right" CornerRadius="13" Padding="12,4,13,5" MinHeight="26" BorderThickness="1" VerticalAlignment="Center" Background="#F5F5F5" BorderBrush="#E0E0E0">
           <StackPanel Orientation="Horizontal">
-            <Ellipse x:Name="Dot" Width="8" Height="8" Margin="0,0,6,0"/>
-            <TextBlock x:Name="PillText" FontWeight="Bold" FontSize="12"/>
+            <Ellipse x:Name="Dot" Width="8" Height="8" Margin="0,0,6,0" Fill="#9E9E9E"/>
+            <TextBlock x:Name="PillText" FontWeight="Bold" FontSize="12" Text="Checking..." Foreground="#4A6741"/>
           </StackPanel>
         </Border>
         <StackPanel>
@@ -125,67 +158,48 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
     <Border x:Name="Note" DockPanel.Dock="Top" Visibility="Collapsed" Background="#E3F2FD" BorderBrush="#90CAF9" BorderThickness="0,0,0,1" Padding="16,8">
       <DockPanel>
         <ProgressBar x:Name="NoteBar" DockPanel.Dock="Right" Width="120" Height="6" IsIndeterminate="True" Foreground="#2E7D32" Background="#E3EAD9" BorderThickness="0" VerticalAlignment="Center"/>
-        <TextBlock x:Name="NoteText" TextWrapping="Wrap" FontSize="12.5" Foreground="#0D47A1" Margin="0,0,12,0"/>
+        <TextBox x:Name="NoteText" Style="{StaticResource Sel}" FontSize="12.5" Foreground="#0D47A1" Margin="0,0,12,0" VerticalAlignment="Center"/>
       </DockPanel>
     </Border>
-    <!-- Actions -->
-    <DockPanel DockPanel.Dock="Bottom" Margin="16,0,16,14" LastChildFill="False">
-      <Button x:Name="BtnStart" Content="Start" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
-      <Button x:Name="BtnRestart" Content="Restart" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
-      <Button x:Name="BtnStop" Content="Stop" Style="{StaticResource Btn}" Foreground="#C62828" BorderBrush="#C62828" BorderThickness="1.5"/>
-      <Button x:Name="BtnOpen" DockPanel.Dock="Right" Content="Open EFRISConnect" Style="{StaticResource Btn}" Margin="0" Foreground="#2E7D32" BorderBrush="#2E7D32" BorderThickness="1.5"/>
-      <Button x:Name="BtnData" DockPanel.Dock="Right" Content="Open data folder" Style="{StaticResource Btn}"/>
-      <Button x:Name="BtnLogs" DockPanel.Dock="Right" Content="Open logs folder" Style="{StaticResource Btn}"/>
-    </DockPanel>
-    <TabControl x:Name="Tabs" Margin="12,10,12,8" Background="Transparent" BorderThickness="0" Padding="0">
+    <!-- Actions on the left, the tab switch in the middle, EFRISConnect on the right.
+         The relay buttons stay hidden until the first status check has run. -->
+    <Grid DockPanel.Dock="Bottom" Margin="16,0,16,14">
+      <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition/></Grid.ColumnDefinitions>
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+        <Button x:Name="BtnStart" Content="Start" Visibility="Collapsed" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
+        <Button x:Name="BtnRestart" Content="Restart" Visibility="Collapsed" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
+        <Button x:Name="BtnStop" Content="Stop" Visibility="Collapsed" Style="{StaticResource Btn}" Foreground="#C62828" BorderBrush="#C62828" BorderThickness="1.5"/>
+      </StackPanel>
+      <Border Grid.Column="1" Background="White" BorderBrush="#E3EAD9" BorderThickness="1" CornerRadius="11" Padding="3" VerticalAlignment="Center">
+        <StackPanel Orientation="Horizontal">
+          <RadioButton x:Name="TabStatus" Content="Status" GroupName="tabs" IsChecked="True" Style="{StaticResource TabBtn}"/>
+          <RadioButton x:Name="TabControls" Content="Controls" GroupName="tabs" Style="{StaticResource TabBtn}"/>
+          <RadioButton x:Name="TabActivity" Content="Activity" GroupName="tabs" Style="{StaticResource TabBtn}"/>
+        </StackPanel>
+      </Border>
+      <Button x:Name="BtnOpen" Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center" Content="Open EFRISConnect" Style="{StaticResource Btn}" Margin="0" Foreground="#2E7D32" BorderBrush="#2E7D32" BorderThickness="1.5"/>
+    </Grid>
+    <TabControl x:Name="Tabs" Margin="12,14,12,10" Background="Transparent" BorderThickness="0" Padding="0">
       <TabControl.Template>
         <ControlTemplate TargetType="TabControl">
           <DockPanel>
-            <TabPanel DockPanel.Dock="Top" IsItemsHost="True" HorizontalAlignment="Center" Margin="0,0,0,10"/>
+            <TabPanel DockPanel.Dock="Top" IsItemsHost="True" Visibility="Hidden" Height="0"/>
             <ContentPresenter ContentSource="SelectedContent"/>
           </DockPanel>
         </ControlTemplate>
       </TabControl.Template>
-      <TabItem Header="Controls" Style="{StaticResource Tab}">
+      <TabItem Header="Status">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,0">
-          <StackPanel MaxWidth="820" HorizontalAlignment="Center">
-          <Border x:Name="Lock" Style="{StaticResource Card}" HorizontalAlignment="Center" Width="420" Margin="0,0,0,10">
-            <StackPanel>
-              <TextBlock Text="Sign in to change settings" Style="{StaticResource CardTitle}"/>
-              <Border Height="1" Background="#E3EAD9" Margin="0,8,0,8"/>
-              <TextBlock x:Name="LockWhy" TextWrapping="Wrap" FontSize="12" Foreground="#4A6741" Text="Only an owner or admin of EFRISConnect can start, stop or switch things here. Use the same name and password as in EFRISConnect. Status and Activity stay open to everyone."/>
-              <TextBlock Text="SIGN-IN NAME" Style="{StaticResource Label}" Margin="0,10,0,3"/>
-              <TextBox x:Name="LockName" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
-              <TextBlock Text="PASSWORD" Style="{StaticResource Label}" Margin="0,8,0,3"/>
-              <PasswordBox x:Name="LockPw" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
-              <DockPanel Margin="0,10,0,0">
-                <Button x:Name="LockGo" Content="Sign in" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
-                <TextBlock x:Name="LockMsg" TextWrapping="Wrap" FontSize="12" Foreground="#B71C1C" VerticalAlignment="Center" Margin="8,0,0,0"/>
-              </DockPanel>
-            </StackPanel>
-          </Border>
-      <Border Style="{StaticResource Card}">
-        <StackPanel>
-          <TextBlock Text="Controls" Style="{StaticResource CardTitle}"/>
-          <Border Height="1" Background="#E3EAD9" Margin="0,8,0,4"/>
-          <StackPanel x:Name="Controls"/>
-        </StackPanel>
-      </Border>
-          </StackPanel>
-        </ScrollViewer>
-      </TabItem>
-      <TabItem Header="Status" Style="{StaticResource Tab}">
-        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,0">
-          <Grid MaxWidth="820" HorizontalAlignment="Center">
+          <Grid MaxWidth="820" HorizontalAlignment="Center" VerticalAlignment="Top">
             <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="10"/><ColumnDefinition/></Grid.ColumnDefinitions>
-      <Border Style="{StaticResource Card}">
+      <Border Style="{StaticResource Card}" VerticalAlignment="Top">
         <StackPanel>
           <TextBlock Text="Status" Style="{StaticResource CardTitle}"/>
           <Border Height="1" Background="#E3EAD9" Margin="0,8,0,8"/>
           <Grid x:Name="StatusGrid"><Grid.ColumnDefinitions><ColumnDefinition Width="128"/><ColumnDefinition/></Grid.ColumnDefinitions></Grid>
         </StackPanel>
       </Border>
-      <Border Grid.Column="2" Style="{StaticResource Card}">
+      <Border Grid.Column="2" Style="{StaticResource Card}" VerticalAlignment="Top">
         <StackPanel>
           <DockPanel>
             <TextBlock DockPanel.Dock="Right" x:Name="ChangeSetup" Text="Change in Setup" Foreground="#1565C0" FontSize="11.5" FontWeight="SemiBold" Cursor="Hand"
@@ -199,7 +213,46 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
           </Grid>
         </ScrollViewer>
       </TabItem>
-      <TabItem Header="Activity" Style="{StaticResource Tab}">
+      <TabItem Header="Controls">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4,0">
+          <StackPanel MaxWidth="820" HorizontalAlignment="Center">
+          <!-- Signed out: only this card shows. Signed in: only the controls. -->
+          <Border x:Name="Lock" Style="{StaticResource Card}" HorizontalAlignment="Center" Width="420" Margin="0,0,0,10" Visibility="Collapsed">
+            <StackPanel>
+              <TextBlock Text="Sign in to change settings" Style="{StaticResource CardTitle}"/>
+              <Border Height="1" Background="#E3EAD9" Margin="0,8,0,8"/>
+              <TextBox x:Name="LockWhy" Style="{StaticResource Sel}" FontSize="12" Foreground="#4A6741"/>
+              <TextBlock Text="SIGN-IN NAME" Style="{StaticResource Label}" Margin="0,10,0,3"/>
+              <TextBox x:Name="LockName" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
+              <TextBlock Text="PASSWORD" Style="{StaticResource Label}" Margin="0,8,0,3"/>
+              <Grid>
+                <PasswordBox x:Name="LockPw" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
+                <TextBox x:Name="LockPwText" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9" Visibility="Collapsed"/>
+              </Grid>
+              <CheckBox x:Name="LockShow" Content="Show password" FontSize="12" Foreground="#4A6741" Margin="0,7,0,0"/>
+              <DockPanel Margin="0,10,0,0">
+                <Button x:Name="LockGo" Content="Sign in" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
+                <TextBox x:Name="LockMsg" Style="{StaticResource Sel}" FontSize="12" Foreground="#B71C1C" VerticalAlignment="Center" Margin="8,0,0,0"/>
+              </DockPanel>
+            </StackPanel>
+          </Border>
+          <Border x:Name="CtlCard" Style="{StaticResource Card}" Visibility="Collapsed">
+            <StackPanel>
+              <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                  <TextBlock x:Name="WhoText" FontSize="11.5" Foreground="#4A6741" Margin="0,0,10,0"/>
+                  <TextBlock x:Name="SignOut" Text="Sign out" Foreground="#1565C0" FontSize="11.5" FontWeight="SemiBold" Cursor="Hand"/>
+                </StackPanel>
+                <TextBlock Text="Controls" Style="{StaticResource CardTitle}"/>
+              </DockPanel>
+              <Border Height="1" Background="#E3EAD9" Margin="0,8,0,4"/>
+              <StackPanel x:Name="Controls"/>
+            </StackPanel>
+          </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="Activity">
         <Grid Margin="4,0" MaxWidth="820">
       <Border Style="{StaticResource Card}">
         <DockPanel>
@@ -228,18 +281,70 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
 '@
 $win = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
 $ui = @{}
-foreach ($n in 'Lock','LockWhy','LockName','LockPw','LockGo','LockMsg','Note','NoteBar','NoteText','Tabs','Controls','Pill','Dot','PillText','StatusGrid','SetupGrid','LogList','LogScroll','BtnStart','BtnRestart','BtnStop','BtnOpen','BtnData','BtnLogs','ChangeSetup','FAll','FUra','FMgr','FProb') { $ui[$n] = $win.FindName($n) }
+foreach ($n in 'Lock','LockWhy','LockName','LockPw','LockPwText','LockShow','LockGo','LockMsg','CtlCard','WhoText','SignOut','Note','NoteBar','NoteText','Tabs','TabStatus','TabControls','TabActivity','Controls','Pill','Dot','PillText','StatusGrid','SetupGrid','LogList','LogScroll','BtnStart','BtnRestart','BtnStop','BtnOpen','ChangeSetup','FAll','FUra','FMgr','FProb') { $ui[$n] = $win.FindName($n) }
 try { $win.Icon = [Windows.Media.Imaging.BitmapFrame]::Create((New-Object Uri (Join-Path $AppDir 'efrisconnect.ico'))) } catch {}
 
 function Brush([string]$hex) { [Windows.Media.BrushConverter]::new().ConvertFromString($hex) }
+# Text that can be selected and copied.
+function Sel-Text([string]$text, [double]$size) {
+  $t = New-Object Windows.Controls.TextBox; $t.Style = $win.Resources['Sel']; $t.Text = $text
+  if ($size) { $t.FontSize = $size }
+  return $t
+}
+# A confirmation or message in the EFRISConnect style (in place of the Windows message
+# box). Returns $true for the main button.
+function Ask([string]$title, [string]$msg, [string]$ok, [string]$kind) {
+  [xml]$dx = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent" SizeToContent="WidthAndHeight" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False" FontFamily="Segoe UI" UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
+  <Border Margin="16" Background="White" CornerRadius="14" BorderBrush="#E3EAD9" BorderThickness="1" Width="400">
+    <Border.Effect><DropShadowEffect Color="#142E14" Opacity="0.22" BlurRadius="22" ShadowDepth="4" Direction="270"/></Border.Effect>
+    <StackPanel Margin="20,18,20,16">
+      <DockPanel>
+        <Border x:Name="Ico" Width="26" Height="26" CornerRadius="13" Margin="0,0,10,0" VerticalAlignment="Top">
+          <TextBlock x:Name="IcoT" FontWeight="Bold" FontSize="14" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Border>
+        <TextBlock x:Name="T" FontSize="15" FontWeight="Bold" Foreground="#1A2E1A" VerticalAlignment="Center" TextWrapping="Wrap"/>
+      </DockPanel>
+      <TextBox x:Name="M" IsReadOnly="True" BorderThickness="0" Background="Transparent" TextWrapping="Wrap" FontSize="13" Foreground="#4A6741" Margin="36,8,0,16" IsTabStop="False"/>
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+        <Button x:Name="No" Content="Cancel" Padding="16,7" Margin="0,0,8,0" Cursor="Hand" FontWeight="SemiBold" Background="White" Foreground="#4A6741" BorderBrush="#E3EAD9" IsCancel="True"/>
+        <Button x:Name="Yes" Padding="16,7" Cursor="Hand" FontWeight="SemiBold" Foreground="White" IsDefault="True"/>
+      </StackPanel>
+    </StackPanel>
+  </Border>
+</Window>
+'@
+  $d = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $dx))
+  $d.Owner = $win
+  $look = @{ danger = @('#FFEBEE', '#C62828', '!'); info = @('#E3F2FD', '#1565C0', 'i'); ask = @('#E8F5E9', '#2E7D32', '?') }[$kind]
+  if (!$look) { $look = @('#E8F5E9', '#2E7D32', '?') }
+  $d.FindName('Ico').Background = Brush $look[0]; $d.FindName('IcoT').Text = $look[2]; $d.FindName('IcoT').Foreground = Brush $look[1]
+  $d.FindName('T').Text = $title; $d.FindName('M').Text = $msg
+  $yes = $d.FindName('Yes'); $yes.Content = $(if ($ok) { $ok } else { 'OK' }); $yes.Background = Brush $look[1]; $yes.BorderBrush = Brush $look[1]
+  foreach ($b in $yes, $d.FindName('No')) { $b.Style = $win.Resources['Btn'] }
+  $yes.Margin = '0'
+  if ($kind -eq 'info') { $d.FindName('No').Visibility = 'Collapsed' }
+  $yes.add_Click({ $d.DialogResult = $true })
+  $d.add_MouseLeftButtonDown({ try { $d.DragMove() } catch {} })
+  return [bool]$d.ShowDialog()
+}
 # A label / value table (labels in the small capitals of the design system).
 function Set-Rows($grid, $rows) {
   $grid.Children.Clear(); $grid.RowDefinitions.Clear(); $i = 0
   foreach ($r in $rows) {
     $grid.RowDefinitions.Add((New-Object Windows.Controls.RowDefinition))
     $l = New-Object Windows.Controls.TextBlock; $l.Text = $r[0].ToUpper(); $l.Style = $win.Resources['Label']
-    $v = New-Object Windows.Controls.TextBlock; $v.Text = $r[1]; $v.Style = $win.Resources['Value']
-    if ($r.Count -gt 2 -and $r[2]) { $v.Foreground = Brush $r[2]; $v.FontWeight = 'SemiBold' }
+    if ($r.Count -gt 3 -and $r[3]) {
+      # A folder: the path is a link that opens it in File Explorer.
+      $v = New-Object Windows.Controls.TextBlock; $v.Text = $r[1]; $v.Style = $win.Resources['Value']
+      $v.Foreground = Brush '#1565C0'; $v.Cursor = 'Hand'; $v.ToolTip = 'Open in File Explorer'; $v.Tag = $r[3]
+      $v.add_MouseLeftButtonUp({ param($sender, $e) Start-Process explorer.exe $sender.Tag })
+    } else {
+      $v = Sel-Text $r[1] 13; $v.Margin = '0,3,0,3'; $v.VerticalAlignment = 'Center'
+      if ($r.Count -gt 2 -and $r[2]) { $v.Foreground = Brush $r[2]; $v.FontWeight = 'SemiBold' }
+    }
     [Windows.Controls.Grid]::SetRow($l, $i); [Windows.Controls.Grid]::SetRow($v, $i); [Windows.Controls.Grid]::SetColumn($v, 1)
     [void]$grid.Children.Add($l); [void]$grid.Children.Add($v); $i++
   }
@@ -274,7 +379,7 @@ function Update-Status {
   $ui.PillText.Foreground = Brush $look[3]; $ui.Dot.Fill = Brush $look[4]
   $ui.BtnStart.Visibility = if ($state -eq 'stopped') { 'Visible' } else { 'Collapsed' }
   $ui.BtnRestart.Visibility = if ($state -ne 'stopped') { 'Visible' } else { 'Collapsed' }
-  $ui.BtnStop.IsEnabled = ($state -ne 'stopped')
+  $ui.BtnStop.Visibility = if ($state -ne 'stopped') { 'Visible' } else { 'Collapsed' }
 
   $since = if ($health -and $health.startedAt) { (When $health.startedAt) + ' (' + (Ago $health.startedAt) + ')' } elseif ($state -eq 'starting') { 'Starting ...' } else { 'Not running' }
   $last = if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 2000) { When $info.LastRunTime.ToString('o') } elseif ($health -and $health.startedAt) { When $health.startedAt } else { '' }
@@ -296,8 +401,8 @@ function Update-Status {
   $setup = @(
     @('This computer', $ModeText),
     @('Address', $Address),
-    @('Data folder', $DataDir),
-    @('Logs folder', $LogDir),
+    @('Data folder', $DataDir, '', $DataDir),
+    @('Logs folder', $LogDir, '', $LogDir),
     # Windows shows a task that runs as SYSTEM only to administrators, so "not visible"
     # is normal here; a relay that answers is proof enough that the task works.
     @('Runs as', $(if ($task -or $health) { 'Windows task, starts with the computer' } else { 'Windows task (status needs administrator rights)' }), $(if ($task -or $health) { '' } else { '#8D5A00' }))
@@ -366,7 +471,7 @@ function Update-Log([switch]$Force) {
     $chip = New-Object Windows.Controls.Border; $chip.CornerRadius = 5; $chip.Width = 62; $chip.Margin = '0,0,10,0'; $chip.Background = Brush $tag[1]; $chip.VerticalAlignment = 'Top'
     $ct = New-Object Windows.Controls.TextBlock; $ct.Text = $tag[0]; $ct.FontSize = 10; $ct.FontWeight = 'Bold'; $ct.Foreground = Brush $tag[2]; $ct.HorizontalAlignment = 'Center'; $ct.Padding = '0,1'
     $chip.Child = $ct
-    $tx = New-Object Windows.Controls.TextBlock; $tx.Text = $text; $tx.TextWrapping = 'Wrap'; $tx.FontFamily = 'Consolas'; $tx.FontSize = 11.5
+    $tx = Sel-Text $text 11.5; $tx.FontFamily = 'Consolas'
     if ($e.user) { $tx.ToolTip = "By $($e.user)" }
     [Windows.Controls.DockPanel]::SetDock($tm, 'Left'); [Windows.Controls.DockPanel]::SetDock($chip, 'Left')
     [void]$row.Children.Add($tm); [void]$row.Children.Add($chip); [void]$row.Children.Add($tx)
@@ -395,11 +500,11 @@ function Find-ManagerDesktop {
 function Ctl-Row($name, $state, $ok, $note, $buttons, $switchText, $switchOn, $onAction, $offAction) {
   $row = New-Object Windows.Controls.DockPanel; $row.Margin = '0,6,0,6'
   $left = New-Object Windows.Controls.StackPanel; $left.Width = 260
-  $t = New-Object Windows.Controls.TextBlock; $t.Text = $name; $t.FontWeight = 'SemiBold'; $t.FontSize = 13
-  $st = New-Object Windows.Controls.TextBlock; $st.Text = $state; $st.FontSize = 12; $st.FontWeight = 'SemiBold'
+  $t = Sel-Text $name 13; $t.FontWeight = 'SemiBold'
+  $st = Sel-Text $state 12; $st.FontWeight = 'SemiBold'
   $st.Foreground = Brush $(if ($ok -eq $true) { '#1B5E20' } elseif ($ok -eq $false) { '#B71C1C' } else { '#8D5A00' })
   [void]$left.Children.Add($t); [void]$left.Children.Add($st)
-  if ($note) { $n = New-Object Windows.Controls.TextBlock; $n.Text = $note; $n.FontSize = 11; $n.Foreground = Brush '#6B7280'; $n.TextWrapping = 'Wrap'; [void]$left.Children.Add($n) }
+  if ($note) { $n = Sel-Text $note 11; $n.Foreground = Brush '#6B7280'; [void]$left.Children.Add($n) }
   [Windows.Controls.DockPanel]::SetDock($left, 'Left'); [void]$row.Children.Add($left)
   $right = New-Object Windows.Controls.WrapPanel; $right.VerticalAlignment = 'Center'
   foreach ($b in $buttons) {
@@ -409,7 +514,7 @@ function Ctl-Row($name, $state, $ok, $note, $buttons, $switchText, $switchOn, $o
     [void]$right.Children.Add($btn)
   }
   if ($switchText) {
-    $cb = New-Object Windows.Controls.CheckBox; $cb.Content = $switchText; $cb.IsChecked = $switchOn; $cb.Margin = '4,6,0,2'; $cb.VerticalAlignment = 'Center'
+    $cb = New-Object Windows.Controls.CheckBox; $cb.Style = $win.Resources['Switch']; $cb.Content = $switchText; $cb.IsChecked = $switchOn; $cb.Margin = '4,6,0,2'; $cb.VerticalAlignment = 'Center'
     $cb.Tag = @($onAction, $offAction)
     $cb.add_Click({ param($sender, $e) if ($sender.IsChecked) { Run-Elevated $sender.Tag[0] } else { Run-Elevated $sender.Tag[1] } })
     [void]$right.Children.Add($cb)
@@ -425,7 +530,7 @@ function Update-Controls($health, $task) {
   $relayAuto = if ($task) { $task.State -ne 'Disabled' } else { [bool]$health }
   Ctl-Row 'EFRISConnect (the relay)' $(if ($health) { 'Running' } else { 'Stopped' }) ([bool]$health) 'Talks to URA and Manager. Sales cannot be fiscalised while it is stopped.' @(
       @('Start', { Run-Elevated 'start' }), @('Restart', { Run-Elevated 'restart' }),
-      @('Stop', { $a = [Windows.MessageBox]::Show($win, 'While it is stopped, sales cannot be fiscalised.', 'Stop the relay?', 'OKCancel', 'Warning'); if ($a -eq 'OK') { Run-Elevated 'relay-stop' } }, 'danger')
+      @('Stop', { if (Ask 'Stop EFRISConnect?' 'While it is stopped, sales cannot be fiscalised. You can start it again here or from the tray icon.' 'Stop' 'danger') { Run-Elevated 'relay-stop' } }, 'danger')
     ) 'Start with Windows' $relayAuto 'relay-autostart-on' 'relay-autostart-off'
   # Manager: Server Edition on a shop server, Desktop otherwise.
   if ($Mode -eq 'server' -and $MgrExe) {
@@ -435,7 +540,7 @@ function Update-Controls($health, $task) {
     Ctl-Row 'Manager Server Edition' $(if ($mgrUp) { "Running on port $MgrPort" } else { 'Stopped' }) $mgrUp ("Tills open it at https://$($env:COMPUTERNAME.ToLower()):$([int]$MgrPort + 1)") @(
         @('Start', { if (Port-Open ([int]$MgrPort)) { Show-Note "Manager Server is already running on port $MgrPort." 'ok'; return }; Run-Elevated 'manager-start' }),
         @('Open Manager', { Start-Process "http://localhost:$MgrPort" }),
-        @('Stop', { $a = [Windows.MessageBox]::Show($win, 'Tills and this computer cannot open Manager while it is stopped.', 'Stop Manager Server?', 'OKCancel', 'Warning'); if ($a -eq 'OK') { Run-Elevated 'manager-stop' } }, 'danger')
+        @('Stop', { if (Ask 'Stop Manager Server?' 'Tills and this computer cannot open Manager while it is stopped.' 'Stop' 'danger') { Run-Elevated 'manager-stop' } }, 'danger')
       ) 'Start with Windows (in the background)' $mgrAuto 'manager-autostart-on' 'manager-autostart-off'
   } else {
     $md = Find-ManagerDesktop
@@ -461,14 +566,15 @@ function Update-Controls($health, $task) {
   }
   Ctl-Row 'Maintenance' "Version $Version" $true '' @(
       @('EFRISConnect Settings', { Open-App 'https://localhost:5443/extension' }),
-      @('Reset owner password', { $a = [Windows.MessageBox]::Show($win, 'Create a one-time code to reset the owner password? Use it on this computer under "Forgot password".', 'Reset owner password', 'OKCancel', 'Question'); if ($a -eq 'OK') { Run-Elevated 'reset-owner' } })
+      @('Reset owner password', { if (Ask 'Reset owner password?' 'This makes a one-time code. Use it on this computer under "Forgot password" on the EFRISConnect sign-in page.' 'Make the code' 'ask') { Run-Elevated 'reset-owner' } })
     ) '' $false '' ''
 }
-# EFRISConnect in its own app window (Edge app mode: no address bar or tabs), or the
-# default browser when Edge is missing.
+# EFRISConnect in its own app window (app mode: no address bar or tabs): Chrome, else
+# Edge, else the default browser.
 function Open-App([string]$url) {
-  $edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
-  if ($edge) { Start-Process $edge -ArgumentList "--app=$url" } else { Start-Process $url }
+  $b = @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe", "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
+         "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if ($b) { Start-Process $b -ArgumentList "--app=$url" } else { Start-Process $url }
 }
 $script:job = $null
 function Show-Note([string]$text, [string]$kind) {
@@ -518,14 +624,14 @@ function Run-Elevated([string]$action) {
 $ui.BtnStart.add_Click({ Run-Elevated 'start' })
 $ui.BtnRestart.add_Click({ Run-Elevated 'restart' })
 $ui.BtnStop.add_Click({
-  $a = [Windows.MessageBox]::Show($win, 'While it is stopped, sales cannot be fiscalised. You can start it again from this window or the tray icon.', 'Stop the relay?', 'OKCancel', 'Warning')
-  if ($a -eq 'OK') { Run-Elevated 'relay-stop' }
+  if (Ask 'Stop EFRISConnect?' 'While it is stopped, sales cannot be fiscalised. You can start it again here or from the tray icon.' 'Stop' 'danger') { Run-Elevated 'relay-stop' }
 })
 $ui.BtnOpen.add_Click({ Open-App 'https://localhost:5443/extension' })
-$ui.BtnData.add_Click({ Start-Process explorer.exe $DataDir })
-$ui.BtnLogs.add_Click({ Start-Process explorer.exe $LogDir })
+$ui.TabStatus.add_Checked({ $ui.Tabs.SelectedIndex = 0 })
+$ui.TabControls.add_Checked({ $ui.Tabs.SelectedIndex = 1 })
+$ui.TabActivity.add_Checked({ $ui.Tabs.SelectedIndex = 2 })
 $ui.ChangeSetup.add_MouseLeftButtonUp({
-  [void][Windows.MessageBox]::Show($win, "Ports and how this computer is used are chosen in Setup.`n`nTo change them, run the EFRISConnect Setup file again. Your data, users and settings are kept.", 'Change in Setup', 'OK', 'Information')
+  [void](Ask 'Change in Setup' "Ports and how this computer is used are chosen in Setup. To change them, run the EFRISConnect Setup file again. Your data, users and settings are kept." 'OK' 'info')
 })
 foreach ($c in 'FAll', 'FUra', 'FMgr', 'FProb') { $ui[$c].add_Checked({ Update-Log -Force }) }
 
@@ -544,29 +650,52 @@ function Check-Admin([string]$name, [string]$pw) {
   if (!$ok) { return @{ ok = $false; error = 'Only an owner or admin of EFRISConnect can change settings here.' } }
   return @{ ok = $true; who = [string]$(if ($r.user.displayName) { $r.user.displayName } else { $r.user.name }) }
 }
+# An owner or admin already signed in to EFRISConnect on this computer, when nobody else
+# is signed in anywhere, opens the controls without typing the password again. Not
+# after "Sign out" here, until this window is closed.
+$script:noAuto = $false
+$script:wasOpen = $false
+function Try-AutoUnlock {
+  $r = $null
+  try { $r = Invoke-RestMethod -Uri 'https://localhost:5443/api/auth/console-session' -TimeoutSec 4 } catch { return }
+  if (!$r -or !$r.user) { return }
+  $script:unlockedUntil = (Get-Date).AddMinutes(15); $script:unlockedBy = [string]$r.user.displayName
+  Show-Note ("Signed in as " + $script:unlockedBy + " (already signed in to EFRISConnect on this computer). Controls stay unlocked for 15 minutes after your last click.") 'ok'
+}
 function Apply-Lock($health) {
+  if (!(Is-Unlocked) -and $health -and !$script:noAuto) { Try-AutoUnlock }
   $open = Is-Unlocked
+  if ($script:wasOpen -and !$open) { Show-Note 'Controls locked again after 15 minutes without a click. Sign in to change settings.' 'ok' }
+  $script:wasOpen = $open
   $ui.Lock.Visibility = if ($open) { 'Collapsed' } else { 'Visible' }
-  $ui.Controls.IsEnabled = $open
-  $ui.Controls.Opacity = if ($open) { 1 } else { 0.45 }
-  # The relay cannot check a password while it is stopped: then Start stays available
-  # (Windows still asks for an administrator).
-  $ui.BtnRestart.IsEnabled = $open; $ui.BtnStop.IsEnabled = $open -and [bool]$health
-  $ui.BtnStart.IsEnabled = $open -or -not $health
-  if (!$open -and -not $health) { $ui.LockWhy.Text = 'EFRISConnect is not running, so a password cannot be checked. Use Start at the bottom (Windows asks for an administrator), then sign in here.' }
+  $ui.CtlCard.Visibility = if ($open) { 'Visible' } else { 'Collapsed' }
+  $ui.WhoText.Text = if ($open) { 'Signed in as ' + $script:unlockedBy } else { '' }
+  # Signed out, the relay's Restart and Stop are hidden. Start stays while the relay is
+  # stopped, as it cannot check a password then (Windows still asks for an administrator).
+  if (!$open) { $ui.BtnRestart.Visibility = 'Collapsed'; $ui.BtnStop.Visibility = 'Collapsed' }
+  $ui.LockWhy.Text = if ($health) { 'Only an owner or admin of EFRISConnect can start, stop or switch things here. Use the same name and password as in EFRISConnect. Status and Activity stay open to everyone.' } else { 'EFRISConnect is not running, so a password cannot be checked. Use Start at the bottom (Windows asks for an administrator), then sign in here.' }
 }
 function Do-Unlock {
   $ui.LockMsg.Text = 'Checking...'
-  $res = Check-Admin $ui.LockName.Text $ui.LockPw.Password
-  $ui.LockPw.Password = ''
+  $pw = if ($ui.LockShow.IsChecked) { $ui.LockPwText.Text } else { $ui.LockPw.Password }
+  $res = Check-Admin $ui.LockName.Text $pw
+  $ui.LockPw.Password = ''; $ui.LockPwText.Text = ''
   if (!$res.ok) { $ui.LockMsg.Text = $res.error; return }
   $script:unlockedUntil = (Get-Date).AddMinutes(15); $script:unlockedBy = $res.who
   $ui.LockMsg.Text = ''
-  Show-Note ("Signed in as " + $res.who + ". Controls are unlocked for 15 minutes after your last click.") 'ok'
+  Show-Note ("Signed in as " + $res.who + ". Controls stay unlocked for 15 minutes after your last click.") 'ok'
   Update-Status
 }
 $ui.LockGo.add_Click({ Do-Unlock })
 $ui.LockPw.add_KeyDown({ param($sender, $e) if ($e.Key -eq 'Return') { Do-Unlock } })
+$ui.LockPwText.add_KeyDown({ param($sender, $e) if ($e.Key -eq 'Return') { Do-Unlock } })
+$ui.LockShow.add_Checked({ $ui.LockPwText.Text = $ui.LockPw.Password; $ui.LockPw.Visibility = 'Collapsed'; $ui.LockPwText.Visibility = 'Visible' })
+$ui.LockShow.add_Unchecked({ $ui.LockPw.Password = $ui.LockPwText.Text; $ui.LockPwText.Text = ''; $ui.LockPwText.Visibility = 'Collapsed'; $ui.LockPw.Visibility = 'Visible' })
+$ui.SignOut.add_MouseLeftButtonUp({
+  $script:unlockedUntil = [DateTime]::MinValue; $script:unlockedBy = ''; $script:noAuto = $true; $script:wasOpen = $false
+  Show-Note 'Signed out of the Control Centre. Sign in again to change settings.' 'ok'
+  Update-Status
+})
 # Every click while unlocked keeps it open another 15 minutes.
 $win.add_PreviewMouseDown({ if (Is-Unlocked) { $script:unlockedUntil = (Get-Date).AddMinutes(15) } })
 $jobTimer = New-Object Windows.Threading.DispatcherTimer

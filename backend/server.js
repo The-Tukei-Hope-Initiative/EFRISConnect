@@ -336,6 +336,7 @@ const ROUTE_PERMS = [
   ['GET', '/health', 'public'], ['GET', '/version', 'public'],
   ['GET', '/auth/status', 'public'], ['POST', '/auth/setup', 'public'], ['POST', '/auth/login', 'public'], ['POST', '/auth/recover', 'public'],
   ['POST', '/auth/email-code', 'public'],   // answers the same whether or not the account exists
+  ['GET', '/auth/console-session', 'public'],   // this computer only; returns a name, never a token
   // Any signed-in user; the route itself limits what each one can do
   ['POST', '/auth/logout', ''], ['POST', '/auth/change-password', ''], ['POST', '/client-log', ''],
   ['GET', '/auth/users', ''], ['POST', '/auth/users', ''], ['POST', '/auth/users/:id', ''], ['POST', '/auth/users/:id/email-code', ''],
@@ -629,7 +630,7 @@ app.post('/api/auth/setup', rateLimit(10), (req, res) => {
   let out;
   try { out = auth.createOwner({ name: b.name, displayName: b.displayName, password: b.password }); }
   catch (e) { return res.status(e.status || 500).json({ success: false, error: e.expose ? e.message : 'Could not create the account' }); }
-  const s = auth.createSession(out.user.id, !!b.remember);
+  const s = auth.createSession(out.user.id, !!b.remember, { local: isLocalRequest(req) });
   console.log('   Sign-in: owner account "' + out.user.name + '" created' + (isLocalRequest(req) ? ' on this computer' : ' with the setup code'));
   securityAlert('owner-created', req, { user: out.user });
   res.json({ success: true, token: s.token, expiresAt: s.expiresAt, recoveryCode: out.recoveryCode, user: shortUser(out.user) });
@@ -638,13 +639,23 @@ app.post('/api/auth/setup', rateLimit(10), (req, res) => {
 app.post('/api/auth/login', rateLimit(10), (req, res) => {
   const b = req.body || {};
   if (!auth.hasUsers()) return res.json({ success: false, error: 'No account exists yet. Create the owner account first.', setupNeeded: true });
-  const r = auth.login(b.name, b.password, !!b.remember);
+  const r = auth.login(b.name, b.password, !!b.remember, { local: isLocalRequest(req) });
   if (!r.success) {
     if (r.justLocked) securityAlert('locked', req, { user: r.justLocked });
     const { justLocked, ...out } = r;
     return res.json(out);
   }
   res.json({ success: true, token: r.token, expiresAt: r.expiresAt, user: shortUser(r.user) });
+});
+
+// The Control Centre on this computer: is exactly one person signed in to EFRISConnect
+// (used in the last 15 minutes), on this computer, and an owner or admin? Then its
+// controls open without a second password. Only the name is returned, never a token.
+app.get('/api/auth/console-session', (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ success: false, error: 'Only on this computer.' });
+  const u = auth.soleActiveUser(15 * 60000);
+  const ok = u && (u.owner || adminTenantIds(u).length > 0);
+  res.json({ success: true, user: ok ? { name: u.name, displayName: u.displayName || u.name } : null });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -4513,7 +4524,7 @@ app.post('/api/manager/inventory-adjust', async (req, res) => {
 // reports ok/warn/fail plus the fix, so the gap surfaces before a stock
 // movement or submission hits it.
 app.post('/api/manager/readiness-audit', async (req, res) => {
-  const { managerEndpoint, accessToken } = req.body || {};
+  const { managerEndpoint, accessToken, themeKey } = req.body || {};
   if (!managerEndpoint || !accessToken) return res.status(400).json({ success: false, error: 'managerEndpoint and accessToken required' });
   const ep = normEp(managerEndpoint);
   const tk = accessToken;
@@ -4616,7 +4627,13 @@ app.post('/api/manager/readiness-audit', async (req, res) => {
   // 8. The EFRISConnect receipt theme (the URA QR code and fiscal details on printouts).
   try {
     const key = await findInstalledThemeKey(ep, tk, 'EFRISConnect');
-    const installed = key || await findThemeKeyByName(ep, tk, 'EFRISConnect');
+    // The theme EFRISConnect installed (its key is saved in Settings) counts too: some
+    // Manager builds list neither the theme nor the Form Defaults' theme to the API.
+    let stored = '';
+    if (!key && themeKey && /^[0-9a-f-]{36}$/i.test(bareKey(themeKey))) {
+      try { const t = await managerCall(ep, tk, 'GET', '/custom-theme-form/' + bareKey(themeKey), null); if (t.status === 200) stored = bareKey(themeKey); } catch (_) {}
+    }
+    const installed = key || stored || await findThemeKeyByName(ep, tk, 'EFRISConnect');
     if (key) add('theme', 'Receipt theme', 'ok', 'The EFRISConnect theme is set on Manager documents.');
     else if (installed) add('theme', 'Receipt theme', 'ok', 'The EFRISConnect theme is installed, and EFRISConnect uses it on every document it records. For receipts typed straight into Manager, also choose it under Form Defaults.');
     else checks.push({ id: 'theme', title: 'Receipt theme', status: 'warn', detail: 'Receipts printed from Manager do not show the URA QR code and fiscal details yet.',
@@ -4681,20 +4698,29 @@ app.post('/api/manager/ensure-custom-buttons', async (req, res) => {
       const f = await managerCall(ep, accessToken, 'GET', '/custom-button-form/' + key, null);
       const d = (f.status === 200 && f.data) || r;
       have.push({ key, form: d, name: String(ciGet(d, 'name') || '').trim().toLowerCase(), placement: String(ciGet(d, 'placement') || '').toLowerCase(), endpoint: String(ciGet(d, 'endpoint') || '').replace(/\/+$/, '').toLowerCase() });
+      // Ours: any button that opens EFRISConnect (.../extension, with or without ?mode=...).
+      have[have.length - 1].ours = /\/extension(\?|$)/.test(have[have.length - 1].endpoint);
     }
     const created = [], existed = [], updated = [], failed = [];
-    // Where a page gets one EFRISConnect button, any of ours there counts (whatever its
-    // name); where it gets two, each is matched by its name as well.
-    const perPlacement = p => EFC_BUTTONS.filter(x => x.Placement === p).length;
-    const same = (h, b) => h.placement === b.Placement && (perPlacement(b.Placement) === 1 || h.name === b.Name.toLowerCase());
-    for (const b of EFC_BUTTONS) {
-      if (have.some(h => same(h, b) && h.endpoint === endpoint.toLowerCase())) { existed.push(b.Placement); continue; }
-      // Our button with an older EFRISConnect address (e.g. localhost before this PC became
-      // the shop server): point it at the address in use now instead of adding a second one.
-      const old = have.find(h => same(h, b) && /\/extension$/.test(h.endpoint));
+    // Each of our existing buttons stands for one wanted button at its placement: first
+    // by name, then any of ours left there (whatever it was called), so a button renamed
+    // in Manager or made by an older version is never added a second time.
+    const used = new Set();
+    const named = (h, b) => h.ours && h.placement === b.Placement && h.name === b.Name.toLowerCase();
+    const pick = b => have.find(h => !used.has(h.key) && named(h, b))
+      || have.find(h => !used.has(h.key) && h.ours && h.placement === b.Placement && !EFC_BUTTONS.some(x => x.Placement === b.Placement && named(h, x)));
+    // Buttons with an exact name match claim theirs first.
+    const order = [...EFC_BUTTONS].sort((x, y) => (have.some(h => named(h, y)) ? 1 : 0) - (have.some(h => named(h, x)) ? 1 : 0));
+    for (const b of order) {
+      const old = pick(b);
       if (old) {
-        const r = await managerCall(ep, accessToken, 'POST', '/custom-button-form/' + old.key, Object.assign(Object.fromEntries(Object.entries(old.form || {}).filter(([k]) => k.toLowerCase() !== 'endpoint')), { Endpoint: endpoint }));
-        if (r.status === 200 || r.status === 201) { updated.push(b.Placement); old.endpoint = endpoint.toLowerCase(); } else failed.push(b.Placement + ' (HTTP ' + r.status + ')');
+        used.add(old.key);
+        if (old.endpoint.split('?')[0] === endpoint.toLowerCase()) { existed.push(b.Placement); continue; }
+        // Our button with an older EFRISConnect address (e.g. localhost before this PC became
+        // the shop server): point it at the address in use now, keeping any ?mode=...
+        const q = old.endpoint.includes('?') ? old.endpoint.slice(old.endpoint.indexOf('?')) : '';
+        const r = await managerCall(ep, accessToken, 'POST', '/custom-button-form/' + old.key, Object.assign(Object.fromEntries(Object.entries(old.form || {}).filter(([k]) => k.toLowerCase() !== 'endpoint')), { Endpoint: endpoint + q }));
+        if (r.status === 200 || r.status === 201) updated.push(b.Placement); else failed.push(b.Placement + ' (HTTP ' + r.status + ')');
         continue;
       }
       const r = await managerCall(ep, accessToken, 'POST', '/custom-button-form', { Name: b.Name, Endpoint: endpoint, Placement: b.Placement });

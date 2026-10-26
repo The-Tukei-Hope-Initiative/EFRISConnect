@@ -1,6 +1,6 @@
 # EFRISConnect - build the Windows installer.
 #
-#   powershell -ExecutionPolicy Bypass -File installer\build.ps1 [-NodeVersion 24.16.0] [-SkipCompile]
+#   powershell -ExecutionPolicy Bypass -File installer\build.ps1 [-NodeVersion 24.22.1] [-SkipCompile]
 #
 # 1. Stages the shipping files in build\stage (no tests, no runtime data, no keys).
 # 2. Installs the production dependencies there (npm ci --omit=dev).
@@ -8,7 +8,7 @@
 # 4. Compiles installer\EFRISConnect.iss with Inno Setup 6 into build\EFRISConnect-Setup-<version>.exe.
 # Needs: Node.js + npm on this PC (for step 2), Inno Setup 6 (https://jrsoftware.org/isinfo.php).
 param(
-  [string]$NodeVersion = '24.16.0',
+  [string]$NodeVersion = '24.22.1',
   [switch]$SkipCompile
 )
 $ErrorActionPreference = 'Stop'

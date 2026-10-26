@@ -71,8 +71,8 @@ Root: HKLM; Subkey: "Software\EFRISConnect"; ValueType: string; ValueName: "Inst
 Root: HKLM; Subkey: "Software\EFRISConnect"; ValueType: string; ValueName: "Version"; ValueData: "{#AppVersion}"
 
 [Icons]
-Name: "{commondesktop}\EFRISConnect"; Filename: "{code:EdgeExe}"; Parameters: "--app=https://localhost:5443/extension"; IconFilename: "{app}\efrisconnect.ico"; Comment: "Open EFRISConnect"; Tasks: desktopicon; Check: (not IsTill) and HasEdge
-Name: "{commondesktop}\EFRISConnect"; Filename: "{win}\explorer.exe"; Parameters: "https://localhost:5443/extension"; IconFilename: "{app}\efrisconnect.ico"; Comment: "Open EFRISConnect"; Tasks: desktopicon; Check: (not IsTill) and (not HasEdge)
+Name: "{commondesktop}\EFRISConnect"; Filename: "{code:AppBrowserExe}"; Parameters: "--app=https://localhost:5443/extension"; IconFilename: "{app}\efrisconnect.ico"; Comment: "Open EFRISConnect"; Tasks: desktopicon; Check: (not IsTill) and HasAppBrowser
+Name: "{commondesktop}\EFRISConnect"; Filename: "{win}\explorer.exe"; Parameters: "https://localhost:5443/extension"; IconFilename: "{app}\efrisconnect.ico"; Comment: "Open EFRISConnect"; Tasks: desktopicon; Check: (not IsTill) and (not HasAppBrowser)
 Name: "{commondesktop}\EFRISConnect Control Centre"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\relay-window.vbs"""; IconFilename: "{app}\efrisconnect.ico"; Tasks: desktopicon; Check: not IsTill
 Name: "{autoprograms}\EFRISConnect\EFRISConnect Control Centre"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\relay-window.vbs"""; IconFilename: "{app}\efrisconnect.ico"; Comment: "Start, stop and switch on or off everything EFRISConnect runs"; Check: not IsTill
 Name: "{autoprograms}\EFRISConnect\EFRISConnect tray icon"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\tray.vbs"""; IconFilename: "{app}\efrisconnect.ico"; AppUserModelID: "TukeiHope.EFRISConnect"; Check: not IsTill
@@ -124,13 +124,16 @@ var
 // An earlier EFRISConnect on this computer (an upgrade or a re-run, not a first install).
 function WasInstalled: Boolean; begin Result := Upgrading; end;
 
-// Microsoft Edge, for opening EFRISConnect in its own app window.
-function EdgeExe(Param: String): String;
+// The browser that opens EFRISConnect in its own app window: Google Chrome, else
+// Microsoft Edge (installed for all users, so the shortcut works for everyone).
+function AppBrowserExe(Param: String): String;
 begin
-  Result := ExpandConstant('{commonpf32}\Microsoft\Edge\Application\msedge.exe');
+  Result := ExpandConstant('{commonpf64}\Google\Chrome\Application\chrome.exe');
+  if not FileExists(Result) then Result := ExpandConstant('{commonpf32}\Google\Chrome\Application\chrome.exe');
+  if not FileExists(Result) then Result := ExpandConstant('{commonpf32}\Microsoft\Edge\Application\msedge.exe');
   if not FileExists(Result) then Result := ExpandConstant('{commonpf64}\Microsoft\Edge\Application\msedge.exe');
 end;
-function HasEdge: Boolean; begin Result := FileExists(EdgeExe('')); end;
+function HasAppBrowser: Boolean; begin Result := FileExists(AppBrowserExe('')); end;
 
 function IsSingle: Boolean; begin Result := ModePage.SelectedValueIndex = 0; end;
 function IsServer: Boolean; begin Result := ModePage.SelectedValueIndex = 1; end;

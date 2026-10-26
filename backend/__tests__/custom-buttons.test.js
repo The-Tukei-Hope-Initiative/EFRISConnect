@@ -51,3 +51,18 @@ test('a page with two buttons gets both: Fiscalise receipt and EFRISConnect on t
   expect(onView.map(b => b.Name)).toEqual(['EFRISConnect']);
   expect(r.body.existed).toContain('receipt-view');
 });
+
+test('a button of ours under another name, or with ?mode=, is not added a second time', async () => {
+  mgr.reset();
+  mgr.lists['custom-buttons'] = [{ key: 'b1' }, { key: 'b2' }];
+  mgr.forms['custom-button-form'] = {
+    b1: { name: 'EFRIS Fiscalise', endpoint: 'https://localhost:5443/extension', placement: 'sales-invoice-view' },
+    b2: { name: 'EFRIS', endpoint: 'https://localhost:5443/extension?mode=submit', placement: 'receipts' },
+  };
+  const r = await ensure('https://localhost:5443/extension');
+  expect(r.body.existed).toEqual(expect.arrayContaining(['sales-invoice-view', 'receipts']));
+  const posted = mgr.posts('custom-button-form');
+  // One more on the invoice view (two wanted there), none on the receipts list.
+  expect(posted.filter(b => b.Placement === 'sales-invoice-view')).toHaveLength(1);
+  expect(posted.filter(b => b.Placement === 'receipts')).toHaveLength(0);
+});

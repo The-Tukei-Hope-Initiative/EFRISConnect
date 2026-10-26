@@ -70,11 +70,12 @@ function Run-Elevated([string]$action) {
 
 $status = $menu.Items.Add('Checking ...'); $status.Enabled = $false
 [void]$menu.Items.Add('-')
-# EFRISConnect in its own app window (Edge app mode: no address bar or tabs), or the
-# default browser when Edge is missing.
+# EFRISConnect in its own app window (app mode: no address bar or tabs): Chrome, else
+# Edge, else the default browser.
 function Open-App([string]$url) {
-  $edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
-  if ($edge) { Start-Process $edge -ArgumentList "--app=$url" } else { Start-Process $url }
+  $b = @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe", "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
+         "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if ($b) { Start-Process $b -ArgumentList "--app=$url" } else { Start-Process $url }
 }
 [void](Add-Item 'Open EFRISConnect' { Open-App $ExtUrl })
 # The Control Centre: status, on/off switches and live activity for everything EFRISConnect runs.

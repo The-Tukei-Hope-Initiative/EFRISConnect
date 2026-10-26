@@ -241,3 +241,27 @@ describe('damaged files', () => {
     } finally { r2.cleanup(); }
   });
 });
+
+describe('Control Centre: the one person signed in on this computer', () => {
+  test('owner alone, signed in here: named; a second person anywhere, a cashier, or another computer: no', async () => {
+    const r2 = loadRelay();
+    try {
+      const cs = h => { const q = request(r2.app).get('/api/auth/console-session'); for (const [k, v] of Object.entries(h || {})) q.set(k, v); return q; };
+      expect((await cs()).body).toEqual({ success: true, user: null });   // nobody signed in
+      const own = await request(r2.app).post('/api/auth/setup').send({ name: 'boss', displayName: 'The Boss', password: 'boss-pass-123' });
+      expect((await cs()).body.user).toEqual({ name: 'boss', displayName: 'The Boss' });
+      expect((await cs(REMOTE)).status).toBe(403);
+      // A cashier signs in on a till: two people, so no automatic sign-in.
+      await r2.addUser('till1', { 'biz-a': 'cashier' }, 'till1-pass-123');
+      const c = await request(r2.app).post('/api/auth/login').set(REMOTE).send({ name: 'till1', password: 'till1-pass-123' });
+      expect((await cs()).body.user).toBeNull();
+      // The owner signs out: the cashier alone is not an admin, and signed in elsewhere.
+      await request(r2.app).post('/api/auth/logout').set('Authorization', 'Bearer ' + own.body.token);
+      expect((await cs()).body.user).toBeNull();
+      await request(r2.app).post('/api/auth/logout').set('Authorization', 'Bearer ' + c.body.token);
+      // The owner signed in only from another computer: not "on this computer".
+      await request(r2.app).post('/api/auth/login').set(REMOTE).send({ name: 'boss', password: 'boss-pass-123' });
+      expect((await cs()).body.user).toBeNull();
+    } finally { r2.cleanup(); }
+  });
+});
