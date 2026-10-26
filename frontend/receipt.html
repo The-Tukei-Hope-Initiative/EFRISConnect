@@ -221,6 +221,132 @@ table.items .c { text-align: center; }
 #sheet.slip.w58 .sl-qr img { width: 130px; height: 130px; }
 #sheet.slip .wm span { font-size: 64px; letter-spacing: 6px; color: rgba(0,0,0,.08); }
 
+/* ── Clean layout (Customize > Layout): thin rules, lettered section labels, the
+   total, payment status and fiscal details easy to find ── */
+#sheet.clean { color: #16201a; --cl-soft: #4b5563; --cl-faint: #6b7280; --cl-rule: #d1d5db; }
+#sheet.clean.page { gap: 0; font-size: 13px; line-height: 1.35; }
+.cl-hd { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; }
+.cl-seller { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-start; min-width: 0; }
+.cl-seller > div { flex: 1 1 220px; min-width: 0; }
+.cl-logo { height: 60px; width: auto; max-width: 200px; object-fit: contain; object-position: left center; flex: none; }
+.cl-accent { width: 36px; height: 4px; background: var(--band); margin-bottom: 10px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.cl-lbl { font-size: 9.5px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; color: var(--band); }
+.cl-biz { font-size: 23px; font-weight: 700; line-height: 1.1; margin-top: 3px; }
+.cl-biz2 { font-size: 12.5px; font-weight: 600; margin-top: 2px; }
+.cl-sub { font-size: 12px; color: var(--cl-soft); margin-top: 5px; line-height: 1.5; }
+.cl-title { text-align: right; flex: none; }
+.cl-title h1 { font-size: 20px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.cl-title div { font-size: 12px; color: var(--cl-soft); }
+.cl-facts { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 14px; border-top: 2px solid #16201a; border-bottom: 1px solid var(--cl-rule); padding: 11px 0; margin: 16px 0; }
+.cl-facts .k { font-size: 9.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--cl-soft); }
+.cl-facts .v { font-size: 15px; font-weight: 700; margin-top: 2px; }
+.cl-facts > div:last-child { text-align: right; }
+.cl-st-paid { color: var(--band); } .cl-st-part { color: #b45309; } .cl-st-unpaid { color: #b91c1c; }
+.cl-sec { font-size: 9.5px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; color: var(--band); padding-bottom: 4px; border-bottom: 1.5px solid var(--band); margin-bottom: 6px; }
+.cl-two { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 28px; margin-bottom: 16px; }
+.cl-two > div:last-child { justify-self: end; width: 100%; max-width: 270px; min-width: 190px; }
+.cl-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 14px; row-gap: 3px; font-size: 12px; }
+.cl-kv .k { color: var(--cl-soft); white-space: nowrap; }
+.cl-kv .v { font-weight: 500; overflow-wrap: anywhere; }
+.cl-kv .v.b { font-weight: 700; }
+.cl-kv .v.nw { white-space: nowrap; overflow-wrap: normal; }
+.cl-kv .v.fdn { font-size: 16px; font-weight: 700; }
+.cl-note { font-size: 12px; margin: 0 0 12px; }
+.cl-notice { font-size: 12px; color: var(--cl-soft); }
+table.cl-items { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.cl-items th { font-size: 9.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--cl-soft); text-align: left; padding: 0 8px 5px 0; border-bottom: 1px solid var(--cl-rule); white-space: nowrap; }
+table.cl-items td { padding: 8px 8px 8px 0; border-bottom: 1px solid var(--cl-rule); vertical-align: top; }
+table.cl-items th:last-child, table.cl-items td:last-child { padding-right: 0; }
+table.cl-items .r { text-align: right; white-space: nowrap; }
+table.cl-items tr { break-inside: avoid; page-break-inside: avoid; }
+.cl-nm { font-weight: 600; } .cl-cd { font-size: 11px; color: var(--cl-faint); margin-top: 2px; } .cl-amt { font-weight: 700; }
+.cl-lower { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 16px; break-inside: avoid; page-break-inside: avoid; }
+table.cl-tax { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.cl-tax th { font-size: 9.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--cl-soft); text-align: right; padding: 0 0 4px 6px; border-bottom: 1px solid var(--cl-rule); }
+table.cl-tax th:first-child { text-align: left; padding-left: 0; }
+table.cl-tax td { padding: 5px 0 5px 6px; border-bottom: 1px solid var(--cl-rule); text-align: right; white-space: nowrap; }
+table.cl-tax td:first-child { text-align: left; white-space: normal; padding-left: 0; }
+.cl-small { font-size: 11px; color: var(--cl-faint); margin-top: 5px; }
+.cl-sum { font-size: 12.5px; }
+.cl-sum .ln { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+.cl-sum .ln span:last-child { white-space: nowrap; text-align: right; }
+.cl-sum .bal { font-weight: 700; }
+.cl-total { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; background: var(--tint); border-left: 4px solid var(--band); padding: 9px 11px; margin: 6px 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.cl-total span:first-child { font-weight: 700; font-size: 13px; }
+.cl-total span:last-child { font-weight: 700; font-size: 21px; white-space: nowrap; }
+.cl-words { font-size: 11px; color: var(--cl-faint); font-style: italic; margin-top: 4px; }
+.cl-block { margin-top: 16px; break-inside: avoid; page-break-inside: avoid; }
+.cl-msg { font-size: 12px; white-space: pre-line; margin-top: 14px; }
+.cl-foot { margin-top: 18px; text-align: center; break-inside: avoid; page-break-inside: avoid; }
+.cl-qr { display: flex; align-items: center; gap: 14px; text-align: left; border-top: 1px solid var(--cl-rule); padding-top: 10px; }
+.cl-qr img { width: 94px; height: 94px; image-rendering: pixelated; flex: none; display: block; }
+.cl-qr .t { font-size: 11px; color: var(--cl-soft); }
+.cl-qr .t b { display: block; color: #16201a; font-size: 12px; letter-spacing: .04em; }
+.cl-end { font-size: 11px; font-weight: 700; letter-spacing: .08em; margin-top: 8px; }
+.cl-printed { display: flex; justify-content: space-between; gap: 10px; font-size: 10.5px; color: var(--cl-soft); border-top: 1px solid var(--cl-rule); margin-top: 8px; padding-top: 6px; }
+#sheet.clean .sigs { padding-top: 26px; }
+/* Clean A5: same layout, tighter */
+#sheet.clean.a5 { font-size: 11px; }
+#sheet.clean.a5 .cl-logo { height: 44px; max-width: 140px; }
+#sheet.clean.a5 .cl-accent { margin-bottom: 6px; }
+#sheet.clean.a5 .cl-biz { font-size: 17px; } #sheet.clean.a5 .cl-sub { font-size: 10px; margin-top: 3px; }
+#sheet.clean.a5 .cl-title h1 { font-size: 15px; } #sheet.clean.a5 .cl-title div { font-size: 9.5px; }
+#sheet.clean.a5 .cl-facts { margin: 10px 0; padding: 7px 0; gap: 10px; } #sheet.clean.a5 .cl-facts .v { font-size: 12px; } #sheet.clean.a5 .cl-facts .k { font-size: 8.5px; }
+#sheet.clean.a5 .cl-sec, #sheet.clean.a5 .cl-lbl { font-size: 8.5px; } #sheet.clean.a5 .cl-sec { margin-bottom: 4px; }
+#sheet.clean.a5 .cl-two { gap: 14px; margin-bottom: 10px; } #sheet.clean.a5 .cl-two > div:last-child { min-width: 0; max-width: 200px; }
+#sheet.clean.a5 .cl-kv { font-size: 10px; column-gap: 10px; row-gap: 1px; } #sheet.clean.a5 .cl-kv .v.fdn { font-size: 13px; }
+#sheet.clean.a5 table.cl-items { font-size: 10.5px; } #sheet.clean.a5 table.cl-items th, #sheet.clean.a5 table.cl-tax th { font-size: 8px; }
+#sheet.clean.a5 table.cl-items td { padding: 5px 6px 5px 0; } #sheet.clean.a5 .cl-cd { font-size: 9px; }
+#sheet.clean.a5 .cl-lower { gap: 14px; margin-top: 10px; } #sheet.clean.a5 table.cl-tax { font-size: 10px; } #sheet.clean.a5 table.cl-tax td { padding: 3px 0 3px 4px; }
+#sheet.clean.a5 table.cl-tax td:first-child { padding-left: 0; }
+#sheet.clean.a5 .cl-sum { font-size: 10.5px; } #sheet.clean.a5 .cl-total { padding: 6px 8px; margin: 4px 0; }
+#sheet.clean.a5 .cl-total span:last-child { font-size: 16px; } #sheet.clean.a5 .cl-total span:first-child { font-size: 11px; }
+#sheet.clean.a5 .cl-block { margin-top: 10px; } #sheet.clean.a5 .cl-foot { margin-top: 10px; }
+#sheet.clean.a5 .cl-qr img { width: 72px; height: 72px; } #sheet.clean.a5 .cl-qr .t { font-size: 9.5px; } #sheet.clean.a5 .cl-qr .t b { font-size: 10.5px; }
+#sheet.clean.a5 .cl-end, #sheet.clean.a5 .cl-printed { font-size: 9px; } #sheet.clean.a5 .cl-small, #sheet.clean.a5 .cl-note, #sheet.clean.a5 .cl-msg { font-size: 9.5px; }
+/* Clean A6: one column, QR beside the fiscal details */
+#sheet.clean.a6 { padding: 14px 16px 12px; gap: 0; font-size: 10px; line-height: 1.35; }
+.c6-c { text-align: center; }
+.c6-logo { display: block; margin: 0 auto 4px; height: 30px; width: auto; max-width: 120px; object-fit: contain; }
+.c6-biz { font-size: 13px; font-weight: 700; line-height: 1.15; }
+.c6-sub { font-size: 9px; color: var(--cl-soft); margin-top: 2px; line-height: 1.4; }
+.c6-hr { border-top: 1.5px solid #16201a; margin: 5px 0; } .c6-hr.thin { border-top: 1px solid var(--cl-rule); }
+.c6-row { display: flex; justify-content: space-between; gap: 10px; }
+.c6-row .k { color: var(--cl-soft); white-space: nowrap; }
+.c6-row > span:last-child { text-align: right; overflow-wrap: anywhere; }
+.c6-title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.c6-title h1 { font-size: 13px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.c6-st { font-size: 9.5px; font-weight: 700; letter-spacing: .06em; }
+.c6-it { padding: 2px 0; } .c6-it .nm { font-weight: 600; font-size: 10.5px; } .c6-it .cd { font-size: 8.5px; color: var(--cl-faint); }
+.c6-total { display: flex; justify-content: space-between; align-items: baseline; font-weight: 700; padding: 2px 0; } .c6-total span:last-child { font-size: 14px; }
+.c6-sec { font-size: 8.5px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase; color: var(--band); border-bottom: 1.2px solid var(--band); padding-bottom: 2px; margin: 5px 0 3px; }
+.c6-tax { display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr; font-size: 9px; } .c6-tax.h { font-size: 7.5px; font-weight: 700; letter-spacing: .06em; color: var(--cl-soft); } .c6-tax span:not(:first-child) { text-align: right; }
+.c6-fis { display: flex; gap: 8px; align-items: center; } .c6-fis img { width: 78px; height: 78px; image-rendering: pixelated; flex: none; display: block; } .c6-fis > div { flex: 1; min-width: 0; }
+.c6-row.fr { align-items: baseline; white-space: nowrap; } .c6-fdn { font-size: 12.5px; font-weight: 700; } .c6-vc { font-size: 9.5px; font-weight: 600; }
+.c6-end { font-size: 8.5px; font-weight: 700; letter-spacing: .05em; text-align: center; margin-top: 5px; }
+.c6-printed { font-size: 8.5px; color: var(--cl-soft); text-align: center; margin-top: 1px; }
+/* Clean till slips: black only, text in the document font, codes in mono */
+#sheet.slip.clean { font-family: var(--doc); gap: 0; line-height: 1.4; }
+.cs-c { text-align: center; }
+.cs-biz { font-size: 14px; font-weight: 700; line-height: 1.15; } .cs-sub { font-size: 10.5px; line-height: 1.4; }
+.cs-hr { border-top: 1.5px solid #000; margin: 6px 0; } .cs-hr.thin { border-top: 1px solid #000; }
+.cs-title { font-size: 16px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; } .cs-st { font-size: 11px; font-weight: 700; letter-spacing: .06em; }
+.cs-row { display: flex; justify-content: space-between; gap: 8px; } .cs-row .k { white-space: nowrap; } .cs-row > span:last-child { text-align: right; overflow-wrap: anywhere; }
+.cs-row.fr { align-items: baseline; white-space: nowrap; }
+.cs-it { padding: 3px 0; } .cs-it .nm { font-weight: 700; } .cs-it .cd { font-size: .88em; }
+.cs-total { display: flex; justify-content: space-between; align-items: baseline; font-weight: 700; padding: 3px 0; } .cs-total span:last-child { font-size: 18px; }
+.cs-sec { font-weight: 700; letter-spacing: .08em; font-size: 10px; text-transform: uppercase; border-bottom: 1px solid #000; padding-bottom: 2px; margin: 7px 0 3px; }
+.cs-tax { display: grid; grid-template-columns: 1.2fr 1fr 1fr 1fr; font-size: .92em; } .cs-tax span:not(:first-child) { text-align: right; } .cs-tax.h { font-weight: 700; font-size: .8em; }
+.cs-cat { font-weight: 700; margin-top: 2px; }
+.cs-fdn { font-size: 15px; font-weight: 700; } .cs-vc { font-weight: 700; }
+.cs-qr { display: flex; justify-content: center; margin: 6px 0 2px; } .cs-qr img { width: 150px; height: 150px; image-rendering: pixelated; }
+.cs-end { font-weight: 700; text-align: center; margin-top: 5px; font-size: 10.5px; }
+#sheet.slip.w58.clean .cs-biz { font-size: 12.5px; } #sheet.slip.w58.clean .cs-sub { font-size: 9.5px; }
+#sheet.slip.w58.clean .cs-qr img { width: 128px; height: 128px; }
+#sheet.slip.w58.clean .cs-fdn { font-size: 13px; } #sheet.slip.w58.clean .cs-vc { font-size: 8.6px; } #sheet.slip.w58.clean .cs-row.fr .k { font-size: 9px; }
+#sheet.slip.w58.clean .cs-end { font-size: 8.6px; white-space: nowrap; letter-spacing: 0; }
+#sheet.slip.w58.clean .cs-tax { grid-template-columns: 1fr 1fr 1fr; }
+
 @media print {
   body { background: #fff; }
   #tb, #cz { display: none !important; }
@@ -264,7 +390,12 @@ table.items .c { text-align: center; }
     <label><input type="checkbox" id="czLogoMono" onchange="czSet('logoMono',this.checked)"/> Black and white logo (A4, A5, A6)</label>
     <label><input type="checkbox" id="czSlipLogo" onchange="czSet('slipLogo',this.checked)"/> Logo on 80mm and 58mm slips (always black and white)</label>
     <div class="hint">PNG or JPG up to 300 KB. Saved for this business.</div>
-    <h3 style="margin-top:12px;">SECTION BAND COLOUR</h3>
+    <h3 style="margin-top:12px;">LAYOUT</h3>
+    <select id="czLayout" onchange="czSet('layout',this.value)">
+      <option value="clean">Clean: thin rules, total and payment status first</option>
+      <option value="classic">Classic: boxed sections with dark bands</option>
+    </select>
+    <h3 style="margin-top:12px;">ACCENT COLOUR</h3>
     <div class="row" id="czBands"></div>
     <h3 style="margin-top:12px;">BUSINESS NAME</h3>
     <select id="czNameMode" onchange="czSet('nameMode',this.value)">
@@ -404,7 +535,7 @@ const CUR = /^[A-Z]{3}$/.test(D.currency) ? D.currency : 'UGX';
 const PAPERS = ['A4', 'A5', 'Letter', 'A6', '80mm', '58mm'];
 const BANDS = [['#1f2937', 'Charcoal'], ['#14532d', 'Forest green'], ['#1e3a8a', 'Navy'], ['#7c2d12', 'Rust']];
 const DEF = {
-  band: '#1f2937', showLogo: true, logo: '', logoMono: false, slipLogo: true, nameMode: 'legal', footer: '',
+  layout: 'clean', band: '#1f2937', showLogo: true, logo: '', logoMono: false, slipLogo: true, nameMode: 'legal', footer: '',
   header: { address: true, phone: true, email: true, website: false, websiteText: '', pobox: false, poboxText: '' },
   pay: { bank: '', accName: '', accNo: '', momo: '', terms: '' },
   show: { itemCodes: true, uraCode: true, unit: true, discount: true, servedBy: true, signatures: false, notes: true },
@@ -498,10 +629,12 @@ function taxRows() {
 function render() {
   const sh = el('sheet');
   const slip = PAPER === '80mm' || PAPER === '58mm';
-  sh.className = slip ? ('slip' + (PAPER === '58mm' ? ' w58' : '')) : ('page' + (PAPER === 'A5' ? ' a5' : PAPER === 'A6' ? ' a6' : ''));
+  const clean = P.layout !== 'classic';
+  sh.className = (slip ? ('slip' + (PAPER === '58mm' ? ' w58' : '')) : ('page' + (PAPER === 'A5' ? ' a5' : PAPER === 'A6' ? ' a6' : ''))) + (clean ? ' clean' : '');
   sh.style.width = slip ? '' : ({ A4: 794, Letter: 816, A5: 559, A6: 397 }[PAPER] + 'px');
   document.documentElement.style.setProperty('--band', P.band);
-  sh.innerHTML = slip ? renderSlip() : renderPage();
+  document.documentElement.style.setProperty('--tint', tint(P.band, 0.09));
+  sh.innerHTML = clean ? (slip ? renderCleanSlip() : PAPER === 'A6' ? renderCleanA6() : renderClean()) : (slip ? renderSlip() : renderPage());
   renderToolbar();
   fitScreen();
 }
@@ -653,6 +786,206 @@ function renderSlip() {
   if (showCopy()) h += '<div class="wm"><span>COPY</span></div>';
   return h;
 }
+/* ══ Clean layout ══ */
+// The band colour mixed into white, for the total's light background (a plain hex
+// colour: the PDF renderer does not understand color-mix()).
+function tint(hex, a) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || ''); if (!m) return '#f1f5f2';
+  const n = parseInt(m[1], 16), c = [n >> 16, (n >> 8) & 255, n & 255].map(v => Math.round(255 - (255 - v) * a));
+  return '#' + c.map(v => v.toString(16).padStart(2, '0')).join('');
+}
+function refLabel() { return KIND === 'invoice' ? 'Invoice no.' : KIND === 'credit' ? 'Credit note no.' : 'Receipt no.'; }
+function payStatus() { return { paid: ['PAID IN FULL', 'cl-st-paid'], part: ['PART PAID', 'cl-st-part'], unpaid: ['UNPAID', 'cl-st-unpaid'] }[PAYSTATE] || null; }
+function payLabels() { return PAYS.map(p => p.label).join(' + '); }
+const PAID_BY = () => PAYS.filter(p => !/credit/i.test(p.label));
+// Item codes under the name: own code, URA commodity code, tax category, description.
+function itemSub(l, S, short) {
+  const s = [];
+  if (S.itemCodes && l.itemCode && l.itemCode !== l.commodityCode) s.push('<span class="mono">' + esc(l.itemCode) + '</span>');
+  if (S.uraCode && l.commodityCode) s.push('URA <span class="mono">' + esc(l.commodityCode) + '</span>');
+  s.push((short ? '' : 'Tax ') + l.cat);
+  if (l.desc && !short) s.push(esc(l.desc));
+  return s.join(' · ');
+}
+function ckv(rows) { return '<div class="cl-kv">' + rows.filter(Boolean).map(r => '<span class="k">' + esc(r[0]) + '</span><span class="v ' + (r[2] || '') + '">' + (r[3] ? r[1] : esc(r[1] == null || r[1] === '' ? '-' : r[1])) + '</span>').join('') + '</div>'; }
+function howToPayRows() {
+  const pd = P.pay, r = [];
+  if ((KIND === 'invoice' || BAL > 0.005) && KIND !== 'credit') {
+    if (pd.bank) r.push(['Bank', pd.bank]); if (pd.accName) r.push(['Account name', pd.accName]); if (pd.accNo) r.push(['Account no.', pd.accNo, 'mono']);
+    if (pd.momo) r.push(['Mobile money', pd.momo]); if (pd.terms || D.payTerms) r.push(['Terms', pd.terms || D.payTerms]);
+  }
+  return r;
+}
+function sandboxNote() { return D.mode === 'sandbox' ? 'SANDBOX · NOT A LIVE DOCUMENT' : ''; }
+
+// A4, Letter and A5.
+function renderClean() {
+  const [nm, nm2] = bizTitle(), lines = headerLines(), S = P.show;
+  const logo0 = P.showLogo ? safeImg(P.logo || D.logoUrl) : '';
+  const logo = logo0 && P.logoMono ? (monoLogo(logo0) || logo0) : logo0;
+  const st = payStatus();
+  const showDisc = S.discount && LINES.some(l => l.discN > 0);
+  const showUnit = S.unit && LINES.some(l => l.unitTxt);
+  const ids = [D.bizTin ? 'TIN ' + esc(D.bizTin) : '', D.bizBrn ? 'BRN ' + esc(D.bizBrn) : ''].filter(Boolean).join(' · ');
+  const dev = [D.deviceNo ? 'Device <span class="mono">' + esc(D.deviceNo) + '</span>' : '', S.servedBy && D.issuedBy ? 'Served by ' + esc(D.issuedBy) : ''].filter(Boolean).join(' · ');
+  let h = '<div class="cl-hd"><div class="cl-seller">' + (logo ? '<img class="cl-logo" alt="" src="' + logo + '"/>' : '') +
+    '<div><div class="cl-accent"></div><div class="cl-lbl">A · Seller</div><div class="cl-biz">' + esc(nm) + '</div>' + (nm2 ? '<div class="cl-biz2">' + esc(nm2) + '</div>' : '') +
+    '<div class="cl-sub">' + lines.map(esc).join('<br>') + (ids ? (lines.length ? '<br>' : '') + '<span class="mono">' + ids + '</span>' : '') + (dev ? '<br>' + dev : '') + '</div></div></div>' +
+    '<div class="cl-title"><h1>' + esc(docTitle()) + '</h1>' + (KIND === 'receipt' && /invoice/i.test(docTitle()) ? '<div>Receipt of payment</div>' : '') +
+    '<div>' + esc(FISCAL ? 'Issued under URA EFRIS' : 'Not fiscalised') + (D.mode === 'sandbox' ? ' · SANDBOX' : '') + '</div></div></div>';
+  // Key facts: number, date, and the payment status (or, on a credit note, the original FDN).
+  const third = KIND === 'credit' ? '<div class="k">Original invoice FDN</div><div class="v mono">' + esc(D.oriFdn || '-') + '</div>'
+    : st ? '<div class="k">Payment status</div><div class="v ' + st[1] + '">' + st[0] + '</div>' : '';
+  h += '<div class="cl-facts"><div><div class="k">' + refLabel() + '</div><div class="v mono">' + esc(D.ref || '-') + '</div></div>' +
+    '<div><div class="k">Date</div><div class="v">' + esc(D.date || '-') + '</div></div><div>' + third + '</div></div>';
+  if (KIND === 'credit' && D.cnReason) h += '<div class="cl-note"><b>Reason:</b> ' + esc(D.cnReason) + '</div>';
+  // B · URA information and C · Buyer
+  const ura = FISCAL ? ckv([['FDN', D.fdn, 'mono fdn nw'], ['Verification code', D.verCode, 'mono nw'], ['Issued', (D.subDate || '') + (D.issuedTime ? ' ' + D.issuedTime : ''), 'nw'], ['Mode', issueMode()], ['Document', docKind()]])
+    : '<div class="cl-notice">' + (D.queued ? 'Queued for EFRIS. The fiscal details print once URA confirms it.' : 'This document has not been submitted to URA EFRIS and has no Fiscal Document Number.') + '</div>';
+  const buyer = [['Name', BUYER || '-', 'b'], ['Type', buyerType()]];
+  if (D.custTin) buyer.push(['TIN', D.custTin, 'mono']);
+  if (D.custNinBrn) buyer.push(['NIN / BRN', D.custNinBrn, 'mono']);
+  if (D.passport) buyer.push(['Passport / ID', D.passport]);
+  if (D.nationality) buyer.push(['Nationality', D.nationality]);
+  if (D.custAddr) buyer.push(['Address', D.custAddr]);
+  if (PAYS.length && KIND !== 'credit') buyer.push(['Payment', payLabels()]);
+  buyer.push(['Currency', CUR]);
+  if (D.dueDate && KIND !== 'receipt') buyer.push(['Due date', D.dueDate]);
+  h += '<div class="cl-two"><div><div class="cl-sec">B · URA information</div>' + ura + '</div><div><div class="cl-sec">C · Buyer</div>' + ckv(buyer) + '</div></div>';
+  if (S.notes && D.notes) h += '<div class="cl-note">' + esc(D.notes) + '</div>';
+  // D · Goods and services
+  let t = '<table class="cl-items"><thead><tr><th style="width:46%">Description</th><th>Qty' + (showUnit ? ' / unit' : '') + '</th><th class="r">Unit price</th>' + (showDisc ? '<th class="r">Discount</th>' : '') + '<th class="r">Amount</th></tr></thead><tbody>';
+  LINES.forEach(l => {
+    t += '<tr><td><div class="cl-nm">' + esc(l.name) + '</div><div class="cl-cd">' + itemSub(l, S) + '</div></td><td>' + esc(String(l.q)) + (showUnit && l.unitTxt ? ' ' + esc(l.unitTxt) : '') + '</td>' +
+      '<td class="r">' + money(l.rateN) + '</td>' + (showDisc ? '<td class="r">' + (l.discN > 0 ? '-' + money(l.discN) : '') + '</td>' : '') + '<td class="r cl-amt">' + money(l.totalN) + '</td></tr>';
+  });
+  h += '<div class="cl-sec">D · Goods and services</div>' + t + '</tbody></table>';
+  // E · Tax details and F · Summary
+  const tx = '<table class="cl-tax"><thead><tr><th>Category</th><th>Net</th><th>Tax</th><th>Gross</th></tr></thead><tbody>' +
+    taxRows().map(r => '<tr><td>' + r.k + ' · ' + esc(TAXCAT[r.k]) + '</td><td>' + money(r.net) + '</td><td>' + money(r.vat) + '</td><td>' + money(r.gross) + '</td></tr>').join('') + '</tbody></table>' +
+    '<div class="cl-small">' + LINES.length + ' line item' + (LINES.length === 1 ? '' : 's') + ' · prices include tax</div>';
+  let sm = '<div class="cl-sum"><div class="ln"><span>Net amount</span><span>' + money(NET) + '</span></div><div class="ln"><span>Tax amount</span><span>' + money(VAT) + '</span></div>' +
+    '<div class="cl-total"><span>TOTAL ' + esc(CUR) + '</span><span>' + money(GROSS) + '</span></div>';
+  if (KIND !== 'credit') {
+    const by = PAID_BY();
+    sm += by.length > 1 ? by.map(p => '<div class="ln"><span>Paid · ' + esc(p.label) + '</span><span>' + money(p.amt == null ? GROSS : p.amt) + '</span></div>').join('')
+      : '<div class="ln"><span>Amount paid</span><span>' + money(PAID) + '</span></div>';
+    if (num(D.cashTendered) > 0) sm += '<div class="ln"><span>Cash tendered</span><span>' + money(D.cashTendered) + '</span></div><div class="ln"><span>Change</span><span>' + money(D.cashChange) + '</span></div>';
+    sm += '<div class="ln bal"><span>Balance due</span><span>' + esc(CUR) + ' ' + money(BAL) + '</span></div>';
+  }
+  sm += '</div>' + (D.grandWords ? '<div class="cl-words">' + esc(D.grandWords) + '</div>' : '');
+  h += '<div class="cl-lower"><div><div class="cl-sec">E · Tax details</div>' + tx + '</div><div><div class="cl-sec">F · Summary</div>' + sm + '</div></div>';
+  const pay = howToPayRows();
+  if (pay.length) h += '<div class="cl-block"><div class="cl-sec">How to pay</div>' + ckv(pay) + '</div>';
+  if (S.signatures) {
+    const sig = safeImg(D.sigImg);
+    h += '<div class="sigs"><div>Received by (name, signature, date)</div><div>' + (sig ? '<img alt="" src="' + sig + '"/>' : '') + 'Authorised signature and stamp</div></div>';
+  }
+  if (P.footer) h += '<div class="cl-msg">' + esc(P.footer) + '</div>';
+  h += '<div class="cl-foot">';
+  if (FISCAL) h += '<div class="cl-qr">' + qrImg('') + '<div class="t"><b>Verify with URA</b>Scan the QR code, or enter the FDN and verification code at efris.ura.go.ug.</div></div><div class="cl-end">' + esc(endLine()) + '</div>';
+  h += '<div class="cl-printed"><span>' + esc(sandboxNote()) + '</span><span>' + esc(genStamp()) + ' · ' + esc(printMark()) + '</span></div></div>';
+  if (showCopy()) h += '<div class="wm"><span>COPY</span></div>';
+  return h;
+}
+
+// A6: one column, the QR beside the fiscal details.
+function renderCleanA6() {
+  const [nm] = bizTitle(), lines = headerLines(), S = P.show, st = payStatus();
+  const logo0 = P.showLogo ? safeImg(P.logo || D.logoUrl) : '';
+  const logo = logo0 && P.logoMono ? (monoLogo(logo0) || logo0) : logo0;
+  const ids = [D.bizTin ? '<b class="mono">TIN ' + esc(D.bizTin) + '</b>' : '', D.bizBrn ? '<span class="mono">BRN ' + esc(D.bizBrn) + '</span>' : '', D.deviceNo ? 'Device <span class="mono">' + esc(D.deviceNo) + '</span>' : ''].filter(Boolean).join(' · ');
+  const row = (k, v, raw) => '<div class="c6-row"><span class="k">' + esc(k) + '</span><span>' + (raw ? v : esc(v || '-')) + '</span></div>';
+  let h = '<div class="c6-c">' + (logo ? '<img class="c6-logo" alt="" src="' + logo + '"/>' : '') + '<div class="c6-biz">' + esc(nm) + '</div><div class="c6-sub">' + lines.map(esc).join(' · ') + (ids ? '<br>' + ids : '') + '</div></div><div class="c6-hr"></div>';
+  h += '<div class="c6-title"><h1>' + esc(docTitle()) + '</h1>' + (st && KIND !== 'credit' ? '<span class="c6-st ' + st[1] + '">' + st[0] + '</span>' : '') + '</div>';
+  h += row(refLabel().replace(' no.', ''), '<span class="mono">' + esc(D.ref || '-') + '</span>', 1) + row('Date', D.date);
+  if (KIND === 'credit') { h += row('Original FDN', '<span class="mono">' + esc(D.oriFdn || '-') + '</span>', 1); if (D.cnReason) h += row('Reason', D.cnReason); }
+  h += row('Buyer', BUYER + ' (' + buyerType().split(' ')[0] + ')');
+  if (D.custTin) h += row('Buyer TIN', '<span class="mono">' + esc(D.custTin) + '</span>', 1);
+  if (D.custNinBrn) h += row('NIN / BRN', D.custNinBrn);
+  if (D.passport) h += row('Passport / ID', D.passport + (D.nationality ? ' · ' + D.nationality : ''));
+  if (S.servedBy && D.issuedBy) h += row('Served by', D.issuedBy);
+  h += '<div class="c6-hr thin"></div>';
+  LINES.forEach(l => {
+    h += '<div class="c6-it"><div class="nm">' + esc(l.name) + '</div><div class="cd">' + itemSub(l, S, true) + '</div><div class="c6-row"><span>' + esc(String(l.q)) + (S.unit && l.unitTxt ? ' ' + esc(l.unitTxt) : '') + ' × ' + money(l.rateN) +
+      (l.discN > 0 && S.discount ? ' (−' + money(l.discN) + ')' : '') + '</span><b>' + money(l.totalN) + '</b></div></div>';
+  });
+  h += '<div class="c6-hr thin"></div><div class="c6-row"><span>Net ' + money(NET) + ' · Tax ' + money(VAT) + '</span><span class="k">' + LINES.length + ' item' + (LINES.length === 1 ? '' : 's') + ' · tax incl.</span></div>';
+  h += '<div class="c6-total"><span>TOTAL ' + esc(CUR) + '</span><span>' + money(GROSS) + '</span></div>';
+  if (KIND !== 'credit') {
+    PAID_BY().forEach(p => { h += '<div class="c6-row"><span>Paid · ' + esc(p.label) + '</span><span>' + money(p.amt == null ? GROSS : p.amt) + '</span></div>'; });
+    if (num(D.cashChange) > 0) h += '<div class="c6-row"><span>Change</span><span>' + money(D.cashChange) + '</span></div>';
+    h += '<div class="c6-row"><b>Balance due</b><b>' + money(BAL) + '</b></div>';
+  }
+  h += '<div class="c6-sec">E · Tax details</div><div class="c6-tax h"><span>CAT</span><span>NET</span><span>TAX</span><span>GROSS</span></div>' +
+    taxRows().map(r => '<div class="c6-tax"><span>' + r.k + ' · ' + esc(TAXCAT[r.k].replace('Standard ', '').replace(/[()]/g, '')) + '</span><span>' + money(r.net) + '</span><span>' + money(r.vat) + '</span><span>' + money(r.gross) + '</span></div>').join('');
+  const pay = howToPayRows();
+  if (pay.length) h += '<div class="c6-sec">How to pay</div>' + pay.map(r => row(r[0], r[1])).join('');
+  if (FISCAL) {
+    h += '<div class="c6-sec">B · URA EFRIS</div><div class="c6-fis">' + qrImg('') + '<div>' +
+      '<div class="c6-row fr"><span class="k">FDN</span><span class="c6-fdn mono">' + esc(D.fdn) + '</span></div>' +
+      '<div class="c6-row fr"><span class="k">Verification code</span><span class="c6-vc mono">' + esc(D.verCode) + '</span></div>' +
+      row('Issued', (D.subDate || '') + (D.issuedTime ? ' ' + D.issuedTime : '')) + row('Mode', issueMode()) + row('Document', docKind()) + '</div></div>' +
+      '<div class="c6-end">' + esc(endLine()) + '</div>';
+  } else {
+    h += '<div class="c6-sec">B · URA EFRIS</div><div class="c6-sub">' + (D.queued ? 'Queued for EFRIS. The fiscal details print once URA confirms it.' : 'Not submitted to URA EFRIS.') + '</div>';
+  }
+  if (P.footer) h += '<div class="c6-sub c6-c" style="white-space:pre-line;margin-top:4px">' + esc(P.footer) + '</div>';
+  h += '<div class="c6-printed">' + [FISCAL ? 'Verify at efris.ura.go.ug' : '', D.mode === 'sandbox' ? 'SANDBOX' : '', genStamp(), printMark()].filter(Boolean).map(esc).join(' · ') + '</div>';
+  if (showCopy()) h += '<div class="wm"><span>COPY</span></div>';
+  return h;
+}
+
+// 80mm and 58mm till slips: black only.
+function renderCleanSlip() {
+  const [nm] = bizTitle(), lines = headerLines(), S = P.show, st = payStatus(), w58 = PAPER === '58mm';
+  const slipLg = P.showLogo && P.slipLogo !== false ? safeImg(P.logo || D.logoUrl) : '';
+  const slipMono = slipLg ? monoLogo(slipLg) : '';
+  const row = (k, v, raw) => '<div class="cs-row"><span class="k">' + esc(k) + '</span><span>' + (raw ? v : esc(v || '-')) + '</span></div>';
+  let h = (slipMono ? '<img class="sl-logo" alt="" src="' + slipMono + '"/>' : '') + '<div class="cs-c"><div class="cs-biz">' + esc(nm) + '</div><div class="cs-sub">' + lines.map(esc).join('<br>') +
+    (D.bizTin ? '<br><b class="mono">TIN ' + esc(D.bizTin) + '</b>' : '') + (D.bizBrn ? (D.bizTin ? ' · ' : '<br>') + '<span class="mono">BRN ' + esc(D.bizBrn) + '</span>' : '') + '</div></div><div class="cs-hr"></div>';
+  h += '<div class="cs-c"><div class="cs-title">' + esc(docTitle()) + '</div>' + (st && KIND !== 'credit' ? '<div class="cs-st">' + st[0] + '</div>' : '') + '</div>';
+  h += row(refLabel().replace(' no.', ''), '<span class="mono">' + esc(D.ref || '-') + '</span>', 1) + row('Date', D.date);
+  if (KIND === 'credit') { h += row('Original FDN', '<span class="mono">' + esc(D.oriFdn || '-') + '</span>', 1); if (D.cnReason) h += row('Reason', D.cnReason); }
+  h += row('Buyer', BUYER) + row('Type', buyerType());
+  if (D.custTin) h += row('Buyer TIN', '<span class="mono">' + esc(D.custTin) + '</span>', 1);
+  if (D.passport) h += row('Passport / ID', D.passport + (D.nationality ? ' · ' + D.nationality : ''));
+  if (S.servedBy && D.issuedBy) h += row('Served by', D.issuedBy);
+  h += '<div class="cs-hr thin"></div>';
+  LINES.forEach(l => {
+    h += '<div class="cs-it"><div class="nm">' + esc(l.name) + '</div><div class="cd">' + itemSub(l, S, true) + '</div><div class="cs-row"><span>' + esc(String(l.q)) + (S.unit && l.unitTxt ? ' ' + esc(l.unitTxt) : '') + ' × ' + money(l.rateN) + '</span><b>' + money(l.totalN) + '</b></div>' +
+      (l.discN > 0 && S.discount ? '<div class="cs-row"><span>Discount</span><span>−' + money(l.discN) + '</span></div>' : '') + '</div>';
+  });
+  h += '<div class="cs-hr thin"></div>' + row('Net amount', money(NET)) + row('Tax amount', money(VAT)) + '<div class="cs-hr"></div>' +
+    '<div class="cs-total"><span>TOTAL ' + esc(CUR) + '</span><span>' + money(GROSS) + '</span></div><div class="cs-hr"></div>';
+  if (KIND !== 'credit') {
+    PAID_BY().forEach(p => { h += row('Paid · ' + p.label, money(p.amt == null ? GROSS : p.amt)); });
+    if (num(D.cashChange) > 0) h += row('Change', money(D.cashChange));
+    h += '<div class="cs-row"><b>Balance due</b><b>' + money(BAL) + '</b></div>';
+  }
+  h += '<div class="cs-row"><span class="k">' + LINES.length + ' line item' + (LINES.length === 1 ? '' : 's') + ' · prices include tax</span></div>';
+  const tr = taxRows();
+  h += '<div class="cs-sec">E · Tax details</div>' + (w58
+    ? tr.map(r => '<div class="cs-cat">' + r.k + ' · ' + esc(TAXCAT[r.k]) + '</div><div class="cs-tax h"><span>NET</span><span>TAX</span><span>GROSS</span></div><div class="cs-tax"><span>' + money(r.net) + '</span><span>' + money(r.vat) + '</span><span>' + money(r.gross) + '</span></div>').join('')
+    : '<div class="cs-tax h"><span>CAT</span><span>NET</span><span>TAX</span><span>GROSS</span></div>' + tr.map(r => '<div class="cs-tax"><span>' + r.k + '</span><span>' + money(r.net) + '</span><span>' + money(r.vat) + '</span><span>' + money(r.gross) + '</span></div>').join(''));
+  const pay = howToPayRows();
+  if (pay.length) h += '<div class="cs-sec">How to pay</div>' + pay.map(r => row(r[0], r[1])).join('');
+  if (FISCAL) {
+    h += '<div class="cs-sec">B · URA EFRIS</div>' +
+      '<div class="cs-row fr"><span class="k">FDN</span><span class="cs-fdn mono">' + esc(D.fdn) + '</span></div>' +
+      '<div class="cs-row fr"><span class="k">Verification code</span><span class="cs-vc mono">' + esc(D.verCode) + '</span></div>' +
+      row('Issued', (D.subDate || '') + (D.issuedTime ? ' ' + D.issuedTime : '')) + (D.deviceNo ? row('Device', '<span class="mono">' + esc(D.deviceNo) + '</span>', 1) : '') + row('Mode', issueMode()) + row('Document', docKind()) +
+      '<div class="cs-qr">' + qrImg('') + '</div><div class="cs-c">Verify at efris.ura.go.ug</div><div class="cs-end">' + esc(endLine()) + '</div>';
+  } else {
+    h += '<div class="cs-c cs-st" style="margin-top:6px">' + (D.queued ? 'QUEUED FOR EFRIS' : 'NOT FISCALISED') + '</div>';
+  }
+  if (P.footer) h += '<div class="cs-c" style="white-space:pre-line;margin-top:4px">' + esc(P.footer) + '</div>';
+  if (D.mode === 'sandbox') h += '<div class="cs-c">SANDBOX · NOT A LIVE DOCUMENT</div>';
+  h += '<div class="cs-c">' + esc(genStamp()) + ' · ' + esc(printMark()) + '</div>';
+  if (showCopy()) h += '<div class="wm"><span>COPY</span></div>';
+  return h;
+}
+
 function srow(k, v) { return '<div class="sl-row"><span>' + esc(k) + '</span><span class="sl-wrap">' + esc(v || '') + '</span></div>'; }
 function box(title, body) { return '<div class="box"><div class="box-h">' + esc(title) + '</div>' + body + '</div>'; }
 function kv(rows) { return '<div class="kv">' + rows.filter(Boolean).map(r => '<div class="k">' + esc(r[0]) + '</div><div class="v ' + (r[2] || '') + '">' + esc(r[1] == null || r[1] === '' ? '-' : r[1]) + '</div>').join('') + '</div>'; }
@@ -913,6 +1246,7 @@ function syncCz() {
   el('czLogoMono').checked = !!P.logoMono;
   el('czSlipLogo').checked = P.slipLogo !== false;
   el('czNameMode').value = P.nameMode;
+  el('czLayout').value = P.layout === 'classic' ? 'classic' : 'clean';
   el('czBands').innerHTML = BANDS.map(b => '<button type="button" class="sw' + (P.band === b[0] ? ' on' : '') + '" style="background:' + b[0] + '" aria-label="' + esc(b[1]) + '" data-c="' + b[0] + '"></button>').join('') +
     '<span class="czCustom' + (BANDS.some(b => b[0] === P.band) ? '' : ' on') + '" title="Custom colour"><input type="color" id="czBandPick" aria-label="Pick a custom colour" value="' + esc(P.band) + '" oninput="czBandCustom(this.value,1)" onchange="czBandCustom(this.value)"/>' +
     '<input type="text" id="czBandHex" aria-label="Custom colour code" maxlength="7" spellcheck="false" placeholder="#1f2937" value="' + esc(P.band) + '" oninput="czBandHex(this.value)"/></span>';
