@@ -658,7 +658,7 @@ function Check-Admin([string]$name, [string]$pw) {
   $ok = [bool]$r.user.owner
   if (!$ok) { try { $st = Invoke-RestMethod -Uri 'https://localhost:5443/api/auth/status' -Headers $h -TimeoutSec 8; $ok = @($st.tenants | Where-Object { $_.role -eq 'admin' }).Count -gt 0 } catch {} }
   try { $null = Invoke-RestMethod -Method Post -Uri 'https://localhost:5443/api/auth/logout' -Headers $h -TimeoutSec 5 } catch {}
-  if (!$ok) { return @{ ok = $false; error = 'Only an owner or admin of EFRISConnect can change settings here.' } }
+  if (!$ok) { return @{ ok = $false; error = 'Only an owner or admin of EFRISConnect can open the Control Centre.' } }
   return @{ ok = $true; who = [string]$(if ($r.user.displayName) { $r.user.displayName } else { $r.user.name }) }
 }
 # An owner or admin already signed in to EFRISConnect on this computer, when nobody else

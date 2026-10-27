@@ -4667,10 +4667,9 @@ const EFC_BUTTONS = [
   { Name: 'Fiscalise invoice', Placement: 'sales-invoice-form' },
   { Name: 'EFRISConnect', Placement: 'receipts' },
   { Name: 'EFRISConnect', Placement: 'sales-invoices' },
-  // The plain EFRISConnect button on every document view too (status, print, credit note),
-  // next to Fiscalise on receipts and invoices.
-  { Name: 'EFRISConnect', Placement: 'receipt-view' },
-  { Name: 'EFRISConnect', Placement: 'sales-invoice-view' },
+  // The plain EFRISConnect button on the other document views (status, print, credit
+  // note). Receipt and invoice views have only Fiscalise, which also shows the FDN and
+  // print once a document is fiscalised: two buttons there confused people.
   { Name: 'EFRISConnect', Placement: 'credit-notes' },
   { Name: 'EFRISConnect', Placement: 'credit-note-view' },
   { Name: 'EFRISConnect', Placement: 'debit-notes' },
