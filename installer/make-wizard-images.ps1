@@ -34,18 +34,12 @@ function Rounded([float]$x, [float]$y, [float]$w, [float]$h, [float]$r) {
   return $p
 }
 
-# The logo: the app icon's "E" (stem, three bars) and gold accent, in green on a
-# white rounded tile (the icon itself is white on green).
+# The logo: the EC mark on a white rounded tile (brand kit v1.2), from brand-mark.png
+# (512 px, transparent corners; rendered from frontend\efrisconnect-mark.svg).
+$Mark = [Drawing.Image]::FromFile((Join-Path $dir 'brand-mark.png'))
 function Draw-Logo($g, [float]$x, [float]$y, [float]$s) {
-  $g.FillPath((New-Object Drawing.SolidBrush ([Drawing.Color]::White)), (Rounded $x $y $s $s ($s * 0.22)))
-  $u = $s / 16.0; $th = 2.2 * $u; $rr = $th * 0.45   # soft rounded ends on every bar
-  $gb = New-Object Drawing.SolidBrush $green
-  $x0 = $x + 4 * $u
-  $g.FillPath($gb, (Rounded $x0 ($y + 3 * $u) $th (10 * $u) $rr))
-  $g.FillPath($gb, (Rounded $x0 ($y + 3 * $u) (7.5 * $u) $th $rr))
-  $g.FillPath($gb, (Rounded $x0 ($y + 6.9 * $u) (6 * $u) $th $rr))
-  $g.FillPath($gb, (Rounded $x0 ($y + 13 * $u - $th) (7.5 * $u) $th $rr))
-  $g.FillPath((New-Object Drawing.SolidBrush $gold), (Rounded ($x + 11.5 * $u) ($y + 6.9 * $u) (1.6 * $u) $th ($rr * 0.7)))
+  $g.InterpolationMode = 'HighQualityBicubic'
+  $g.DrawImage($Mark, $x, $y, $s, $s)
 }
 
 # A gold tick, drawn as two strokes.

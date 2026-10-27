@@ -163,10 +163,15 @@ begin
   Result := 'https://' + Trim(TillServerPage.Values[0]) + ':' + MgrHttpsPort('');
 end;
 
+// The ManagerServer.exe chosen at the last install (saved in the data folder), when it
+// is still there; else Manager Server's usual install folders.
 function FindManagerServer: String;
+var Saved: AnsiString;
 begin
   Result := '';
-  if FileExists(ExpandConstant('{commonpf64}\Manager Server\ManagerServer.exe')) then
+  if LoadStringFromFile(ExpandConstant('{commonappdata}\EFRISConnect\data\manager-server-path.txt'), Saved) and FileExists(Trim(String(Saved))) then
+    Result := Trim(String(Saved))
+  else if FileExists(ExpandConstant('{commonpf64}\Manager Server\ManagerServer.exe')) then
     Result := ExpandConstant('{commonpf64}\Manager Server\ManagerServer.exe')
   else if FileExists(ExpandConstant('{localappdata}\Programs\Manager Server\ManagerServer.exe')) then
     Result := ExpandConstant('{localappdata}\Programs\Manager Server\ManagerServer.exe');
@@ -340,6 +345,9 @@ begin
     'Use the port Manager Server listens on. 5000 is the usual one.');
   PortPage.Add('Port:', False);
   PortPage.Values[0] := '5000';
+  // The port chosen at the last install.
+  if LoadStringFromFile(ExpandConstant('{commonappdata}\EFRISConnect\data\lan-manager-port.txt'), SavedData) and IsPort(Trim(String(SavedData))) then
+    PortPage.Values[0] := Trim(String(SavedData));
 
   // Manager Server's data in a local folder, not Documents (often synced by OneDrive).
   DataPage := CreateInputDirPage(PortPage.ID,

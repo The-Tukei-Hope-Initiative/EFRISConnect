@@ -1,5 +1,1 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160">
-<title>EFRISConnect logo mark (light)</title>
-<path fill="#1B5E20" d="M0,35.2A35.2,35.2 0 0 1 35.2,0H124.8A35.2,35.2 0 0 1 160,35.2V124.8A35.2,35.2 0 0 1 124.8,160H35.2A35.2,35.2 0 0 1 0,124.8Z"/><path fill="#FFFFFF" d="M40,39.9A9.9,9.9 0 0 1 49.9,30H105.1A9.9,9.9 0 0 1 115,39.9V42.1A9.9,9.9 0 0 1 105.1,52H62V69H90.1A9.9,9.9 0 0 1 100,78.9V81.1A9.9,9.9 0 0 1 90.1,91H62V108H105.1A9.9,9.9 0 0 1 115,117.9V120.1A9.9,9.9 0 0 1 105.1,130H49.9A9.9,9.9 0 0 1 40,120.1Z"/><path fill="#F9A825" d="M115,75.93A6.93,6.93 0 0 1 121.93,69H124.07A6.93,6.93 0 0 1 131,75.93V84.07A6.93,6.93 0 0 1 124.07,91H121.93A6.93,6.93 0 0 1 115,84.07Z"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="32" height="32" viewBox="0 0 32 32"><title>Small size EC derivative</title><rect width="32" height="32" rx="6" fill="#1B5E20"/><path id="E" fill="white" d="M6 6H14V10H10V14H14V18H10V22H14V26H6Z"/><path id="C" fill="#F9A825" d="M28 6H24C18 6 16 10 16 16C16 22 18 26 24 26H28V22H24C21 22 20 20 20 16C20 12 21 10 24 10H28Z"/></svg>
