@@ -13,6 +13,13 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 # and the text looks blurred, like a screenshot).
 try { Add-Type -Namespace EFC -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'; [void][EFC.Dpi]::SetProcessDPIAware() } catch {}
 
+# Its own taskbar identity, so the taskbar button shows the EFRISConnect icon instead
+# of PowerShell's (the tray icon does the same).
+try {
+  Add-Type -Namespace EFC -Name Shell -MemberDefinition '[DllImport("shell32.dll")] public static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string id);'
+  [void][EFC.Shell]::SetCurrentProcessExplicitAppUserModelID('TukeiHope.EFRISConnect.ControlCentre')
+} catch {}
+
 # One window per signed-in user.
 $created = $false
 $mutex = New-Object Threading.Mutex($true, 'Local\EFRISConnectRelayWindow', [ref]$created)
@@ -181,8 +188,8 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
     </Grid>
     <!-- Signed out: only the sign-in card. Signed in: Status, Controls and Activity. -->
     <Grid>
-    <ScrollViewer x:Name="LockPane" VerticalScrollBarVisibility="Auto" Margin="12,14,12,10" Visibility="Collapsed">
-          <Border x:Name="Lock" Style="{StaticResource Card}" HorizontalAlignment="Center" VerticalAlignment="Top" Width="420" Margin="0,4,0,10">
+    <Grid x:Name="LockPane" Margin="12,14,12,10" Visibility="Collapsed">
+          <Border x:Name="Lock" Style="{StaticResource Card}" HorizontalAlignment="Center" VerticalAlignment="Center" Width="420" Margin="0,0,0,10">
             <StackPanel>
               <TextBlock Text="Sign in to the Control Centre" Style="{StaticResource CardTitle}"/>
               <Border Height="1" Background="#E3EAD9" Margin="0,8,0,8"/>
@@ -201,7 +208,7 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
               </DockPanel>
             </StackPanel>
           </Border>
-    </ScrollViewer>
+    </Grid>
     <TabControl x:Name="Tabs" Margin="12,14,12,10" Background="Transparent" BorderThickness="0" Padding="0" Visibility="Hidden">
       <TabControl.Template>
         <ControlTemplate TargetType="TabControl">

@@ -103,6 +103,8 @@ Type: files; Name: "{commondesktop}\Manager (shop).url"
 Type: dirifempty; Name: "{autoprograms}\EFRISConnect"
 
 [Run]
+; Windows keeps shortcut icons in a cache: refresh it so the shortcuts show the current icon.
+Filename: "{sys}\ie4uinit.exe"; Parameters: "-show"; Flags: runhidden waituntilterminated skipifdoesntexist runasoriginaluser
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\windows\tray.vbs"""; Description: "Show the EFRISConnect icon next to the clock"; Flags: postinstall nowait runasoriginaluser; Tasks: trayicon; Check: not IsTill
 Filename: "https://localhost:5443/extension"; Description: "Open EFRISConnect now to create the owner account"; Flags: postinstall shellexec nowait runasoriginaluser unchecked; Check: (not IsTill) and (not WasInstalled)
 Filename: "https://localhost:5443/extension"; Description: "Open EFRISConnect now"; Flags: postinstall shellexec nowait runasoriginaluser unchecked; Check: (not IsTill) and WasInstalled
