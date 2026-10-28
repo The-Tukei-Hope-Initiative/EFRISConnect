@@ -1107,7 +1107,7 @@
           </div>
           <details class="efris-only opt-sec" id="gExportBox">
             <summary><div><div class="os-t">Exported? <span class="ico info-tip" data-icon="info" onclick="event.preventDefault();event.stopPropagation();openHelp('exportGoods')"></span></div><div class="os-d">Weight and HS code, needed only for exports of goods</div></div><span class="os-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span></summary>
-            <div class="os-body"><div class="hint" style="margin-top:10px;">Only if you ship this good to buyers outside Uganda. URA needs its weight on export invoices. A local shop never needs this; a tour is not an export.</div>
+            <div class="os-body"><div class="hint" style="margin-top:10px;">Only if you ship this good to buyers outside Uganda. URA needs its weight on export invoices. A local shop never needs this; a tour is not an export.<br><strong>Also set the piece unit below</strong> to a unit customs counts in, such as <strong>PCE</strong> (piece), <strong>NMB</strong> (number), <strong>LTR</strong> (litre) or <strong>KGM</strong> (kilogram), with how many make one unit (a bottle: PCE, 1; a carton of 12: PCE, 12). Then click Update at URA. Without it URA refuses the export.</div>
             <div class="g2" style="margin-top:6px;">
               <div class="fg" style="margin:0;"><label for="gFldWeight">Weight per unit (kg)</label><input type="number" id="gFldWeight" min="0" step="any" placeholder="e.g. 0.5"/></div>
               <div class="fg" style="margin:0;"><label for="gFldHsCode">HS code</label><input type="text" id="gFldHsCode" maxlength="20" placeholder="e.g. 09011100"/></div>
@@ -2287,12 +2287,12 @@
     <div id="glossaryBody" style="overflow-y:auto;font-size:12.5px;line-height:1.5;flex:1;"></div>
   </div>
 </div>
-<div id="helpModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:6000;align-items:center;justify-content:center;padding:20px;" onclick="if(event.target===this)this.style.display='none'">
-  <div class="card" style="max-width:460px;width:100%;position:relative;margin:0;">
+<div id="helpModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:6000;align-items:center;justify-content:center;padding:16px;" onclick="if(event.target===this)this.style.display='none'">
+  <div class="card" style="max-width:520px;width:100%;max-height:calc(100vh - 32px);display:flex;flex-direction:column;position:relative;margin:0;">
     <button onclick="$('helpModal').style.display='none'" style="position:absolute;top:10px;right:12px;background:none;border:none;font-size:18px;cursor:pointer;color:#666;"><span class="ico" data-icon="x"></span></button>
     <div class="ct" style="display:flex;align-items:center;gap:6px;"><span class="ico" data-icon="info" style="width:18px;height:18px;color:var(--g);"></span> <span id="helpTitle"></span></div>
-    <div id="helpBody" style="font-size:13px;line-height:1.55;"></div>
-    <div style="margin-top:12px;text-align:right;"><button class="btn bg bsm" onclick="$('helpModal').style.display='none'">Got it</button></div>
+    <div id="helpBody" style="font-size:13px;line-height:1.55;overflow-y:auto;min-height:0;flex:1;padding-right:4px;"></div>
+    <div style="margin-top:12px;text-align:right;flex-shrink:0;"><button class="btn bg bsm" onclick="$('helpModal').style.display='none'">Got it</button></div>
   </div>
 </div>
 <div id="prevModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);z-index:1300;overflow-y:auto;padding:20px;">
@@ -4850,6 +4850,14 @@ function docsDebounced(){ clearTimeout(_docsTimer); _docsTimer=setTimeout(functi
 // View a document from the Documents grid: fiscal docs open their saved branded
 // snapshot; Manager-only docs load the actual Manager receipt (Submit view).
 function docView(fdn,docKey){
+  // A debit note prints as one: its type, original invoice FDN, reason, buyer type and
+  // the date URA issued it (not today, whichever way the copy is rebuilt).
+  const dn=fdn&&Object.values(_docsById||{}).find(x=>x.kind==='debit-note'&&String(x.fdn)===String(fdn));
+  if(dn){ const t=dn.submittedAt?new Date(dn.submittedAt):null, eat=t?new Date(t.getTime()+3*3600000).toISOString():'';
+    window._printOverride={kind:'debit', docType:'Debit Note', oriFdn:dn.originalFdn||dn.oriInvoiceNo||'',
+      cnReason:dn.reason||({'101':'Increase in the amount payable: extra products delivered, or products charged at an incorrect value','102':'The buyer asked for a debit note','103':'Other'})[String(dn.reasonCode||'')]||'',
+      custType:({'0':'b2b','1':'b2c','2':'foreign','3':'b2g'})[String(dn.buyerType)]||'', custTin:dn.buyerTin||'',
+      subDate:eat.slice(0,10), issuedTime:eat.slice(11,19), date:t?t.toLocaleDateString('en-UG',{day:'2-digit',month:'short',year:'numeric'}):''}; }
   if(fdn){ histView(fdn); return; }
   if(docKey){ DKEY=docKey; _lastInvKey=docKey; showT('tSub',$('tabSub')); loadInv(docKey); return; }
   alert('This document has no reference to open.');
@@ -5084,14 +5092,16 @@ function chkDocHtml(d){
 function cnCancelLine(e){
   const c=e&&e.cancelRequest; if(!c||!c.approveStatus) return '';
   const s=String(c.approveStatus), col=s==='103'?'var(--red)':s==='101'?'var(--g)':'var(--gray)';
-  return '<div style="font-size:11px;color:'+col+';">Cancellation request'+(c.reference?' '+esc(c.reference):'')+': '+esc(c.statusText||s)+'</div>';
+  return '<div style="font-size:11px;color:'+col+';">Cancellation request'+(c.reference?' '+esc(c.reference):'')+': '+esc(c.statusText||s)+(c.remarks?' <span style="color:var(--gray);">('+esc(c.remarks)+')</span>':'')+'</div>';
 }
 // Row actions: withdraw a pending application, cancel an approved credit note.
 function cnActions(e){
   if(CFG.efrisEnabled===false) return '';
   // An issued debit note: ask URA to cancel it (URA has to approve the request).
-  if(e.kind==='debit-note'&&e.fdn&&!e.cancelled&&!e.cancelRequested) return '<button class="btn bo bsm efris-only" style="font-size:11px;padding:4px 10px;color:var(--red);border-color:#f3c7c7;" onclick="cnCancelIssued(\''+jsq(String(e.id))+'\')">'+ic('x')+' Cancel debit note</button>';
-  if(e.kind==='debit-note'&&e.cancelRequested&&!e.cancelled) return '<span style="font-size:11px;color:var(--gray);">Cancellation sent to URA</span>';
+  // A cancellation URA rejected or that was withdrawn is over: the note can be cancelled again.
+  const cxOver=!!(e.cancelRequest&&['103','104'].includes(String(e.cancelRequest.approveStatus)));
+  if(e.kind==='debit-note'&&e.fdn&&!e.cancelled&&(!e.cancelRequested||cxOver)) return '<button class="btn bo bsm efris-only" style="font-size:11px;padding:4px 10px;color:var(--red);border-color:#f3c7c7;" onclick="cnCancelIssued(\''+jsq(String(e.id))+'\')">'+ic('x')+' Cancel debit note</button>';
+  if(e.kind==='debit-note'&&e.cancelRequested&&!e.cancelled&&!cxOver) return '<span style="font-size:11px;color:var(--gray);">Cancellation sent to URA</span>';
   const s=cnStatusInfo(e); if(!s) return '';
   const id=jsq(String(e.id));
   if(s.k==='pending') return '<button class="btn bo bsm efris-only" style="font-size:11px;padding:4px 10px;" onclick="cnWithdraw(\''+id+'\')">'+ic('x')+' Withdraw</button>';
@@ -5114,7 +5124,7 @@ async function cnCheckApproval(silent){
         const sum=(list,what)=>{ const n={'101':0,'102':0,'103':0,'104':0}; list.forEach(i=>{ const k=String(i.approveStatus||''); if(k in n) n[k]++; });
           return list.length+' '+what+(list.length===1?'':'s')+': '+n['101']+' approved, '+n['102']+' pending, '+n['103']+' rejected, '+n['104']+' withdrawn'; };
         const notes=all.filter(i=>!isCx(i)), cx=all.filter(isCx);
-        const named=all.filter(i=>i.approveStatus==='103'||i.approveStatus==='104').map(i=>'- '+(isCx(i)?'Cancellation request ':'Credit note ')+(i.referenceNo||i.id)+(isCx(i)&&i.oriInvoiceNo?' (for FDN '+i.oriInvoiceNo+')':'')+': '+(i.statusText||i.approveStatus));
+        const named=all.filter(i=>i.approveStatus==='103'||i.approveStatus==='104').map(i=>'- '+(isCx(i)?'Cancellation request ':'Credit note ')+(i.referenceNo||i.id)+(isCx(i)&&i.oriInvoiceNo?' (for FDN '+i.oriInvoiceNo+')':'')+': '+(i.statusText||i.approveStatus)+(i.remarks?' ('+i.remarks+')':''));
         alert(all.length ? ('URA has '+sum(notes,'credit note application')+(cx.length?'; and '+sum(cx,'cancellation request'):'')+'.'+(named.length?'\n\n'+named.join('\n'):'')+'\n\nThe list is updated.') : 'URA has no credit note applications for this period.');
       }
       docsLoad(_docsPage);
@@ -5295,7 +5305,7 @@ async function docsLoad(page){
         +'<div style="font-size:13px;font-weight:600;">'+esc(e.customerName||'Walk-in Customer')+'</div>'
         +'<div style="font-size:11px;color:var(--gray);">'+esc(e.reference||'-')+' · '+dt+'</div>'
         +'<div style="font-size:11px;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;color:var(--gray);">'+fdnLine+'</div>'
-        +(cs&&cs.k==='rejected'&&e.statusText?'<div style="font-size:11px;color:var(--red);">'+esc(e.statusText)+'</div>':'')
+        +(cs&&cs.k==='rejected'&&e.statusText?'<div style="font-size:11px;color:var(--red);">'+esc(e.statusText)+(e.uraRemarks?' ('+esc(e.uraRemarks)+')':'')+'</div>':'')
         +cnCancelLine(e)
         +(e.unlinked?'<div style="font-size:11px;color:#5d4037;background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:5px 8px;margin-top:4px;">Earlier document, not linked to a business yet. It shows in every business with this TIN. <a href="#" onclick="docLink('+Number(e.id)+');return false;" style="font-weight:700;color:var(--gd);">Link to this business</a></div>':'')
         +'<div style="font-size:14px;font-weight:700;color:var(--gd);margin-top:2px;">'+esc(e.currency||'UGX')+' '+amt+'</div>'
@@ -6603,6 +6613,10 @@ function _openReceiptWith(inv, efris){
 // controls) and then print - instead of redirecting or auto-printing a blank,
 // unsized frame.
 function openReceiptUrl(url){
+  // Fields set by the caller for this one document (a debit note's type, original
+  // FDN, reason and issue date) override what the copy was rebuilt with.
+  if(window._printOverride){ try{ const i=url.indexOf('?'); const p=new URLSearchParams(i<0?'':url.slice(i+1));
+    Object.entries(window._printOverride).forEach(([k,v])=>{ if(v!=null&&v!=='') p.set(k,String(v)); }); url=(i<0?url:url.slice(0,i))+'?'+p.toString(); }catch(_){} window._printOverride=null; }
   // Retrieval snapshot: if this rendered document carries an FDN, save its query
   // string server-side so History can re-open the exact document later.
   try{
@@ -9706,7 +9720,9 @@ async function authStartApp(){
   _preAuthMsgs.splice(0).forEach(ev=>{ try{ onMgrMessage(ev); }catch(e){ console.warn(e); } });
   // Cashiers start on a new receipt, unless Manager opened a document or the
   // business still needs setting up.
-  setTimeout(authCashierStart,700); setTimeout(authCashierStart,2500);
+  // At once, so Home never flashes first; again shortly after, in case the app
+  // settled on Home later. A document Manager opens afterwards still takes over.
+  authCashierStart(); setTimeout(authCashierStart,700); setTimeout(authCashierStart,2500);
 }
 
 // "Open Manager" goes to the Manager address saved NOW (it may have changed in Settings

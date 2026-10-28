@@ -5239,7 +5239,7 @@ async function performInvoiceSubmissionInner(invoice, config, eu) {
         ...(t109data.sellerDetails && t109data.sellerDetails.branchId ? { branchId: t109data.sellerDetails.branchId } : {}),
         // Issued by the Offline Enabler: printed as "Mode: Offline".
         ...(/^https?:\/\/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(eu || '') ? { viaEnabler: true } : {}),
-        ...(invoice._debitOf ? { kind: 'debit-note', docType: 'Debit note', originalFdn: invoice._debitOf.oriInvoiceNo || '' } : {}),
+        ...(invoice._debitOf ? { kind: 'debit-note', docType: 'Debit note', originalFdn: invoice._debitOf.oriInvoiceNo || '', reason: invoice._debitOf.reason || '', reasonCode: invoice._debitOf.reasonCode || '' } : {}),
         deviceNo: config.deviceNo, invoiceId, reference: invoice.Reference || invoice.reference || '',
         returnCode: rc, status: 'success', tin: config.tin,
         customerName: t109data.buyerDetails ? (t109data.buyerDetails.buyerLegalName || t109data.buyerDetails.buyerTin || '') : '',
@@ -5750,6 +5750,8 @@ function cnItem(r) {
   return { id: String(r.id || ''), referenceNo: r.referenceNo || '', oriInvoiceNo: r.oriInvoiceNo || '', invoiceNo: r.invoiceNo || '',
     approveStatus: st, statusText: CN_STATUS_TEXT[st] || st, grossAmount: r.grossAmount, currency: r.currency || '',
     applicationTime: r.applicationTime || '', taskId: r.taskId || '', categoryCode: String(r.invoiceApplyCategoryCode || ''),
+    // URA's remark on its decision (e.g. 'System Rejected. Reason:SLA Time out'), when given.
+    remarks: String(r.approveRemarks || r.approvalRemarks || r.auditRemarks || r.rejectReason || r.remarks || r.remark || '').slice(0, 300) || undefined,
     buyerName: r.buyerLegalName || r.buyerBusinessName || r.buyerName || undefined };
 }
 // T111 (my own credit/debit-note applications), up to 5 pages of 100.
@@ -5882,8 +5884,9 @@ function applyCnStatus(items, tin, adopt) {
       if (seen.has(e.id)) continue;
       seen.add(e.id);
       const was = e.approveStatus || '';
-      if (was !== it.approveStatus || (it.id && e.applicationId !== it.id) || (it.approveStatus === '101' && it.invoiceNo && !e.fdn)) {
+      if (was !== it.approveStatus || (it.remarks && e.uraRemarks !== it.remarks) || (it.id && e.applicationId !== it.id) || (it.approveStatus === '101' && it.invoiceNo && !e.fdn)) {
         e.approveStatus = it.approveStatus; e.statusText = it.statusText;
+        if (it.remarks) e.uraRemarks = it.remarks;
         if (it.id) e.applicationId = it.id;
         if (it.approveStatus === '101' && it.invoiceNo && !e.fdn) e.fdn = it.invoiceNo;
         changed = true;
@@ -5932,9 +5935,9 @@ function cnCancelRequest(log, it, tin, mode) {
   for (const x of docs) {
     const c = x.cancelRequest || {};
     if (c.id && c.id !== it.id && at && c.at && c.at > at) continue;   // a newer request is already kept
-    if (c.id === it.id && c.approveStatus === it.approveStatus) continue;
+    if (c.id === it.id && c.approveStatus === it.approveStatus && (c.remarks || '') === (it.remarks || '')) continue;
     if (was === null) was = c.id === it.id ? c.approveStatus : '';
-    x.cancelRequest = { id: it.id, reference: it.referenceNo || '', category: it.categoryCode, approveStatus: it.approveStatus, statusText: it.statusText, at };
+    x.cancelRequest = { id: it.id, reference: it.referenceNo || '', category: it.categoryCode, approveStatus: it.approveStatus, statusText: it.statusText, remarks: it.remarks || '', at };
     changed = true;
   }
   if (changed && was !== it.approveStatus) console.log(`   Cancellation request ${it.referenceNo || it.id} for ${docs[0].reference || docs[0].fdn} is now ${it.statusText} at URA`);
