@@ -104,6 +104,54 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
         <ControlTemplate TargetType="TextBox"><ScrollViewer x:Name="PART_ContentHost" Padding="0" Margin="0" Focusable="False" VerticalScrollBarVisibility="Disabled" HorizontalScrollBarVisibility="Disabled"/></ControlTemplate>
       </Setter.Value></Setter>
     </Style>
+    <!-- Text and password fields, as in the extension: white, 9 px corners, a soft
+         border that turns green with a light green ring on focus. -->
+    <Style x:Key="Field" TargetType="TextBox">
+      <Setter Property="FontSize" Value="14"/><Setter Property="Foreground" Value="#1A2E1A"/><Setter Property="SelectionBrush" Value="#A5D6A7"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="TextBox">
+          <Border x:Name="Ring" CornerRadius="12" Padding="3" Background="Transparent">
+            <Border x:Name="Box" Background="White" BorderBrush="#E3EAD9" BorderThickness="1" CornerRadius="9" Padding="12,9">
+              <ScrollViewer x:Name="PART_ContentHost" Focusable="False" VerticalScrollBarVisibility="Disabled" HorizontalScrollBarVisibility="Hidden"/>
+            </Border>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="Box" Property="BorderBrush" Value="#2E7D32"/><Setter TargetName="Ring" Property="Background" Value="#2E2E7D32"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <Style x:Key="PwField" TargetType="PasswordBox">
+      <Setter Property="FontSize" Value="14"/><Setter Property="Foreground" Value="#1A2E1A"/><Setter Property="SelectionBrush" Value="#A5D6A7"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="PasswordBox">
+          <Border x:Name="Ring" CornerRadius="12" Padding="3" Background="Transparent">
+            <Border x:Name="Box" Background="White" BorderBrush="#E3EAD9" BorderThickness="1" CornerRadius="9" Padding="12,9">
+              <ScrollViewer x:Name="PART_ContentHost" Focusable="False" VerticalScrollBarVisibility="Disabled" HorizontalScrollBarVisibility="Hidden"/>
+            </Border>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="Box" Property="BorderBrush" Value="#2E7D32"/><Setter TargetName="Ring" Property="Background" Value="#2E2E7D32"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
+    <!-- Show / Hide beside a password field, as in the extension. -->
+    <Style x:Key="ShowBtn" TargetType="ToggleButton">
+      <Setter Property="Padding" Value="14,0"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="FontSize" Value="12"/>
+      <Setter Property="Cursor" Value="Hand"/><Setter Property="Foreground" Value="#2E7D32"/><Setter Property="Focusable" Value="True"/>
+      <Setter Property="Template"><Setter.Value>
+        <ControlTemplate TargetType="ToggleButton">
+          <Border x:Name="b" Background="White" BorderBrush="#2E7D32" BorderThickness="1.5" CornerRadius="9" Padding="{TemplateBinding Padding}">
+            <TextBlock x:Name="t" Text="Show" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsChecked" Value="True"><Setter TargetName="t" Property="Text" Value="Hide"/></Trigger>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#E8F5E9"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value></Setter>
+    </Style>
     <!-- On/off switch (the design system's toggle): green track when on. -->
     <Style x:Key="Switch" TargetType="CheckBox">
       <Setter Property="Cursor" Value="Hand"/><Setter Property="FontSize" Value="12.5"/><Setter Property="Foreground" Value="#1A2E1A"/>
@@ -194,14 +242,15 @@ $Address = if ($Mode -eq 'server') { "https://$($env:COMPUTERNAME.ToLower()):544
               <TextBlock Text="Sign in to the Control Centre" Style="{StaticResource CardTitle}"/>
               <Border Height="1" Background="#E3EAD9" Margin="0,8,0,8"/>
               <TextBox x:Name="LockWhy" Style="{StaticResource Sel}" FontSize="12" Foreground="#4A6741"/>
-              <TextBlock Text="SIGN-IN NAME" Style="{StaticResource Label}" Margin="0,10,0,3"/>
-              <TextBox x:Name="LockName" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
-              <TextBlock Text="PASSWORD" Style="{StaticResource Label}" Margin="0,8,0,3"/>
-              <Grid>
-                <PasswordBox x:Name="LockPw" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9"/>
-                <TextBox x:Name="LockPwText" Padding="8,6" FontSize="13" BorderBrush="#C8E6C9" Visibility="Collapsed"/>
+              <TextBlock Text="SIGN-IN NAME" Style="{StaticResource Label}" Margin="0,10,0,1"/>
+              <TextBox x:Name="LockName" Style="{StaticResource Field}" Margin="-3,0"/>
+              <TextBlock Text="PASSWORD" Style="{StaticResource Label}" Margin="0,8,0,1"/>
+              <Grid Margin="-3,0,0,0">
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <PasswordBox x:Name="LockPw" Style="{StaticResource PwField}"/>
+                <TextBox x:Name="LockPwText" Style="{StaticResource Field}" Visibility="Collapsed"/>
+                <ToggleButton x:Name="LockShow" Grid.Column="1" Style="{StaticResource ShowBtn}" Margin="5,3,0,3" ToolTip="Show or hide the password"/>
               </Grid>
-              <CheckBox x:Name="LockShow" Content="Show password" FontSize="12" Foreground="#4A6741" Margin="0,7,0,0"/>
               <DockPanel Margin="0,10,0,0">
                 <Button x:Name="LockGo" Content="Sign in" Style="{StaticResource Btn}" Background="#2E7D32" Foreground="White" BorderBrush="#2E7D32"/>
                 <TextBox x:Name="LockMsg" Style="{StaticResource Sel}" FontSize="12" Foreground="#B71C1C" VerticalAlignment="Center" Margin="8,0,0,0"/>

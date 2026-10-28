@@ -6,6 +6,7 @@
 // notifications_read.json in the data folder.
 const fs = require('fs');
 const path = require('path');
+const { newer } = require('./update-check');
 
 // pattern -> notification. perm = what the reader needs in that business.
 const RULES = [
@@ -47,13 +48,14 @@ function match(entry) {
   const text = String(entry.text || '');
   for (const r of RULES) {
     const m = r.re.exec(text);
-    if (m) return { kind: r.kind, level: r.levelFor ? r.levelFor(m) : r.level, perm: r.perm, title: r.title(m), body: r.body(m), ref: r.ref ? r.ref(m) : '', link: r.link ? r.link(m) : '' };
+    if (m) return { ver: r.kind === 'update' ? m[1] : undefined, kind: r.kind, level: r.levelFor ? r.levelFor(m) : r.level, perm: r.perm, title: r.title(m), body: r.body(m), ref: r.ref ? r.ref(m) : '', link: r.link ? r.link(m) : '' };
   }
   return null;
 }
 
 function create(opts) {
   const activity = opts.activity;
+  const version = opts.version || '';
   const readFile = path.join(opts.dataDir, 'notifications_read.json');
   const write = opts.writeFileAtomic || ((f, d) => fs.writeFileSync(f, d));
   const pastCache = new Map();   // day -> notifications (past days never change)
@@ -83,7 +85,11 @@ function create(opts) {
   function visible(tenantId, mayRead) {
     const out = [];
     for (const day of activity.listDays()) {
-      for (const n of forDay(day)) if ((n.tenantId === tenantId || !n.tenantId) && mayRead(n.perm)) out.push(n);
+      for (const n of forDay(day)) {
+        // An update this relay already runs (or is past) is no longer news.
+        if (n.kind === 'update' && version && n.ver && !newer(n.ver, version)) continue;
+        if ((n.tenantId === tenantId || !n.tenantId) && mayRead(n.perm)) out.push(n);
+      }
     }
     out.sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0));
     // "Not found in Manager" was logged on every retry before 1.0.24: keep the newest per credit note.

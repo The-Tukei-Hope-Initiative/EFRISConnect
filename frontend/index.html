@@ -249,6 +249,16 @@
   .fg input:focus,.fg select:focus,.fg textarea:focus{border-color:var(--g);box-shadow:0 0 0 3px var(--ring);}
   .fg label{color:var(--txtl);letter-spacing:.5px;font-size:11px;margin-bottom:4px;}
   .fg .hint{font-size:11px;}
+  .opt-sec{border:1px solid var(--line);border-radius:9px;background:#fff;margin:0 0 10px;transition:border-color .15s ease;}
+  .opt-sec[open]{border-color:#c8e6c9;}
+  .opt-sec>summary{list-style:none;display:flex;align-items:center;gap:10px;padding:10px 13px;cursor:pointer;}
+  .opt-sec>summary::-webkit-details-marker{display:none;}
+  .opt-sec>summary .os-t{font-size:13px;font-weight:600;color:var(--txt);}
+  .opt-sec>summary .os-d{font-size:11.5px;color:var(--gray);margin-top:1px;}
+  .opt-sec>summary .os-chev{margin-left:auto;flex-shrink:0;color:var(--gray);transition:transform .15s ease;display:inline-flex;}
+  .opt-sec[open]>summary .os-chev{transform:rotate(180deg);}
+  .opt-sec>summary:focus-visible{outline:none;box-shadow:0 0 0 3px var(--ring);border-radius:9px;}
+  .opt-sec>.os-body{padding:0 13px 12px;border-top:1px solid var(--line);}
   /* Normalize field size app-wide: many older inputs carry inline font-size
      (12/13px) that made some tabs look smaller than others. Force the standard
      size so every form field matches regardless of leftover inline styles. */
@@ -333,7 +343,8 @@
   #homeGrid > button:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg);border-color:var(--g) !important;}
 
   /* Pills a touch rounder */
-  .pill{border-radius:20px;}
+  .pill{border-radius:20px;display:inline-flex;align-items:center;gap:3px;white-space:nowrap;line-height:1.4;}
+  .pill .ico,.pill .ico svg{width:11px;height:11px;display:inline-flex;flex-shrink:0;}
 
   /* Sign-in, owner setup and recovery screens */
   .auth-wrap{display:flex;justify-content:center;padding:22px 0 30px;}
@@ -817,6 +828,11 @@
       <!-- Step 1: Customer -->
       <div id="wkstep1">
       <div class="sec-hd" style="font-size:13px;font-weight:700;color:var(--gd);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">Customer</div>
+      <div class="fg" style="margin:0 0 12px;"><label>Load a saved customer <span style="font-weight:400;color:var(--gray);">(optional - fills in the buyer type, name and TIN below)</span></label>
+        <input id="wkCustPick" list="wkCustDL" placeholder="Type to search your Manager customers…" onchange="wkPickCustomer(this.value)" autocomplete="off"/>
+        <datalist id="wkCustDL"></datalist>
+        <div id="wkCustPickMsg" style="font-size:11px;color:var(--gray);margin-top:2px;"></div>
+      </div>
       <div style="font-size:12px;font-weight:600;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Buyer type <span class="ico info-tip" data-icon="info" style="cursor:pointer;" onclick="openHelp('buyerType')" title="Click for help"></span></div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:5px;margin-bottom:12px;" id="wkCustTypeGrid">
         <button type="button" class="ctype-btn on" data-wktype="b2c" onclick="wkSetType('b2c')">Walk-in / Local</button>
@@ -859,11 +875,6 @@
           <div class="fg" style="margin:0;display:none;" id="wkDeliveryRow"><label for="wkDeliveryTerms">Delivery terms</label>
             <select id="wkDeliveryTerms"><option value="FOB">FOB</option><option value="CIF">CIF</option><option value="EXW">EXW</option><option value="FCA">FCA</option><option value="CPT">CPT</option><option value="CIP">CIP</option><option value="DAP">DAP</option><option value="DPU">DPU</option><option value="DDP">DDP</option><option value="FAS">FAS</option><option value="CFR">CFR</option></select></div>
         </div>
-      </div>
-      <div class="fg" style="margin:0 0 8px;"><label>Load a saved customer <span style="font-weight:400;color:var(--gray);">(optional - pulls name, type, TIN)</span></label>
-        <input id="wkCustPick" list="wkCustDL" placeholder="Type to search your Manager customers…" onchange="wkPickCustomer(this.value)" autocomplete="off"/>
-        <datalist id="wkCustDL"></datalist>
-        <div id="wkCustPickMsg" style="font-size:11px;color:var(--gray);margin-top:2px;"></div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
         <div class="fg" style="margin:0;"><label>Customer Name</label><input id="wkCustName" placeholder="Cash Customer"/></div>
@@ -1094,24 +1105,24 @@
             </div>
             <div id="gUnitPickerBox" style="margin-top:6px;"></div>
           </div>
-          <details class="efris-only" id="gExportBox" style="margin:0 0 10px;">
-            <summary style="font-size:12px;cursor:pointer;color:var(--gd);">Exported? (weight and HS code, needed only for exports of goods) <span class="ico info-tip" data-icon="info" onclick="event.preventDefault();openHelp('exportGoods')"></span></summary>
-            <div class="hint" style="margin-top:4px;">Only if you ship this good to buyers outside Uganda. URA needs its weight on export invoices. A local shop never needs this; a tour is not an export.</div>
+          <details class="efris-only opt-sec" id="gExportBox">
+            <summary><div><div class="os-t">Exported? <span class="ico info-tip" data-icon="info" onclick="event.preventDefault();event.stopPropagation();openHelp('exportGoods')"></span></div><div class="os-d">Weight and HS code, needed only for exports of goods</div></div><span class="os-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span></summary>
+            <div class="os-body"><div class="hint" style="margin-top:10px;">Only if you ship this good to buyers outside Uganda. URA needs its weight on export invoices. A local shop never needs this; a tour is not an export.</div>
             <div class="g2" style="margin-top:6px;">
               <div class="fg" style="margin:0;"><label for="gFldWeight">Weight per unit (kg)</label><input type="number" id="gFldWeight" min="0" step="any" placeholder="e.g. 0.5"/></div>
               <div class="fg" style="margin:0;"><label for="gFldHsCode">HS code</label><input type="text" id="gFldHsCode" maxlength="20" placeholder="e.g. 09011100"/></div>
-            </div>
+            </div></div>
           </details>
-          <details class="efris-only" id="gPieceBox" style="margin:0 0 10px;">
-            <summary style="font-size:12px;cursor:pointer;color:var(--gd);">Also sold by the piece? (for example a carton of 24 sold as single bottles) <span class="ico info-tip" data-icon="info" onclick="event.preventDefault();openHelp('pieceUnit')"></span></summary>
-            <div class="hint" style="margin-top:4px;">For an item you stock in a bigger unit (a carton) but also sell in pieces (one bottle). Example: unit Carton at 11,000; piece unit BO, 12 pieces, piece price 1,000. URA then accepts either, and 1 carton counts as 12 bottles. Leave empty if you sell it only one way.</div>
+          <details class="efris-only opt-sec" id="gPieceBox">
+            <summary><div><div class="os-t">Also sold by the piece? <span class="ico info-tip" data-icon="info" onclick="event.preventDefault();event.stopPropagation();openHelp('pieceUnit')"></span></div><div class="os-d">For example a carton of 24 also sold as single bottles</div></div><span class="os-chev"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span></summary>
+            <div class="os-body"><div class="hint" style="margin-top:10px;">For an item you stock in a bigger unit (a carton) but also sell in pieces (one bottle). Example: unit Carton at 11,000; piece unit BO, 12 pieces, piece price 1,000. URA then accepts either, and 1 carton counts as 12 bottles. Leave empty if you sell it only one way.</div>
             <div class="g2" style="margin-top:6px;">
               <div class="fg" style="margin:0;"><label for="gFldPieceUnit">Piece unit code</label><input type="text" id="gFldPieceUnit" list="gPieceUnitList" maxlength="40" placeholder="Type bottle, piece, sachet... or a code" autocomplete="off" onfocus="gPieceUnitLoad()" onchange="gPieceUnitCheck()" onblur="gPieceUnitCheck()"/><datalist id="gPieceUnitList"></datalist>
                 <div class="hint" id="gPieceUnitDesc"></div></div>
               <div class="fg" style="margin:0;"><label for="gFldPieceScaled">Pieces in one unit above</label><input type="number" id="gFldPieceScaled" min="0" step="any" placeholder="e.g. 24"/></div>
             </div>
             <div class="fg" style="margin:6px 0 0;"><label for="gFldPiecePrice">Price of one piece (tax inclusive)</label><input type="number" id="gFldPiecePrice" min="0" step="any" placeholder="e.g. 2500"/>
-              <div class="hint">Leave these empty if the item is only sold in the unit above.</div></div>
+              <div class="hint">Leave these empty if the item is only sold in the unit above.</div></div></div>
           </details>
           <div class="row mt"><button class="btn bg" onclick="gGoStep(6)">Next: Classification &rarr;</button></div>
         </div>
@@ -3605,7 +3616,7 @@ async function renderCurrencies(){
   // Static shell (base note + search + results container + custom form), then results.
   const base=window._ccyBase;
   let h='<div class="fg" style="margin-bottom:12px;"><label>Base currency</label>';
-  if(base&&base.code) h+='<div class="pay-note" style="border-style:solid;">'+ic('check')+' Set to <strong>'+esc(base.code)+'</strong>'+(base.name?(' ('+esc(base.name)+')'):'')+'</div>';
+  if(base&&base.code) h+='<div style="display:flex;align-items:center;gap:8px;padding:10px 13px;border:1px solid #c8e6c9;background:#e8f5e9;border-radius:9px;font-size:13px;color:var(--gd);line-height:1.35;"><span style="display:inline-flex;flex-shrink:0;">'+ic('check')+'</span><span>Set to <strong>'+esc(base.code)+'</strong>'+(base.name?(' ('+esc(base.name)+')'):'')+'</span></div>';
   else h+='<div class="al ai" style="margin:0;font-size:11.5px;">Your base currency is configured in Manager (Settings, Currencies, Base Currency); the API did not return it on this build, so we cannot show it here. If your base is not UGX, set it in Manager. <button type="button" class="btn bo bsm" style="width:auto;margin-left:6px;" onclick="ccyAdd(\'base\',\'UGX\')">Set base to UGX</button></div>';
   h+='</div>';
   h+='<label style="display:block;font-size:11px;font-weight:700;color:var(--txtl);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Foreign currencies</label>';
@@ -5048,7 +5059,11 @@ function chkDocHtml(d){
   // Credit and debit notes
   if(d.fdn&&(d.notes||d.notesError)){
     const ns=d.notes||[];
-    const body=(ns.length?ns.map(n=>{ const s=cnStatusInfo(Object.assign({kind:'credit-note'},n));
+    const body=(ns.length?ns.map(n=>{
+        if(n.kind==='cancel-request') return '<div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;padding:5px 0;border-top:1px solid var(--line);">'
+          +'<span>Cancellation request '+esc(n.reference||'-')+' <span style="color:var(--gray);">(at URA)</span></span>'
+          +'<span style="white-space:nowrap;font-weight:600;color:'+(n.approveStatus==='103'?'var(--red)':n.approveStatus==='101'?'var(--g)':'var(--gray)')+';">'+esc(n.statusText||n.approveStatus||'')+'</span></div>';
+        const s=cnStatusInfo(Object.assign({kind:'credit-note'},n));
         return '<div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;padding:5px 0;border-top:1px solid var(--line);">'
           +'<span>'+(n.kind==='debit-note'?'Debit':'Credit')+' note '+esc(n.reference||'-')+(n.fdn?' · FDN '+esc(n.fdn):'')+(n.uraOnly?' <span style="color:var(--gray);">(at URA only)</span>':'')+cnCancelLine(n)+'</span>'
           +'<span style="white-space:nowrap;">'+(n.kind==='credit-note'&&s?'<span style="font-size:10px;padding:1px 7px;border-radius:10px;background:'+s.bg+';color:'+s.fg+';font-weight:600;">'+s.txt+'</span> ':'')+fn(n.amount||0)+'</span></div>'; }).join('')
@@ -5057,7 +5072,8 @@ function chkDocHtml(d){
   }
   // Manager
   if(m){
-    if(!m.found) out+=sec('Manager',m.error?'bad':'warn','<div style="font-size:12px;">'+(m.error?esc(m.error):'No sales invoice or receipt in Manager has the reference <strong>'+esc(m.reference)+'</strong>.')+'</div>');
+    if(m.noReference) out+=sec('Manager','warn','<div style="font-size:12px;">Not checked: Manager documents are found by their reference, and this FDN has none in EFRISConnect\'s history. Enter the receipt or invoice number to check Manager.</div>');
+    else if(!m.found) out+=sec('Manager',m.error?'bad':'warn','<div style="font-size:12px;">'+(m.error?esc(m.error):'No sales invoice or receipt in Manager has the reference <strong>'+esc(m.reference)+'</strong>.')+'</div>');
     else out+=sec(m.matches?'FDN is in Manager':'Manager',m.matches?'ok':'bad','<div class="ig">'+row(esc(m.type),esc(m.reference))+row('FDN on it',esc(m.fdn||'(empty)'))+'</div>'
       +(!m.matches?'<div style="font-size:12px;color:var(--red);margin-top:4px;">'+(m.fdn?'The FDN in Manager differs from the one URA issued.':'The FDN was not written to the Manager document.')+'</div>':''));
   } else if(!(CFG.managerEndpoint||MGR_EP)) out+=sec('Manager','warn','<div style="font-size:12px;">Manager is not connected, so this was not checked.</div>');
@@ -5665,15 +5681,21 @@ async function wkFetchFxRate(btn){
 }
 // An export (foreign buyer, Export? chosen) is zero-rated: show the lines at 0%
 // so the till total matches what URA records; back to 18% when export is undone.
-function wkApplyExport(){
+// An export sale is zero-rated: every line, including ones added after the
+// export was chosen, goes to 0% (and back to its own rate when it is undone).
+function wkExportLines(){
   const exp=(_wkType==='foreign')&&!!gvi('wkExport');
   _wkLines.forEach(l=>{
     if(exp){ if(l._preExportVat===undefined) l._preExportVat=l.vatRate||0; l.vatRate=0; l.taxCat='Zero'; }
     else if(l._preExportVat!==undefined){ l.vatRate=l._preExportVat; delete l._preExportVat; if(l.taxCat==='Zero') delete l.taxCat; }
   });
+}
+function wkApplyExport(){
+  wkExportLines();
   try{ wkRenderLines(); wkRecalc(); }catch(_){}
 }
 function wkRenderLines(){
+  wkExportLines();
   const el=$('wkLines'); if(!el) return;
   if(!_wkLines.length){ el.innerHTML=''; return; }
   const lbl='padding:6px;text-align:left;font-size:10px;font-weight:700;color:var(--txtl);text-transform:uppercase;letter-spacing:.4px;';
@@ -6076,6 +6098,7 @@ function wkSums(){
   return {subtotal,vatTotal,discTotal,total};
 }
 function wkRecalc(){
+  wkExportLines();
   const {subtotal,vatTotal,discTotal,total}=wkSums();
   const curr=(document.getElementById('wkCurr')||{}).value||'UGX';
   const fx=parseFloat((document.getElementById('wkFxVal')||{}).value||'1')||1;
@@ -6205,7 +6228,8 @@ async function wkSubmit(autoPrint){
       if(!ok) return;
     } }
   // Tax code vs URA rule of the commodity: warn, never block.
-  { let _ln=[]; try{ _ln=wkBuildInvoice().Lines||[]; }catch(_){} if(!(await ctaxConfirm(_ln))) return; }
+  // An export is zero-rated by law, whatever URA lists for the commodity at home.
+  if(!(_wkType==='foreign'&&gvi('wkExport'))){ let _ln=[]; try{ _ln=wkBuildInvoice().Lines||[]; }catch(_){} if(!(await ctaxConfirm(_ln))) return; }
   const b1=$('wkBtnSubmit'), b2=$('wkBtnSubmitNoPrint');
   const restoreBtns=()=>{ if(b1){b1.disabled=false;b1.innerHTML=ic('send')+' Submit &amp; Print';} if(b2){b2.disabled=false;b2.innerHTML=ic('upload')+' Submit only';} };
   let _done='';
@@ -8197,11 +8221,17 @@ function gToggleExcise(){
   const spec=$('gExciseSpecificRow'); if(spec) spec.style.display=(on&&rule==='2')?'':'none';
   const lbl=$('gExciseRateLbl'); if(lbl) lbl.textContent = rule==='2' ? 'Excise Rate (amount per unit)' : 'Excise Rate (e.g. 0.12 for 12%)';
 }
-// The Register on EFRIS button shows when the item is already at URA (Update at URA stays for changes).
+// Once the item is registered at URA, the Register on EFRIS button becomes Update at
+// URA: it sends this form's details (name, price, unit, piece unit) to URA.
 function gMarkRegistered(on){
   const b=$('gBtnRegEfris'); if(!b) return;
   if(!b.dataset.label) b.dataset.label=b.innerHTML;
-  b.disabled=!!on; b.innerHTML=on?(ic('check')+' Registered at URA'):b.dataset.label;
+  b.disabled=false; b.innerHTML=on?(ic('refresh')+' Update at URA'):b.dataset.label;
+  b.title=on?'Registered at URA. Click to send changes made here (name, price, unit, piece unit) to URA.':'';
+  b.onclick=on?(async()=>{ const it=gBuildItemFromForm(); if(!it) return; window._gLastItem=it;
+      b.disabled=true; b.innerHTML=SPIN+' Updating at URA…';
+      const ok=await gUpdateAtUra(it); b.disabled=false; if(!ok) b.innerHTML=ic('refresh')+' Update at URA'; })
+    :(()=>gSyncToEfris());
 }
 // Update a registered good at URA (T130 operationType 102): name, price, unit.
 async function gUpdateAtUra(it){
@@ -8555,15 +8585,15 @@ async function gEditItem(i){
   if(it.famCode&&it.family){ gFAM={k:it.famCode,n:it.family}; } else { gFAM=null; }
   if(it.clsCode&&it.cls){ gCLS={k:it.clsCode,n:it.cls}; } else { gCLS=null; }
   gSwSub('cfg');
-  // Show steps 5+6 together directly - no wizard needed, editing shows every field at once
+  // Editing keeps the steps: it opens on Details (step 5); Next: Classification goes
+  // to step 6, as when adding. Step 6's fields are filled below all the same.
   const efris=CFG.efrisEnabled!==false;
   for(let s=1;s<=6;s++){
-    const el=$('gstep'+s); if(el) el.style.display=(s===5||s===6)?'':'none';
-    const ws=$('gws'+s); if(ws) ws.className='g-step'+(s===6?' act':s<6?' dn':'');
+    const el=$('gstep'+s); if(el) el.style.display=(s===5)?'':'none';
+    const ws=$('gws'+s); if(ws) ws.className='g-step'+(s===5?' act':s<5?' dn':'');
   }
-  // Reveal the action buttons (Sync to Manager / Register on EFRIS) - Edit bypasses
-  // gGoStep(6), which is what normally un-hides this card.
-  const abc=$('gActionBtnsCard'); if(abc) abc.style.display='';
+  // The action buttons (Sync to Manager / Register or Update at URA) show on step 6.
+  const abc=$('gActionBtnsCard'); if(abc) abc.style.display='none';
   // Pre-fill summary if commodity known
   if(gCOM&&efris){
     const el=$('gComSummary');

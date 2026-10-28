@@ -16,6 +16,17 @@ describe('log lines that become notifications', () => {
     expect(match({ text: '   Offline queue: REC-2 was rejected by URA (URA 1600: shortage)' }))
       .toMatchObject({ kind: 'queue-rejected', level: 'critical' });
   });
+  test('an update this relay already runs is not shown', () => {
+    const { create } = require('../notifications');
+    const day = '2026-10-28';
+    const line = { seq: 1, time: day + 'T00:00:00Z', text: '   Update available: EFRISConnect 1.0.23 (security update) - https://github.com/x/releases/tag/v1.0.23' };
+    const activity = { eatDay: () => day, listDays: () => [day], entries: () => [line], lastSeq: () => 1 };
+    const dir = require('fs').mkdtempSync(require('path').join(require('os').tmpdir(), 'nt-'));
+    const reader = { userId: 'u', tenantId: '', mayRead: () => true };
+    expect(create({ activity, dataDir: dir, version: '1.0.22' }).list(reader).items).toHaveLength(1);
+    expect(create({ activity, dataDir: dir, version: '1.0.23' }).list(reader).items).toHaveLength(0);
+    expect(create({ activity, dataDir: dir, version: '1.0.24' }).list(reader).items).toHaveLength(0);
+  });
   test('ordinary lines are ignored', () => {
     expect(match({ text: '   New session for TIN: 1000000001' })).toBeNull();
   });

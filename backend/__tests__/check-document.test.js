@@ -22,6 +22,7 @@ beforeAll(async () => {
   ura.t111Records = [
     { id: 'A1', referenceNo: 'CN-1', oriInvoiceNo: FDN, invoiceNo: '326044300002', approveStatus: '101', invoiceApplyCategoryCode: '101' },
     { id: 'A2', referenceNo: 'CN-2', oriInvoiceNo: FDN, invoiceNo: '', approveStatus: '103', grossAmount: '-500', invoiceApplyCategoryCode: '101' },
+    { id: 'A3', referenceNo: 'CX-9', oriInvoiceNo: FDN, invoiceNo: '', approveStatus: '103', invoiceApplyCategoryCode: '103' },
   ];
   mgr.lists['text-custom-fields'] = [{ key: 'cf-fdn', name: 'FDN' }, { key: 'cf-ver', name: 'Verification Code' }];
   mgr.lists['receipts'] = [{ key: 'r-1', reference: 'REC-261027-001' }];
@@ -38,7 +39,8 @@ test('by receipt number: URA has it, notes listed, FDN is in Manager', async () 
   expect(r.fdn).toBe(FDN);
   expect(r.history).toMatchObject({ reference: 'REC-261027-001', fdn: FDN });
   expect(r.ura).toMatchObject({ found: true, antifakeCode: 'AF12345', grossAmount: '5000' });
-  expect(r.notes.map(n => n.reference).sort()).toEqual(['CN-1', 'CN-2']);
+  expect(r.notes.map(n => n.reference).sort()).toEqual(['CN-1', 'CN-2', 'CX-9']);
+  expect(r.notes.find(n => n.reference === 'CX-9')).toMatchObject({ kind: 'cancel-request', approveStatus: '103', statusText: 'Rejected' });
   expect(r.notes.find(n => n.reference === 'CN-2')).toMatchObject({ uraOnly: true, approveStatus: '103' });
   expect(r.manager).toMatchObject({ found: true, type: 'Receipt', fdn: FDN, matches: true });
 });
@@ -49,4 +51,5 @@ test('an FDN URA does not have', async () => {
   expect(r.history).toBeUndefined();
   expect(r.ura).toMatchObject({ found: false });
   expect(r.ura.message).toContain('2124');
+  expect(r.manager).toMatchObject({ noReference: true });
 });

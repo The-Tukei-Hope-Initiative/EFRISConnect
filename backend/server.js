@@ -7919,7 +7919,11 @@ app.post('/api/efris/check-document', rateLimit(30), async (req, res) => {
     if (creditView.sees({ tenantId: tid })) {
       try {
         for (const it of await t111Query(config, { oriInvoiceNo: fdn })) {
-          if (it.categoryCode && it.categoryCode !== '101') continue;
+          // A request to cancel this document (or a note on it) is listed too.
+          if (it.categoryCode && it.categoryCode !== '101') {
+            notes.push({ kind: 'cancel-request', reference: it.referenceNo, approveStatus: it.approveStatus, statusText: it.statusText, uraOnly: true });
+            continue;
+          }
           if (notes.some(n => (n.reference && n.reference === it.referenceNo) || (n.fdn && n.fdn === it.invoiceNo))) continue;
           notes.push({ kind: 'credit-note', reference: it.referenceNo, fdn: it.invoiceNo || '', approveStatus: it.approveStatus, statusText: it.statusText,
             amount: -Math.abs(parseFloat(it.grossAmount) || 0), uraOnly: true });
@@ -7946,7 +7950,7 @@ app.post('/api/efris/check-document', rateLimit(30), async (req, res) => {
           matches: !!fdn && mfdn === fdn };
       }
     } catch (e) { out.manager = { found: false, reference: ref, error: e.message }; }
-  }
+  } else if (ep && tk && !ref) out.manager = { found: false, noReference: true };
   res.json(out);
 });
 
@@ -8477,7 +8481,7 @@ app.put('/api/goods-catalog', (req, res) => {
 // ── Notification centre (the bell) ──
 let _notifications = null;
 function notifications() {
-  if (!_notifications) _notifications = notificationsLib.create({ activity, dataDir: DATA_DIR, writeFileAtomic });
+  if (!_notifications) _notifications = notificationsLib.create({ activity, dataDir: DATA_DIR, writeFileAtomic, version: APP_VERSION });
   return _notifications;
 }
 function notifReader(req, res) {
