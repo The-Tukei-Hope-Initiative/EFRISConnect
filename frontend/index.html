@@ -103,7 +103,7 @@
   .bsm{padding:4px 10px;font-size:11px;width:auto;margin-bottom:0;}
   .row{display:flex;gap:6px;}.row .btn{flex:1;}
   .fg{margin-bottom:8px;}
-  .fg label{display:block;font-size:10px;font-weight:700;color:var(--txtl);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px;}
+  .fg label{display:block;font-size:11px;font-weight:700;color:var(--txtl);text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px;}
   .fg input,.fg select,.fg textarea{width:100%;padding:6px 8px;border:1px solid var(--bdr);border-radius:4px;font-size:12px;color:var(--txt);}
   .fg textarea{resize:vertical;min-height:56px;font-family:inherit;}
   .fg input:focus,.fg select:focus,.fg textarea:focus{outline:none;border-color:var(--g);box-shadow:0 0 0 2px rgba(46,125,50,.1);}
@@ -148,8 +148,8 @@
   .ftr{background:var(--gd);color:rgba(255,255,255,.85);padding:9px 13px;font-size:10px;text-align:center;line-height:1.7;margin-top:auto;}
   body{display:flex;flex-direction:column;min-height:100vh;}
   .scr,.wrap,#sNone{flex:1;min-width:0;width:100%;}
-  .ftr a{color:var(--gold);text-decoration:none;}.reg{color:rgba(255,255,255,.5);font-size:9px;position:relative;}
-  .appver{position:absolute;right:13px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:600;color:var(--gold);}
+  .ftr a{color:#ffd54f;text-decoration:none;}.reg{color:rgba(255,255,255,.5);font-size:9px;position:relative;}
+  .appver{position:absolute;right:13px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:600;color:#ffd54f;}
   .hidden{display:none!important;}.mt{margin-top:7px;}hr{border:none;border-top:1px solid var(--bdr);margin:8px 0;}
   .pem-hidden{-webkit-text-security:disc;}
   .ctype-btn{padding:10px 10px;font-size:12.5px;border:1px solid var(--bdr);border-radius:8px;background:#f9f9f9;cursor:pointer;color:var(--txt);transition:all .15s;line-height:1.2;}
@@ -248,6 +248,14 @@
   .fg select{min-height:42px;-webkit-appearance:none;appearance:none;padding-right:38px;cursor:pointer;background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") no-repeat right 13px center;}
   .fg input:focus,.fg select:focus,.fg textarea:focus{border-color:var(--g);box-shadow:0 0 0 3px var(--ring);}
   .fg label{color:var(--txtl);letter-spacing:.5px;font-size:11px;margin-bottom:4px;}
+  .fld{border:1px solid var(--line)!important;border-radius:9px!important;background:#fff;transition:border-color .15s ease,box-shadow .15s ease;}
+  .fld:focus{outline:none;border-color:var(--g)!important;box-shadow:0 0 0 3px var(--ring);}
+  /* Form screens: a centred column of comfortable width (lists and grids keep the full page width). */
+  @media(min-width:900px){ #tWalk,#tCN,#tStat,#gv-cfg{max-width:820px;margin-left:auto;margin-right:auto;} #tSet{max-width:960px;margin-left:auto;margin-right:auto;}
+    /* The sub-tab row above a form is centred over the form. */
+    body:has(#tWalk:not(.hidden)) #grpSubnav,body:has(#tCN:not(.hidden)) #grpSubnav,body:has(#tStat:not(.hidden)) #grpSubnav{max-width:820px;margin-left:auto;margin-right:auto;justify-content:center;}
+    body:has(#tSet:not(.hidden)) #grpSubnav{max-width:960px;margin-left:auto;margin-right:auto;justify-content:center;} }
+  .fg label.btn{text-transform:none;letter-spacing:0;font-size:12px;font-weight:600;color:var(--g);}
   .fg .hint{font-size:11px;}
   .opt-sec{border:1px solid var(--line);border-radius:9px;background:#fff;margin:0 0 10px;transition:border-color .15s ease;}
   .opt-sec[open]{border-color:#c8e6c9;}
@@ -382,7 +390,7 @@
   <span class="ug-flag-wrap">
     <img class="brand-mark" src="/efrisconnect-mark.svg" alt="EFRISConnect" width="30" height="30" style="vertical-align:middle;display:block;"/>
   </span>
-  <div><h1 id="brandName">EFRISConnect</h1><div class="sub" id="brandSub">URA Electronic Fiscal Receipting &amp; Invoicing</div></div>
+  <div><h1 id="brandName">EFRISConnect</h1><div class="sub" id="brandSub">Connect your business to EFRIS</div></div>
   <span style="flex:1;"></span>
   <span class="badge bsb" id="mBadge" style="display:none;flex-shrink:0;">SANDBOX</span>
   <div id="hdrUserWrap" style="position:relative;margin-left:8px;flex-shrink:0;display:none;">
@@ -447,7 +455,7 @@
         <div class="auth-biz hidden" id="authSetupBiz" aria-label="Business"></div>
         <div id="authSetupCodeRow" class="hidden">
           <div class="fg"><label for="authSetupCode">Setup code</label><input id="authSetupCode" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="For example LIME-RIVER-42" aria-describedby="authSetupCodeHint"/>
-            <div class="hint" id="authSetupCodeHint">You are not on the computer that runs EFRISConnect, so a setup code is needed. You can find it in the EFRISConnect relay window on that computer, or in the file <strong>EFRIS Connect setup code.txt</strong> in the EFRISConnect data folder there.</div></div>
+            <div class="hint" id="authSetupCodeHint">You are not on the computer that runs EFRISConnect, so a setup code is needed. You can find it in the EFRISConnect relay window on that computer, or in the file <strong>EFRISConnect setup code.txt</strong> in the EFRISConnect data folder there.</div></div>
         </div>
         <div class="fg"><label for="authSetupName">Sign-in name</label><input id="authSetupName" autocomplete="username" autocapitalize="none" spellcheck="false" aria-describedby="authSetupNameHint"/><div class="hint" id="authSetupNameHint">A short name you type to sign in, for example your first name.</div></div>
         <div class="fg"><label for="authSetupDisplay">Display name</label><input id="authSetupDisplay" autocomplete="name" aria-describedby="authSetupDisplayHint"/><div class="hint" id="authSetupDisplayHint">Shown at the top of the screen and as &ldquo;Issued by&rdquo; on receipts. Optional.</div></div>
@@ -476,7 +484,7 @@
     <div class="auth-card">
       <form id="authRecoverForm" onsubmit="authDoRecover(event)" novalidate>
         <h2>Set a new password</h2>
-        <p class="auth-sub">Use the recovery code from the file you downloaded or printed when your account was created. If you do not have it, ask the owner to run <strong>Reset owner password</strong> in the EFRISConnect launcher on the computer that runs EFRISConnect. That gives a reset code you can type here.</p>
+        <p class="auth-sub">Use the recovery code from the file you downloaded or printed when your account was created. If you do not have it, ask the owner to use <strong>Reset owner password</strong> in the EFRISConnect Control Centre (or the tray icon menu) on the computer that runs EFRISConnect. That gives a reset code you can type here.</p>
         <p class="auth-sub hidden" id="authRecEmailNote" style="margin-top:-6px;">If your account has an email address, type your sign-in name and click <strong>Email me a code</strong>. The code works once, for 30 minutes, from any computer.</p>
         <p class="auth-sub" style="margin-top:-6px;">Staff: ask the owner or an admin to reset your password in Settings, Users.</p>
         <div class="fg"><label for="authRecName">Sign-in name</label><input id="authRecName" autocomplete="username" autocapitalize="none" spellcheck="false" aria-describedby="authRecNameHint"/><div class="hint" id="authRecNameHint">The short name you sign in with (for example Douglas), not the display name shown on receipts.</div></div>
@@ -523,7 +531,7 @@
         <div class="fg"><label for="o2b">Device number * <span class="ico info-tip" data-icon="info" style="cursor:pointer;" onclick="openHelp('deviceNo')" title="Click for help"></span></label><input id="o2b" placeholder="e.g. 1000123456_01"/><div class="hint">From the URA EFRIS portal, for this installation.</div></div>
         <div class="fg"><label for="o2c">EFRIS password *</label><div style="display:flex;gap:6px;"><input id="o2c" type="password" placeholder="Your URA EFRIS password" style="flex:1;min-width:0;"/><button type="button" class="btn bo bsm" style="width:auto;" onclick="togglePw('o2c',this)">Show</button></div></div>
         <div class="fg"><label for="obEfrisKeyPem">EFRIS private key * <span class="ico info-tip" data-icon="info" style="cursor:pointer;" onclick="openHelp('privateKey')" title="Click for help"></span></label>
-          <textarea id="obEfrisKeyPem" class="pem-hidden" rows="3" style="width:100%;box-sizing:border-box;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;font-size:11px;padding:8px;border:1px solid var(--bdr);border-radius:6px;resize:vertical;" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"></textarea>
+          <textarea id="obEfrisKeyPem" class="pem-hidden fld" rows="3" style="width:100%;box-sizing:border-box;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;font-size:11px;padding:8px;border:1px solid var(--bdr);border-radius:6px;resize:vertical;" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"></textarea>
           <button type="button" class="btn bo bsm" style="width:auto;margin-top:4px;" onclick="togglePemById('obEfrisKeyPem',this)">Show</button>
           <div class="hint">Open the <strong>.pem</strong> file in Notepad, copy everything and paste it here. It is stored encrypted, for this business only. Keep your own copy safe: URA cannot give it back.</div></div>
         <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--txtl);margin:2px 0 8px;cursor:pointer;"><input type="checkbox" id="obKeyEncrypted" onchange="obTogglePassphrase()" style="width:auto;margin:0;flex:0 0 auto;"/> My private key is encrypted (needs a passphrase)</label>
@@ -598,7 +606,7 @@
     <div id="homeStatus" style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#f0faf0;border:1px solid #b7ebc0;border-radius:7px;margin:10px 0 6px;font-size:12px;">
       <span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;flex-shrink:0;"></span>
       <span>Server online - <code id="homeHostDisplay" style="font-size:11px;"></code></span>
-      <span style="margin-left:auto;font-size:11px;color:#555;">Manager: <span id="homeMgrStatus">checking…</span></span>
+      <span style="margin-left:auto;font-size:11px;color:var(--txtl);">Manager: <span id="homeMgrStatus">checking…</span></span>
     </div>
 
     <!-- Opened in a browser, not from Manager: point to Manager's buttons (dismissible) -->
@@ -615,7 +623,7 @@
       <span class="ico" data-icon="theme" style="color:var(--gd);flex-shrink:0;"></span>
       <span style="flex:1;line-height:1.45;">Make your Manager receipts print branded with the <strong>EFRIS QR code</strong> - install the receipt theme in <strong>Settings</strong>.</span>
       <button class="btn bg bsm" style="flex-shrink:0;" onclick="goToThemeSettings()">Set up</button>
-      <button title="Dismiss" style="background:none;border:none;cursor:pointer;color:#888;font-size:15px;flex-shrink:0;" onclick="this.parentElement.style.display='none';try{localStorage.setItem('efThemeHintDone','1')}catch(_){}">&times;</button>
+      <button title="Dismiss" style="background:none;border:none;cursor:pointer;color:var(--gray);font-size:15px;flex-shrink:0;" onclick="this.parentElement.style.display='none';try{localStorage.setItem('efThemeHintDone','1')}catch(_){}">&times;</button>
     </div>
 
     <!-- Quick actions grid -->
@@ -663,8 +671,8 @@
     <div data-perm="admin" style="background:#f8f9ff;border:1px solid #d0d8ff;border-radius:7px;padding:10px 12px;font-size:11px;color:#444;">
       <strong style="font-size:11px;">Manager custom button URL:</strong><br>
       <code id="homeExtUrl" style="word-break:break-all;font-size:11px;color:#1a56db;"></code>
-      <div style="margin-top:4px;color:#888;">If you see a sad-face icon in Manager → Settings → Custom Buttons → verify this URL is set exactly as above.</div>
-      <div id="homeCtxDbg" style="margin-top:8px;padding-top:8px;border-top:1px dashed #d0d8ff;font-size:10px;color:#666;word-break:break-all;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;"></div>
+      <div style="margin-top:4px;color:var(--gray);">If you see a sad-face icon in Manager → Settings → Custom Buttons → verify this URL is set exactly as above.</div>
+      <div id="homeCtxDbg" style="margin-top:8px;padding-top:8px;border-top:1px dashed #d0d8ff;font-size:10px;color:var(--gray);word-break:break-all;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;"></div>
     </div>
   </div>
   <!-- ── End Home Dashboard ──────────────────────── -->
@@ -678,13 +686,13 @@
       <button onclick="newReceiptDirect()" class="btn bg" style="width:100%;margin-bottom:8px;">+ New Receipt</button>
       <div style="display:flex;gap:6px;margin-bottom:6px;">
         <button onclick="loadList($('pickSearch2')?$('pickSearch2').value:'')" style="flex:1;padding:8px;border:1px solid var(--bdr);background:white;border-radius:6px;cursor:pointer;font-weight:600;color:var(--gd);"><span class="ico" data-icon="history"></span> Refresh</button>
-        <input id="pickSearch2" placeholder="Search reference / customer…" style="flex:2;padding:8px;border:1px solid var(--bdr);border-radius:6px;font-size:12px;" oninput="invSearch(this.value)" onkeydown="if(event.key==='Enter')loadList(this.value)"/>
+        <input id="pickSearch2" class="fld" placeholder="Search reference / customer…" style="flex:2;padding:8px;border:1px solid var(--bdr);border-radius:6px;font-size:12px;" oninput="invSearch(this.value)" onkeydown="if(event.key==='Enter')loadList(this.value)"/>
       </div>
       <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;font-size:11px;color:var(--gray);flex-wrap:wrap;">
         <span>Date:</span>
-        <input type="date" id="pickDateFrom" onchange="applyPickFilters()" style="padding:5px;border:1px solid var(--bdr);border-radius:5px;font-size:11px;"/>
+        <input type="date" id="pickDateFrom" class="fld" onchange="applyPickFilters()" style="padding:5px;border:1px solid var(--bdr);border-radius:5px;font-size:11px;"/>
         <span>to</span>
-        <input type="date" id="pickDateTo" onchange="applyPickFilters()" style="padding:5px;border:1px solid var(--bdr);border-radius:5px;font-size:11px;"/>
+        <input type="date" id="pickDateTo" class="fld" onchange="applyPickFilters()" style="padding:5px;border:1px solid var(--bdr);border-radius:5px;font-size:11px;"/>
         <button class="btn bo bsm" style="font-size:10px;" onclick="$('pickDateFrom').value='';$('pickDateTo').value='';applyPickFilters()">Clear</button>
       </div>
       <label style="display:flex;align-items:center;gap:7px;font-size:11px;color:var(--gray);margin-bottom:8px;cursor:pointer;"><input type="checkbox" id="chkUnsubmitted" onchange="toggleUnsubmitted(this)" style="width:15px;height:15px;flex-shrink:0;accent-color:var(--g);cursor:pointer;"/> Show only documents not yet submitted to EFRIS</label>
@@ -976,7 +984,7 @@
     <div class="card">
       <div class="ct"><span class="ico" data-icon="play"></span> Bulk Submit to EFRIS</div>
       <p style="font-size:12px;color:var(--gray);margin:0 0 10px;">Enter one invoice/receipt <strong>reference</strong> per line (exactly as shown in Manager, e.g. <code>43</code> or <code>INV-0001</code>). Each is resolved to its document, loaded, and submitted to EFRIS in sequence. Already-submitted documents are skipped.</p>
-      <textarea id="bulkIds" rows="6" placeholder="43&#10;INV-0002&#10;500260628014" style="width:100%;box-sizing:border-box;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;font-size:12px;padding:8px;border:1px solid var(--bdr);border-radius:6px;resize:vertical;"></textarea>
+      <textarea id="bulkIds" class="fld" rows="6" placeholder="43&#10;INV-0002&#10;500260628014" style="width:100%;box-sizing:border-box;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;font-size:12px;padding:8px;border:1px solid var(--bdr);border-radius:6px;resize:vertical;"></textarea>
       <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
         <button class="btn bg bsm" id="bulkStartBtn" onclick="bulkStart()"><span class="ico" data-icon="play"></span> Start Bulk Submit</button>
         <button class="btn bo bsm" onclick="bulkClear()">Clear</button>
@@ -1014,7 +1022,7 @@
     <div class="al ai" id="gGlobalIntHint" style="display:flex;align-items:flex-start;gap:8px;">
       <span class="ico" data-icon="globe" style="flex-shrink:0;margin-top:1px;"></span>
       <span style="flex:1;"><strong>Global Integration Mode:</strong> Instantly configure items for Manager.io. For unique pricing categories (like <em>Per Person</em>, <em>Per Couple</em>, or <em>Per Adult</em>), type your custom text in the Package Unit box and select the green custom option row.</span>
-      <button title="Dismiss" style="background:none;border:none;cursor:pointer;color:#888;font-size:15px;flex-shrink:0;line-height:1;" onclick="this.parentElement.style.display='none';try{localStorage.setItem('efGlobalIntHintDone','1')}catch(_){}">&times;</button>
+      <button title="Dismiss" style="background:none;border:none;cursor:pointer;color:var(--gray);font-size:15px;flex-shrink:0;line-height:1;" onclick="this.parentElement.style.display='none';try{localStorage.setItem('efGlobalIntHintDone','1')}catch(_){}">&times;</button>
     </div>
     <div class="g-subtabs" style="flex-wrap:wrap;">
       <button class="g-stab on" id="gnav-cfg" data-perm="admin" onclick="gNav('cfg')"><span class="ico" data-icon="plus"></span> Configure</button>
@@ -1502,8 +1510,7 @@
       <p style="margin:0 0 10px;font-size:12px;color:var(--gray);">Done once by the owner or an admin. Cashiers and accountants only need to sign in.</p>
 
       <div class="gs"><div class="gn">1</div><div class="gb">
-        <h4>Start EFRISConnect</h4>
-        <p>Open the <strong>EFRISConnect</strong> launcher and choose <strong>1) Start EFRIS Connect</strong>. The first time only, run <strong>2) First-time HTTPS setup</strong> before it. Leave the window open; it shows <em>HTTPS running</em> when ready. Option <strong>3</strong> starts it automatically when you log on to Windows.</p>
+        <h4>Install EFRISConnect</h4> <p>Run <strong>EFRISConnect Setup</strong> and choose how the computer is used: this computer only, shop server, or till. EFRISConnect then starts by itself with Windows. The <strong>EFRISConnect Control Centre</strong> on the desktop shows that it is running, and can start, stop or restart it.</p>
       </div></div>
 
       <div class="gs"><div class="gn">2</div><div class="gb">
@@ -1515,7 +1522,7 @@
       <div class="gs"><div class="gn">3</div><div class="gb">
         <h4>Create the owner account</h4>
         <p>Click the EFRISConnect button in Manager on the PC where EFRISConnect runs and create the owner account (sign-in name and password). <strong>Download or print the recovery code</strong> and keep it safe: it is the only way back in if the password is forgotten.<br>
-        <em><span class="ico" data-icon="bulb"></span> From another computer, the setup code from the EFRISConnect window (also saved in <code>EFRIS Connect setup code.txt</code> in the data folder) is needed. If both password and recovery code are lost, use <strong>Reset owner password</strong> in the launcher.</em></p>
+        <em><span class="ico" data-icon="bulb"></span> From another computer, the setup code from the EFRISConnect window (also saved in <code>EFRISConnect setup code.txt</code> in the data folder) is needed. If both password and recovery code are lost, use <strong>Reset owner password</strong> in the Control Centre or the tray icon menu.</em></p>
       </div></div>
 
       <div class="gs"><div class="gn">4</div><div class="gb">
@@ -1746,16 +1753,16 @@
 
       <div class="gs"><div class="gn">!</div><div class="gb">
         <h4>Sad face in Manager instead of EFRISConnect</h4>
-        <p>1. EFRISConnect must be running: launcher option <strong>1) Start EFRIS Connect</strong>, and the window shows <em>HTTPS running</em>.<br>
+        <p>1. EFRISConnect must be running: open the <strong>Control Centre</strong>; its status shows <em>Running</em> (click <strong>Start</strong> if it does not).<br>
         2. On the computer that runs EFRISConnect, the button address must be exactly <code>https://localhost:5443/extension</code>.<br>
-        3. Run launcher option <strong>2) First-time HTTPS setup</strong> once if you have not.<br>
-        4. On another till on the network, use the address shown in Settings → System under <em>Custom Button setup</em>, and run launcher option <strong>5) Trust a server's certificate</strong> on that till.</p>
+        3. Setup installs the security certificate. If Manager still shows the sad face, run EFRISConnect Setup again.<br>
+        4. On another till on the network, use the address shown in Settings → System under <em>Custom Button setup</em>, and on that till run EFRISConnect Setup and choose <strong>Till</strong> (or run <strong>Trust EFRISConnect server.bat</strong> from the till kit).</p>
       </div></div>
 
       <div class="gs"><div class="gn">!</div><div class="gb">
         <h4>Cannot sign in</h4>
         <p>After 5 wrong passwords the account is <strong>locked for 15 minutes</strong>. Wait, or use <strong>Forgot password?</strong> with your name and recovery code.<br>
-        No recovery code: an Admin can set a new password in <strong>Settings → Users → Reset password</strong>. If the owner lost both, run launcher option <strong>7) Reset owner password</strong> on the EFRISConnect computer. It writes a one-time reset code (valid 24 hours) to <code>EFRIS Connect setup code.txt</code> in the data folder; enter it under Forgot password? on that computer.</p>
+        No recovery code: an Admin can set a new password in <strong>Settings → Users → Reset password</strong>. If the owner lost both, use <strong>Reset owner password</strong> in the Control Centre or the tray icon menu on the EFRISConnect computer. It makes a one-time reset code (valid 24 hours) to <code>EFRISConnect setup code.txt</code> in the data folder; enter it under Forgot password? on that computer.</p>
       </div></div>
 
       <div class="gs"><div class="gn">!</div><div class="gb">
@@ -1984,7 +1991,7 @@
         <div id="sKeyModePemWrap">
           <label style="font-weight:400;">Paste private key PEM content directly</label>
           <div style="position:relative;">
-            <textarea id="sEfrisKeyPem" class="pem-hidden" rows="4" style="width:100%;box-sizing:border-box;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;font-size:11px;padding:8px 70px 8px 8px;border:1px solid var(--bdr);border-radius:6px;resize:vertical;" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"></textarea>
+            <textarea id="sEfrisKeyPem" class="pem-hidden fld" rows="4" style="width:100%;box-sizing:border-box;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;font-size:11px;padding:8px 70px 8px 8px;border:1px solid var(--bdr);border-radius:6px;resize:vertical;" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"></textarea>
             <button type="button" class="btn bo bsm" style="position:absolute;top:6px;right:6px;width:auto;" onclick="toggleKeyPemVisibility(this)">Show</button>
           </div>
           <div class="hint">Open the .pem file in Notepad, copy everything and paste it here. It is saved encrypted on this computer, for this business only; the browser keeps no copy. Paste a new key to replace it. Keep your own copy of the .pem file somewhere safe. <a href="#" onclick="openHelp('movingComputer');return false;">Moving to a new computer?</a></div>
@@ -2077,7 +2084,7 @@
             <button type="button" class="btn bo bsm" style="width:auto;" onclick="enablerSvc('stop',this)">Stop</button>
             <button type="button" class="btn bo bsm" style="width:auto;" onclick="enablerSvcStatus()">Refresh</button>
           </div>
-          <div class="hint">Its database (TcsData) and the Enabler (TcsTomcat) start with Windows. Starting or stopping needs EFRISConnect installed with Setup; with the launcher, use the tray icon or Windows Services.</div>
+          <div class="hint">Its database (TcsData) and the Enabler (TcsTomcat) start with Windows. Starting or stopping it here needs EFRISConnect installed with Setup; otherwise use Windows Services.</div>
         </div>
       </div>
       <div class="fg"><label>Enabler Device Number <span style="font-weight:400;color:var(--gray);">(from the Enabler console)</span></label>
@@ -2259,7 +2266,7 @@
     <button onclick="showCreate()" class="btn bg" style="width:100%;margin-bottom:8px;">+ New Receipt</button>
     <div style="display:flex;gap:6px;margin-bottom:6px;">
       <button onclick="loadList()" style="flex:1;padding:8px;border:1px solid var(--bdr);background:white;border-radius:6px;cursor:pointer;font-weight:600;color:var(--gd);"><span class="ico-emoji"><span class="ico" data-icon="refresh"></span></span><svg class="ico-svg" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Refresh list</button>
-      <input id="pickSearch" placeholder="Search reference / customer…" style="flex:2;padding:8px;border:1px solid var(--bdr);border-radius:6px;font-size:12px;" oninput="filterPickList(this.value)"/>
+      <input id="pickSearch" class="fld" placeholder="Search reference / customer…" style="flex:2;padding:8px;border:1px solid var(--bdr);border-radius:6px;font-size:12px;" oninput="filterPickList(this.value)"/>
     </div>
     <div id="pickList"></div>
     <div id="ctxDbg" style="font-size:10px;color:#8a6d00;background:#fffbe6;border:1px solid #ffe58f;border-radius:5px;padding:5px 8px;margin:8px 0;word-break:break-all;"></div>
@@ -2276,7 +2283,7 @@
 <!-- Preview Modal -->
 <div id="glossaryModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:6000;align-items:center;justify-content:center;padding:20px;" onclick="if(event.target===this)this.style.display='none'">
   <div class="card" style="max-width:560px;width:100%;max-height:88vh;display:flex;flex-direction:column;position:relative;margin:0;">
-    <button onclick="$('glossaryModal').style.display='none'" style="position:absolute;top:10px;right:12px;background:none;border:none;font-size:18px;cursor:pointer;color:#666;"><span class="ico" data-icon="x"></span></button>
+    <button onclick="$('glossaryModal').style.display='none'" style="position:absolute;top:10px;right:12px;background:none;border:none;font-size:18px;cursor:pointer;color:var(--gray);"><span class="ico" data-icon="x"></span></button>
     <div class="ct" style="display:flex;align-items:center;gap:6px;"><span class="ico" data-icon="info" style="width:18px;height:18px;color:var(--g);"></span> Help &amp; Glossary</div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;border:1px solid var(--line);border-radius:10px;padding:9px 12px;background:#fff;transition:border-color .15s,box-shadow .15s;" onfocusin="this.style.borderColor='var(--g)';this.style.boxShadow='0 0 0 3px var(--ring)';" onfocusout="this.style.borderColor='var(--line)';this.style.boxShadow='none';">
       <span class="ico" data-icon="search" style="color:var(--gray);flex-shrink:0;"></span>
@@ -2289,7 +2296,7 @@
 </div>
 <div id="helpModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:6000;align-items:center;justify-content:center;padding:16px;" onclick="if(event.target===this)this.style.display='none'">
   <div class="card" style="max-width:520px;width:100%;max-height:calc(100vh - 32px);display:flex;flex-direction:column;position:relative;margin:0;">
-    <button onclick="$('helpModal').style.display='none'" style="position:absolute;top:10px;right:12px;background:none;border:none;font-size:18px;cursor:pointer;color:#666;"><span class="ico" data-icon="x"></span></button>
+    <button onclick="$('helpModal').style.display='none'" style="position:absolute;top:10px;right:12px;background:none;border:none;font-size:18px;cursor:pointer;color:var(--gray);"><span class="ico" data-icon="x"></span></button>
     <div class="ct" style="display:flex;align-items:center;gap:6px;"><span class="ico" data-icon="info" style="width:18px;height:18px;color:var(--g);"></span> <span id="helpTitle"></span></div>
     <div id="helpBody" style="font-size:13px;line-height:1.55;overflow-y:auto;min-height:0;flex:1;padding-right:4px;"></div>
     <div style="margin-top:12px;text-align:right;flex-shrink:0;"><button class="btn bg bsm" onclick="$('helpModal').style.display='none'">Got it</button></div>
@@ -2297,7 +2304,7 @@
 </div>
 <div id="prevModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);z-index:1300;overflow-y:auto;padding:20px;">
   <div style="background:#fff;border-radius:8px;max-width:520px;margin:0 auto;padding:20px;font-size:12px;position:relative;">
-    <button onclick="$('prevModal').style.display='none'" style="position:absolute;top:10px;right:12px;background:none;border:none;font-size:18px;cursor:pointer;color:#666;"><span class="ico" data-icon="x"></span></button>
+    <button onclick="$('prevModal').style.display='none'" style="position:absolute;top:10px;right:12px;background:none;border:none;font-size:18px;cursor:pointer;color:var(--gray);"><span class="ico" data-icon="x"></span></button>
     <div id="prevContent"></div>
   </div>
 </div>
@@ -4018,7 +4025,7 @@ function dbgShowContext(){
     'URL query params': Object.keys(params).length?params:'(none)',
     'Document key detected (DKEY)': dk||'(none)',
     'Last message from Manager': window._lastCtxMsg||'(none received yet)',
-    'Verdict': gotKey?'✓ Manager sent the current record (page-response) - the exact document opens.':'✗ No record from Manager. If you opened this from a receipt/invoice, the button should be Source = Url pointing at /extension; otherwise use the ?mode=submit picker.'
+    'Verdict': gotKey?'Yes: Manager sent the current record (page-response) - the exact document opens.':'No: Manager sent no record. If you opened this from a receipt/invoice, the button should be Source = Url pointing at /extension; otherwise use the ?mode=submit picker.'
   };
   out.style.display='block';
   out.textContent=JSON.stringify(info,null,2);
@@ -5710,7 +5717,7 @@ function wkRenderLines(){
   const el=$('wkLines'); if(!el) return;
   if(!_wkLines.length){ el.innerHTML=''; return; }
   const lbl='padding:6px;text-align:left;font-size:10px;font-weight:700;color:var(--txtl);text-transform:uppercase;letter-spacing:.4px;';
-  const inp='width:100%;font-size:12px;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px 7px;';
+  const inp='width:100%;font-size:12px;color:var(--txt);border:1px solid var(--line);border-radius:9px;padding:6px 8px;';
   let h='<table style="width:100%;border-collapse:separate;border-spacing:0;font-size:12px;margin-bottom:4px;table-layout:fixed;">'
     +'<thead><tr>'
     +'<th style="'+lbl+'">Description</th>'
@@ -5725,12 +5732,12 @@ function wkRenderLines(){
   _wkLines.forEach((l,i)=>{
     const tot=wkLineGross(l);
     h+='<tr>'
-      +'<td style="padding:5px 6px 5px 0;"><input list="wkItemList" autocomplete="off" value="'+esc(l.desc)+'" style="'+inp+'" oninput="_wkLines['+i+'].desc=this.value;wkSuggest('+i+',this,this.value)" onchange="wkAutoFillItem('+i+',this.value)" onfocus="wkSuggest('+i+',this,this.value)" onblur="setTimeout(wkHideSug,200)" placeholder="Item or service description"/></td>'
-      +'<td style="padding:5px 6px 5px 0;"><input type="number" value="'+esc(l.qty)+'" style="'+inp+'text-align:right;" oninput="_wkLines['+i+'].qty=+this.value;wkRecalc();wkUpdateTot('+i+')"/></td>'
-      +'<td style="padding:5px 6px 5px 0;"><input list="wkUnitList" value="'+esc(l.unit)+'" style="'+inp+'" oninput="_wkLines['+i+'].unit=this.value" placeholder="Each"/></td>'
-      +'<td style="padding:5px 6px 5px 0;"><input type="number" value="'+esc(l.price)+'" style="'+inp+'text-align:right;" oninput="_wkLines['+i+'].price=+this.value;_wkLines['+i+']._ugx=0;_wkLines['+i+']._ugxPrice=null;wkRecalc();wkUpdateTot('+i+')"/></td>'
-      +'<td style="padding:5px 6px 5px 0;"><input type="number" value="'+esc(l.vatRate)+'" style="'+inp+'text-align:right;" oninput="_wkLines['+i+'].vatRate=+this.value;wkRecalc();wkUpdateTot('+i+')" placeholder="0"/></td>'
-      +'<td style="padding:5px 6px 5px 0;"><input type="number" value="'+esc(l.discount)+'" style="'+inp+'text-align:right;" oninput="_wkLines['+i+'].discount=+this.value;wkRecalc();wkUpdateTot('+i+')" placeholder="0"/></td>'
+      +'<td style="padding:5px 6px 5px 0;"><input list="wkItemList" autocomplete="off" value="'+esc(l.desc)+'" class="fld" style="'+inp+'" oninput="_wkLines['+i+'].desc=this.value;wkSuggest('+i+',this,this.value)" onchange="wkAutoFillItem('+i+',this.value)" onfocus="wkSuggest('+i+',this,this.value)" onblur="setTimeout(wkHideSug,200)" placeholder="Item or service description"/></td>'
+      +'<td style="padding:5px 6px 5px 0;"><input type="number" value="'+esc(l.qty)+'" class="fld" style="'+inp+'text-align:right;" oninput="_wkLines['+i+'].qty=+this.value;wkRecalc();wkUpdateTot('+i+')"/></td>'
+      +'<td style="padding:5px 6px 5px 0;"><input list="wkUnitList" value="'+esc(l.unit)+'" class="fld" style="'+inp+'" oninput="_wkLines['+i+'].unit=this.value" placeholder="Each"/></td>'
+      +'<td style="padding:5px 6px 5px 0;"><input type="number" value="'+esc(l.price)+'" class="fld" style="'+inp+'text-align:right;" oninput="_wkLines['+i+'].price=+this.value;_wkLines['+i+']._ugx=0;_wkLines['+i+']._ugxPrice=null;wkRecalc();wkUpdateTot('+i+')"/></td>'
+      +'<td style="padding:5px 6px 5px 0;"><input type="number" value="'+esc(l.vatRate)+'" class="fld" style="'+inp+'text-align:right;" oninput="_wkLines['+i+'].vatRate=+this.value;wkRecalc();wkUpdateTot('+i+')" placeholder="0"/></td>'
+      +'<td style="padding:5px 6px 5px 0;"><input type="number" value="'+esc(l.discount)+'" class="fld" style="'+inp+'text-align:right;" oninput="_wkLines['+i+'].discount=+this.value;wkRecalc();wkUpdateTot('+i+')" placeholder="0"/></td>'
       +'<td style="padding:5px 6px 5px 0;text-align:right;font-weight:600;" id="wkTot_'+i+'">'+fn(tot)+'</td>'
       +'<td style="padding:5px 0;text-align:center;"><button onclick="wkClearLine('+i+')" title="Clear / remove this line" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;">'+ic('x')+'</button></td>'
       +'</tr>';
@@ -6255,6 +6262,10 @@ async function wkSubmit(autoPrint){
     const inv=wkBuildInvoice();
     const r=await fetch(RELAY+'/api/efris/submit-invoice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({invoice:inv,config:{tin:CFG.tin,deviceNo:CFG.deviceNo,efrisPassword:CFG.efrisPassword,mode:CFG.sandbox?'sandbox':'production',businessName:CFG.legalName,tradeName:CFG.tradeName,businessAddress:CFG.address,brn:CFG.brn,phone:CFG.phone,email:CFG.email,vatRegistered:CFG.vatReg,enablerUrl:CFG.enablerUrl,enablerMode:CFG.enablerMode,enablerDeviceNo:CFG.enablerDeviceNo,efrisKeyPath:CFG.efrisKeyPath,efrisKeyPem:CFG.efrisKeyPem,efrisKeyPassphrase:CFG.efrisKeyPassphrase}})});
     const d=await r.json();
+    // URA itself reports the number as used (2253: same Seller's Reference Number already
+    // issued, e.g. issued from another computer): handled like the history's duplicate check.
+    if(!d.success&&!d.duplicateRef&&(String(d.returnCode||'')==='2253'||/2253|same Seller.s Reference Number have already been issued/i.test(String(d.error||'')))){
+      const m=String(d.error||'').match(/\((\d{10,})\)/); d.duplicateRef=true; d.existingFdn=m?m[1]:''; }
     // Same reference already waiting in the offline queue: do not record it in Manager
     // again, just keep watching the queued one.
     if(d.duplicateRef&&d.queued){ alert('This sale ('+(inv.Reference||'')+') is already saved offline and waiting for URA. It is sent automatically when URA is reachable; do not issue it again.'); [b1,b2].forEach(b=>{ if(b){ b.disabled=true; b.innerHTML=ic('refresh')+' Queued - waiting for URA'; } }); wkQueuePoll(d.offlineId, inv, window._wkRecordedKey||''); return; }
@@ -6717,7 +6728,8 @@ async function bulkStart(){
       running:SPIN,
       ok:'<span style="color:var(--g);">'+_g+'<path d="M20 6 9 17l-5-5"/></svg></span>',
       err:'<span style="color:var(--red);">'+_g+'<circle cx="12" cy="12" r="9"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></span>',
-      queued:ic('refresh')
+      queued:ic('refresh'),
+      skip:'<span style="color:var(--gray);">'+_g+'<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg></span>'
     };
     let h = '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
       + '<thead><tr style="background:var(--bg2);text-align:left;">'
@@ -6731,16 +6743,16 @@ async function bulkStart(){
       h += '<tr style="border-bottom:1px solid var(--bdr);">'
         + '<td style="padding:4px 8px;color:var(--gray);">'+(i+1)+'</td>'
         + '<td style="padding:4px 8px;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;">'+esc(r.id)+'</td>'
-        + '<td style="padding:4px 8px;">'+icons[r.status]+' '+esc(r.status)+'</td>'
+        + '<td style="padding:4px 8px;">'+icons[r.status]+' '+esc(r.status==='skip'?'skipped':r.status)+'</td>'
         + '<td style="padding:4px 8px;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;font-size:11px;">'+esc(r.fdn||'-')+'</td>'
-        + '<td style="padding:4px 8px;font-size:11px;color:'+(r.status==='err'?'var(--red)':r.status==='ok'?'#2e7d32':'var(--gray)')+';">'+esc(r.error||'')+'</td>'
+        + '<td style="padding:4px 8px;font-size:11px;color:'+(r.status==='err'?'var(--red)':r.status==='ok'?'var(--g)':'var(--gray)')+';">'+esc(r.error||'')+'</td>'
         + '</tr>';
     });
     h += '</tbody></table>';
     ht('bulkResults', h);
     const done=rows.filter(r=>r.status==='ok').length, errs=rows.filter(r=>r.status==='err').length, total=rows.length;
-    const qd=rows.filter(r=>r.status==='queued').length;
-    ht('bulkSummary', done+'/'+total+' succeeded'+(qd?' · '+qd+' waiting for URA':'')+(errs?' · '+errs+' failed':''));
+    const qd=rows.filter(r=>r.status==='queued').length, sk=rows.filter(r=>r.status==='skip').length;
+    ht('bulkSummary', done+'/'+total+' succeeded'+(sk?' · '+sk+' skipped (already fiscalised)':'')+(qd?' · '+qd+' waiting for URA':'')+(errs?' · '+errs+' failed':''));
   }
   renderBulkTable();
   const ep = CFG.managerEndpoint||MGR_EP, tk = CFG.accessToken||MGR_TK;
@@ -6790,14 +6802,16 @@ async function bulkStart(){
       const pmMap={'Cash':'102','Credit':'101','Debit Card':'106','Card':'106','Card (Visa/Mastercard)':'106','Mobile Money':'105','MTN Momo':'105','Airtel Pay':'105','Cheque':'103','Bank Transfer':'107','EFT':'107','POS':'108'};
       _payWays=[{mode:(mgrPM&&pmMap[mgrPM.trim()])||'102',amount:''}];
       // Check not already submitted
-      const existFDN=s['Fiscal Document Number']||s['EFRIS FDN']||'';
-      if(existFDN){ row.status='ok'; row.fdn=existFDN; row.error='Already submitted (FDN exists)'; renderBulkTable(); continue; }
+      const existFDN=s['FDN']||s['Fiscal Document Number']||s['EFRIS FDN']||'';
+      if(existFDN){ row.status='skip'; row.fdn=existFDN; row.error='Already fiscalised: skipped, nothing sent to URA'; renderBulkTable(); continue; }
       // Submit T109
       const payload={invoice:buildInv(),documentKey:key,managerEndpoint:ep,config:{tin:CFG.tin,deviceNo:CFG.deviceNo,efrisPassword:CFG.efrisPassword,mode:CFG.sandbox?'sandbox':'production',businessName:CFG.legalName,tradeName:CFG.tradeName,businessAddress:CFG.address,brn:CFG.brn,phone:CFG.phone,email:CFG.email,vatRegistered:CFG.vatReg,enablerUrl:CFG.enablerUrl,enablerMode:CFG.enablerMode,enablerDeviceNo:CFG.enablerDeviceNo,efrisKeyPath:CFG.efrisKeyPath,efrisKeyPem:CFG.efrisKeyPem,efrisKeyPassphrase:CFG.efrisKeyPassphrase}};
       const subR=await fetch(RELAY+'/api/efris/submit-invoice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       const subD=await subR.json();
       // URA unreachable: queued on the relay, which writes the FDN to this document later.
       if(subD.queued){ row.status='queued'; row.fdn=''; row.error=subD.duplicateRef?'Already queued, waiting for URA':'URA unreachable - queued, the FDN is saved to Manager automatically'; renderBulkTable(); try{ refreshOfflineBadge(); }catch(_){} if(i<rows.length-1) await new Promise(r=>setTimeout(r,800)); continue; }
+      // Already fiscalised (the history has this reference): skipped, as promised above.
+      if(subD.duplicateRef){ row.status='skip'; row.fdn=subD.existingFdn||''; row.error='Already fiscalised: skipped, nothing sent to URA'; renderBulkTable(); continue; }
       if(!subD.success) throw new Error(subD.error||'EFRIS rejected');
       // Save to Manager
       await fetch(RELAY+'/api/efris/save-to-manager',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({managerEndpoint:ep,accessToken:tk,documentKey:DKEY,vatRegistered:!!(CFG.vatReg),efrisData:{fdn:subD.fdn,qrCode:subD.qrCode,antifakeCode:subD.antifakeCode,deviceNo:subD.deviceNo,issuedDate:subD.issuedDate,invoiceId:subD.invoiceId,validationUrl:subD.validationUrl}})});
@@ -7487,7 +7501,7 @@ async function doPreview(invOverride){
       h+='</tr>';
     });
     h+='</table>';
-    h+='<div style="font-size:10px;color:#888;border-top:1px solid #eee;padding-top:8px;">This is a preview only - nothing has been submitted to URA.</div>';
+    h+='<div style="font-size:10px;color:var(--gray);border-top:1px solid #eee;padding-top:8px;">This is a preview only - nothing has been submitted to URA.</div>';
     ht('prevContent',h);
     $('prevModal').style.display='';
   }catch(e){ht('prevContent','<div class="al aw">Preview error: '+esc(e.message)+'</div>');$('prevModal').style.display='';}
@@ -7596,7 +7610,7 @@ function gApplyEfrisMode(){
 // The green stays - it's The Tukei Hope Initiative's brand, not EFRIS's.
 function applyBrandName(on){
   const name = on ? 'EFRISConnect' : 'Goods Configurator';
-  const sub  = on ? 'URA Electronic Fiscal Receipting & Invoicing' : 'Manager.io item & service setup';
+  const sub  = on ? 'Connect your business to EFRIS' : 'Manager.io item & service setup';
   const set=(id,txt)=>{ const el=$(id); if(el) el.textContent=txt; };
   set('brandName', name);
   set('brandSub', sub);
@@ -9763,7 +9777,7 @@ function appInit(){
     // LAN / self-host reached by hostname or IP: same trusted-cert method as
     // desktop - the relay serves HTTPS itself on :5443. No proxy needed.
     _extUrl='https://'+_loc.hostname+':5443/extension';
-    _extNote='LAN / server: run <strong>windows\\EFRISConnect.bat &rarr; option 2</strong> as administrator on this machine once (covers this host\'s name + LAN IP), and start it with <strong>option 8 (Start for shop network)</strong> so tills can reach it. Then on each till PC, copy the <strong>till-kit</strong> folder from the server data folder and run <strong>Trust EFRISConnect server.bat</strong> once (or launcher option 5). Use this HTTPS URL in Manager.';
+    _extNote='LAN / server: run EFRISConnect Setup on this computer and choose <strong>Shop server</strong>; then on each till run Setup and choose <strong>Till</strong>. Manual install instead: run <strong>windows\\EFRISConnect.bat &rarr; option 2</strong> as administrator on this machine once (covers this host\'s name + LAN IP), and start it with <strong>option 8 (Start for shop network)</strong> so tills can reach it. Then on each till PC, copy the <strong>till-kit</strong> folder from the server data folder and run <strong>Trust EFRISConnect server.bat</strong> once (or launcher option 5). Use this HTTPS URL in Manager.';
   }
   document.querySelectorAll('.extUrlDisplay').forEach(el=>{ el.textContent=_extUrl; });
   document.querySelectorAll('#extUrlNote').forEach(el=>{ el.innerHTML=_extNote; el.style.display=_extNote?'':'none'; });
@@ -9968,7 +9982,7 @@ function homeInit(){
   const ep=CFG.managerEndpoint||MGR_EP, tk=CFG.accessToken||MGR_TK;
   const ms=$('homeMgrStatus');
   if(!ep||!tk){ if(ms) ms.innerHTML='<span style="color:#f59e0b;">not configured</span>'; return; }
-  if(ms) ms.innerHTML='<span style="color:#888;">checking…</span>';
+  if(ms) ms.innerHTML='<span style="color:var(--gray);">checking…</span>';
   fetch(RELAY+'/api/goods/manager-items?ep='+encodeURIComponent(ep)+'&tk='+encodeURIComponent(tk)+'&limit=1')
     .then(r=>r.json())
     .then(d=>{ if(ms) ms.innerHTML=d.success?'<span style="color:#22c55e;">connected '+ic('check')+'</span>':'<span style="color:#ef4444;">error</span>'; })

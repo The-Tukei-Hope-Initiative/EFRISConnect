@@ -4,7 +4,7 @@ REM  EFRISConnect - URA EFRIS for Manager.io - all-in-one launcher
 REM  (Manager Desktop and Server/LAN editions)
 REM
 REM  Just double-click this file. It shows a menu:
-REM    1) Start EFRIS Connect        <- everyday use
+REM    1) Start EFRISConnect        <- everyday use
 REM    2) First-time HTTPS setup     <- run once (needs admin)
 REM    3) Start automatically at logon
 REM    4) Install as a Windows service (server/always-on, admin)
@@ -44,7 +44,7 @@ echo   EFRISConnect - URA EFRIS e-receipts and e-invoices for Manager.io
 echo   Free and open source, by The Tukei Hope Initiative
 echo ============================================================
 echo.
-echo   1)  Start EFRIS Connect            (use this every day)
+echo   1)  Start EFRISConnect            (use this every day)
 echo   2)  First-time HTTPS setup         (run once - admin)
 echo   3)  Start automatically at logon
 echo   4)  Install as Windows service     (server/always-on - admin)
@@ -75,7 +75,7 @@ REM ------------------------------------------------------------
 REM  1) Start the relay and open the extension in the browser
 REM ------------------------------------------------------------
 :do_start
-title EFRIS Connect
+title EFRISConnect
 REM EFRIS private key (Desktop/Server editions). Edit this path to match your setup.
 REM EFRIS private key: usually set per business in Settings > EFRIS Credentials. A key
 REM file path saved in the data folder (efris-key-path.txt) is used when present.
@@ -110,7 +110,7 @@ if not defined HAVEPFX (
 )
 
 echo.
-echo   Starting EFRIS Connect ...  (leave this window open; close it to stop)
+echo   Starting EFRISConnect ...  (leave this window open; close it to stop)
 echo   When you see "HTTPS running" below, it is ready. Point Manager's
 echo   EFRIS button Endpoint at:  %OPENURL%
 echo.
@@ -126,7 +126,7 @@ if defined OPEN_BROWSER if not "%OPEN_BROWSER%"=="0" (
 )
 node server.js
 echo.
-echo   EFRIS Connect stopped.
+echo   EFRISConnect stopped.
 pause
 goto menu
 
@@ -146,7 +146,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup-https.ps1" -Data
 echo.
 echo ============================================================
 echo   Offline HTTPS is ready.
-echo   1) Start EFRIS Connect (option 1) - watch for
+echo   1) Start EFRISConnect (option 1) - watch for
 echo        "HTTPS running at https://localhost:5443"
 echo   2) In Manager, set each EFRIS custom-button Endpoint to:
 echo        https://localhost:5443/extension
@@ -163,8 +163,8 @@ set "STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%STARTUP%\EFRISConnect.lnk');" ^
   "$s.TargetPath='%~f0'; $s.Arguments='start'; $s.WorkingDirectory='%~dp0';" ^
-  "$s.WindowStyle=7; $s.Description='EFRIS Connect relay'; $s.Save()"
-if errorlevel 1 ( echo   Could not create the auto-start shortcut. ) else ( echo   Auto-start installed - EFRIS Connect will launch at your next logon. )
+  "$s.WindowStyle=7; $s.Description='EFRISConnect relay'; $s.Save()"
+if errorlevel 1 ( echo   Could not create the auto-start shortcut. ) else ( echo   Auto-start installed - EFRISConnect will launch at your next logon. )
 echo.
 pause
 goto menu
@@ -270,9 +270,9 @@ if not "%errorlevel%"=="0" ( echo   Please run this step as Administrator. & pau
 where node >nul 2>nul
 if errorlevel 1 ( echo   Node.js not found - install it from https://nodejs.org first. & pause & exit /b 1 )
 node "%~dp0..\backend\reset-owner.js"
-echo   The code is in: %DATADIR%\EFRIS Connect setup code.txt
+echo   The code is in: %DATADIR%\EFRISConnect setup code.txt
 echo   Opening it now. Use it on THIS computer under "Forgot password".
-if exist "%DATADIR%\EFRIS Connect setup code.txt" start "" notepad "%DATADIR%\EFRIS Connect setup code.txt"
+if exist "%DATADIR%\EFRISConnect setup code.txt" start "" notepad "%DATADIR%\EFRISConnect setup code.txt"
 pause
 exit /b 0
 
@@ -281,7 +281,7 @@ REM  8) Start for shop network (LAN): tills on the same private
 REM     Wi-Fi/LAN reach this PC at https://HOSTNAME:5443/extension
 REM ------------------------------------------------------------
 :do_lan
-title EFRIS Connect - shop network
+title EFRISConnect - shop network
 where node >nul 2>nul
 if errorlevel 1 ( echo   Node.js was not found - install the LTS version from https://nodejs.org & pause & goto menu )
 set "HAVEPFX="
@@ -357,7 +357,7 @@ REM A click in this window must not pause the relay (QuickEdit selection).
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0no-quickedit.ps1"
 node server.js
 echo.
-echo   EFRIS Connect stopped.
+echo   EFRISConnect stopped.
 pause
 goto menu
 

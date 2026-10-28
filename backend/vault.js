@@ -106,7 +106,7 @@ function masterKey() {
     let k;
     try { k = Buffer.from(dpapi('Unprotect', fs.readFileSync(MASTER_DPAPI, 'utf8')), 'base64'); }
     catch (e) {
-      if (/ETIMEDOUT|timed out/i.test(String(e && (e.code || e.message)))) throw new Error('Windows took too long to unlock the vault key (PowerShell did not answer). Nothing is wrong with your credentials: close EFRIS Connect and start it again. Detail: ' + e.message);
+      if (/ETIMEDOUT|timed out/i.test(String(e && (e.code || e.message)))) throw new Error('Windows took too long to unlock the vault key (PowerShell did not answer). Nothing is wrong with your credentials: close EFRISConnect and start it again. Detail: ' + e.message);
       throw new Error('The vault master key could not be unlocked on this computer (it was created on another machine or Windows was reinstalled). Re-enter your credentials in Settings after moving ' + MASTER_DPAPI + ' and credentials_vault.json aside. Detail: ' + e.message);
     }
     if (k.length !== 32) throw new Error('The vault master key in ' + MASTER_DPAPI + ' is damaged.');

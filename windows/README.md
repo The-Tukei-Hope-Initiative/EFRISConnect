@@ -17,7 +17,7 @@ stop using launcher options 1 and 8.
 Double-click `EFRISConnect.bat`:
 
 ```
- 1)  Start EFRIS Connect            (use this every day)
+ 1)  Start EFRISConnect            (use this every day)
  2)  First-time HTTPS setup         (run once - admin)
  3)  Start automatically at logon
  4)  Install as Windows service     (server/always-on - admin)
@@ -48,7 +48,7 @@ browser that opens `http://localhost:3000` is redirected to port 5443.
    `localhost`, `127.0.0.1`, this PC's name, `PCNAME.local` and its IP addresses,
    trusts it on this computer, and writes `https.pfx` and `https_cert.cer` into
    the data folder. No internet needed. Valid 10 years.
-2. Option **1) Start EFRIS Connect**. Wait for `HTTPS running at
+2. Option **1) Start EFRISConnect**. Wait for `HTTPS running at
    https://localhost:5443/extension`. Leave the window open.
 3. In Manager, add the EFRISConnect custom buttons with that address.
 4. Open EFRISConnect from a button and create the owner account.

@@ -163,16 +163,16 @@ function compose(paras) {
 }
 const NOT_YOU = 'If this was not you:';
 const NOT_YOU_STEPS = [
-  'Sign in to EFRIS Connect and change your password (click your name at the top, then Change password).',
-  'If you cannot sign in, the owner can run "Reset owner password" in the EFRIS Connect launcher on the computer that runs EFRIS Connect.',
+  'Sign in to EFRISConnect and change your password (click your name at the top, then Change password).',
+  'If you cannot sign in, the owner can use "Reset owner password" in the EFRISConnect Control Centre (or the tray icon menu) on the computer that runs EFRISConnect.',
   'Check Settings > Users for accounts or roles you do not recognise, and disable them.',
 ];
-const FOOT = 'This is an automatic message from EFRIS Connect. Security alerts never contain passwords or codes, and nobody from EFRIS Connect will ask you to reply with one.';
+const FOOT = 'This is an automatic message from EFRISConnect. Security alerts never contain passwords or codes, and nobody from EFRISConnect will ask you to reply with one.';
 
 // Security alert subjects and what happened, by event.
 const EVENTS = {
   'reset-recovery': { subject: 'Password reset with a recovery code', what: c => 'The password for ' + c.who + ' was reset with a recovery code. A new recovery code was shown on screen.' },
-  'reset-owner-code': { subject: 'Owner password reset with a reset code', what: c => 'The password for ' + c.who + ' was reset with an owner reset code from the EFRIS Connect launcher. A new recovery code was shown on screen.' },
+  'reset-owner-code': { subject: 'Owner password reset with a reset code', what: c => 'The password for ' + c.who + ' was reset with an owner reset code from the EFRISConnect Control Centre. A new recovery code was shown on screen.' },
   'reset-email-code': { subject: 'Password reset with an emailed code', what: c => 'The password for ' + c.who + ' was reset with a code sent by email. A new recovery code was shown on screen.' },
   'password-changed': { subject: 'Password changed', what: c => c.who + ' changed their password.' },
   'password-reset-admin': { subject: 'Password reset by an admin', what: c => c.actor + ' set a new password for ' + c.who + '.' },
@@ -182,15 +182,15 @@ const EVENTS = {
   'role-admin': { subject: 'User made an admin', what: c => c.actor + ' made ' + c.who + ' an Admin' + (c.detail ? ' of ' + c.detail : '') + '. An admin can change settings and manage users.' },
   'owner-created': { subject: 'Owner account created', what: c => (c.actor ? c.actor + ' created the owner account ' + c.who + '.' : 'The owner account ' + c.who + ' was created.') },
   'email-changed': { subject: 'Email address changed', what: c => 'The email address for ' + c.who + ' was changed' + (c.actor ? ' by ' + c.actor : '') + '. Sign-in codes and alerts now go to the new address.' },
-  'single-user-on': { subject: 'Single-user mode turned on', what: c => (c.actor ? c.actor + ' turned on' : 'Someone turned on') + ' single-user mode. EFRIS Connect now opens without sign-in, as ' + c.who + ', on the computer that runs it. Every other computer still has to sign in.' },
-  'single-user-off': { subject: 'Single-user mode turned off', what: c => (c.actor ? c.actor + ' turned off' : 'EFRIS Connect turned off') + ' single-user mode' + (c.detail ? ' (' + c.detail + ')' : '') + '. Everyone has to sign in again, also on the computer that runs EFRIS Connect.' },
-  'reset-code-generated': { subject: 'Owner reset code generated', what: c => 'Someone ran "Reset owner password" on the computer that runs EFRIS Connect' + (c.host ? ' (' + c.host + ')' : '') + '. A one-time reset code, valid 24 hours, was written to the data folder there. It works only on that computer.' },
+  'single-user-on': { subject: 'Single-user mode turned on', what: c => (c.actor ? c.actor + ' turned on' : 'Someone turned on') + ' single-user mode. EFRISConnect now opens without sign-in, as ' + c.who + ', on the computer that runs it. Every other computer still has to sign in.' },
+  'single-user-off': { subject: 'Single-user mode turned off', what: c => (c.actor ? c.actor + ' turned off' : 'EFRISConnect turned off') + ' single-user mode' + (c.detail ? ' (' + c.detail + ')' : '') + '. Everyone has to sign in again, also on the computer that runs EFRISConnect.' },
+  'reset-code-generated': { subject: 'Owner reset code generated', what: c => 'Someone ran "Reset owner password" on the computer that runs EFRISConnect' + (c.host ? ' (' + c.host + ')' : '') + '. A one-time reset code, valid 24 hours, was written to the data folder there. It works only on that computer.' },
 };
 
 function describeUser(u) { return u ? '"' + (u.name || '') + '"' + (u.displayName && u.displayName !== u.name ? ' (' + u.displayName + ')' : '') : 'an account'; }
 function fromLine(ctx) {
   if (ctx.computer) return ctx.computer;
-  if (ctx.local) return 'the computer that runs EFRIS Connect (this relay)';
+  if (ctx.local) return 'the computer that runs EFRISConnect (this relay)';
   if (ctx.ip) return 'another computer, network address ' + ctx.ip;
   return 'unknown';
 }
@@ -212,8 +212,8 @@ function alert(event, ctx) {
     const lines = ['What happened: ' + ev.what(c), 'When: ' + eatTime(ctx.time)];
     if (ctx.business) lines.push('Business: ' + ctx.business);
     lines.push('From: ' + fromLine(ctx));
-    const body = compose(['EFRIS Connect security alert', lines.join('\n'), NOT_YOU, NOT_YOU_STEPS, FOOT]);
-    const subject = 'EFRIS Connect: ' + ev.subject;
+    const body = compose(['EFRISConnect security alert', lines.join('\n'), NOT_YOU, NOT_YOU_STEPS, FOOT]);
+    const subject = 'EFRISConnect: ' + ev.subject;
     const out = [];
     const seen = new Set();
     const to = (addr, who) => {
@@ -232,21 +232,21 @@ function alert(event, ctx) {
 // The one-time code for "Email me a code" / an admin's "Email a code to the user".
 function sendCode(user, code, ctx) {
   ctx = ctx || {};
-  const asked = ctx.byAdmin ? ctx.byAdmin + ' asked EFRIS Connect to send you this code so you can set a new password.' : 'Someone (hopefully you) asked for a code to set a new password for EFRIS Connect.';
+  const asked = ctx.byAdmin ? ctx.byAdmin + ' asked EFRISConnect to send you this code so you can set a new password.' : 'Someone (hopefully you) asked for a code to set a new password for EFRISConnect.';
   const body = compose([
-    'EFRIS Connect password code',
+    'EFRISConnect password code',
     asked,
     'Your code: ' + code,
-    'It works once and is valid for 30 minutes. Open EFRIS Connect, click "Forgot password?", type your sign-in name (' + (user.name || '') + '), this code and a new password.',
+    'It works once and is valid for 30 minutes. Open EFRISConnect, click "Forgot password?", type your sign-in name (' + (user.name || '') + '), this code and a new password.',
     'When: ' + eatTime(ctx.time) + '\nFrom: ' + fromLine(ctx),
     'If you did not ask for this, ignore this email: your password stays as it is. If it happens again, tell the owner.',
   ]);
-  return queue({ to: user.email, subject: 'EFRIS Connect: your password code', text: body.text, html: body.html }, 'password code', 'user ' + user.name);
+  return queue({ to: user.email, subject: 'EFRISConnect: your password code', text: body.text, html: body.html }, 'password code', 'user ' + user.name);
 }
 
 function testMessage(to) {
-  const body = compose(['EFRIS Connect test email', 'Email from EFRIS Connect works. Sign-in codes and security alerts will be sent from this address.', 'Sent: ' + eatTime() + ' from ' + os.hostname() + '.']);
-  return { to, subject: 'EFRIS Connect: test email', text: body.text, html: body.html };
+  const body = compose(['EFRISConnect test email', 'Email from EFRISConnect works. Sign-in codes and security alerts will be sent from this address.', 'Sent: ' + eatTime() + ' from ' + os.hostname() + '.']);
+  return { to, subject: 'EFRISConnect: test email', text: body.text, html: body.html };
 }
 
 // Learn the saved password for the activity masker (called once the vault unlocks).

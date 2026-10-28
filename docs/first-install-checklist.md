@@ -106,7 +106,7 @@ when the internet returns.
 - [ ] Click an EFRISConnect button in Manager **on the server or main PC first**.
 - [ ] **Create the owner account.** Save the **recovery code** (download or print it).
       From another computer the setup code is needed; it is in
-      `C:\ProgramData\EFRISConnect\data\EFRIS Connect setup code.txt`.
+      `C:\ProgramData\EFRISConnect\data\EFRISConnect setup code.txt`.
 - [ ] **Setup wizard:**
   - EFRIS: TIN, device number, EFRIS password, private key (paste the PEM content,
     or a file path), Sandbox **on**.

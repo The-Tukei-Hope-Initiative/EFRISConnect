@@ -66,7 +66,7 @@ function printStatus() {
       '   Enabler ' + (st.enabler === undefined || st.enabler === null ? C.dim + 'not used' + C.off : dot(st.enabler) + (st.enabler ? 'ready' : 'not answering') + C.off) +
       '   Queue ' + (st.queue || 0),
     ...(st.setupCode ? [C.amber + 'Setup    ' + C.bold + st.setupCode + C.off + C.amber + '   one-time code to create the owner account from another computer' + C.off,
-      C.dim + '         (on this PC, open EFRIS Connect in Manager: no code needed)' + C.off] : []),
+      C.dim + '         (on this PC, open EFRISConnect in Manager: no code needed)' + C.off] : []),
     C.dim + 'Keys: O open  L LAN address  C copy Manager URL  S status  D debug ' + (debug ? 'off' : 'on') + '  Q quit' + C.off,
     '',
   ];

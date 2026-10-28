@@ -147,7 +147,7 @@ describe('security alerts', () => {
     expect((await c.post('/api/auth/users/' + id, { disabled: true })).body.success).toBe(true);
     await idle();
     const subj = sent.map(m => m.subject);
-    expect(subj).toEqual(expect.arrayContaining(['EFRIS Connect: Password reset by an admin', 'EFRIS Connect: User made an admin', 'EFRIS Connect: User disabled']));
+    expect(subj).toEqual(expect.arrayContaining(['EFRISConnect: Password reset by an admin', 'EFRISConnect: User made an admin', 'EFRISConnect: User disabled']));
     const role = sent.find(m => /made an admin/.test(m.subject));
     expect(role.text).toMatch(/an Admin of Shop A/);
     expect(role.text).toMatch(/Business: Shop A/);
@@ -277,7 +277,7 @@ describe('admin: Email a code to the user', () => {
     expect(r.body.success).toBe(true);
     await idle();
     expect(sent.map(m => m.to)).toEqual(['cash@example.com']);
-    expect(sent[0].text).toMatch(/"boss" asked EFRIS Connect to send you this code/);
+    expect(sent[0].text).toMatch(/"boss" asked EFRISConnect to send you this code/);
     expect((await c.post('/api/auth/users/' + userId('admin-a') + '/email-code', {})).status).toBe(400);
     const cash = await relay.addUser('cash-c', { [A]: 'cashier' });
     expect((await relay.as(cash, { 'X-Tenant-Id': A }).post('/api/auth/users/' + userId('cash-a') + '/email-code', {})).status).toBe(403);

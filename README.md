@@ -154,7 +154,7 @@ the install, Manager, tills, testing, and common errors with fixes.
 
 1. Open EFRISConnect from the Manager button on the computer that runs the relay.
 2. Create the owner account. From another computer you need the one-time setup
-   code, which the relay writes to `EFRIS Connect setup code.txt` in its data folder.
+   code, which the relay writes to `EFRISConnect setup code.txt` in its data folder.
 3. Save the recovery code shown after the account is created. It resets a
    forgotten password. Five wrong passwords lock an account for 15 minutes.
 4. Enter the business details, the EFRIS credentials (TIN, device number, private

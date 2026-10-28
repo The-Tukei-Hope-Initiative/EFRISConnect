@@ -298,7 +298,7 @@ switch ($Action) {
 
   'reset-owner' {
     & $Node (Join-Path $AppDir 'backend\reset-owner.js')
-    $f = Join-Path $DataDir 'EFRIS Connect setup code.txt'
+    $f = Join-Path $DataDir 'EFRISConnect setup code.txt'
     if (Test-Path $f) { Start-Process notepad.exe -ArgumentList "`"$f`"" }
   }
 

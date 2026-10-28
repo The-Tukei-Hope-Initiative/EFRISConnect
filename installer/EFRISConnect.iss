@@ -84,7 +84,12 @@ Filename: "{autoprograms}\EFRISConnect\EFRISConnect.url"; Section: "InternetShor
 Filename: "{autoprograms}\EFRISConnect\EFRISConnect.url"; Section: "InternetShortcut"; Key: "IconFile"; String: "{app}\efrisconnect.ico"; Check: not IsTill
 Filename: "{autoprograms}\EFRISConnect\EFRISConnect.url"; Section: "InternetShortcut"; Key: "IconIndex"; String: "0"; Check: not IsTill
 Filename: "{autoprograms}\EFRISConnect\Open Manager.url"; Section: "InternetShortcut"; Key: "URL"; String: "https://localhost:{code:MgrHttpsPort}"; Check: IsServer
+Filename: "{autoprograms}\EFRISConnect\Open Manager.url"; Section: "InternetShortcut"; Key: "IconFile"; String: "{app}\efrisconnect.ico"; Check: IsServer
+Filename: "{autoprograms}\EFRISConnect\Open Manager.url"; Section: "InternetShortcut"; Key: "IconIndex"; String: "0"; Check: IsServer
+; The till's link to Manager on the shop server (it showed the browser's blank page icon).
 Filename: "{commondesktop}\Manager (shop).url"; Section: "InternetShortcut"; Key: "URL"; String: "{code:TillManagerUrl}"; Check: IsTill
+Filename: "{commondesktop}\Manager (shop).url"; Section: "InternetShortcut"; Key: "IconFile"; String: "{app}\efrisconnect.ico"; Check: IsTill
+Filename: "{commondesktop}\Manager (shop).url"; Section: "InternetShortcut"; Key: "IconIndex"; String: "0"; Check: IsTill
 
 [InstallDelete]
 ; The shortcut was renamed in 1.0.8.

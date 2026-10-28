@@ -76,7 +76,7 @@ Restart the relay. The console shows `HTTPS running at https://localhost:5443/ex
 1. Open EFRISConnect from the Manager button (or the address above) on the
    computer that runs the relay.
 2. Create the owner account. From another computer, enter the one-time setup code
-   from `EFRIS Connect setup code.txt` in the data folder (valid 24 hours).
+   from `EFRISConnect setup code.txt` in the data folder (valid 24 hours).
 3. Save the recovery code.
 4. Enter the business details, EFRIS credentials (TIN, device number, private key)
    and the Manager endpoint and access token. Auto-detect finds Manager Desktop's

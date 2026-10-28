@@ -608,7 +608,7 @@ app.get('/api/auth/status', (req, res) => {
       const s = auth.createSession(o.id, false, { localAuto: true });
       user = auth.getUser(o.id);
       auto = { autoToken: s.token, autoExpiresAt: s.expiresAt };
-      console.log('   Sign-in: single-user mode opened EFRIS Connect as "' + o.name + '" on this computer');
+      console.log('   Sign-in: single-user mode opened EFRISConnect as "' + o.name + '" on this computer');
     }
   }
   const tenants = user ? tenantsOf(user) : [];
@@ -625,7 +625,7 @@ app.post('/api/auth/setup', rateLimit(10), (req, res) => {
   const b = req.body || {};
   if (auth.hasUsers()) return res.status(409).json({ success: false, error: 'The owner account already exists. Sign in instead.' });
   if (!isLocalRequest(req) && !auth.checkSetupCode(b.setupCode)) {
-    return res.status(403).json({ success: false, error: 'The setup code is wrong or has expired. It is shown in the EFRIS Connect window on the server.', setupCodeRequired: true });
+    return res.status(403).json({ success: false, error: 'The setup code is wrong or has expired. It is shown in the EFRISConnect window on the server.', setupCodeRequired: true });
   }
   let out;
   try { out = auth.createOwner({ name: b.name, displayName: b.displayName, password: b.password }); }
@@ -836,13 +836,13 @@ app.post('/api/admin/email/test', async (req, res) => {
 });
 
 // ── Single-user mode (Settings > Users, owner only) ──
-// For Manager Desktop on one PC: EFRIS Connect opens without sign-in on the
+// For Manager Desktop on one PC: EFRISConnect opens without sign-in on the
 // computer that runs it. Requests from any other computer still sign in. It is
 // refused while the relay can be reached from other computers (LAN mode or a
 // non-loopback bind) and turned off at start if that has changed since.
 function singleUserBlockReason() {
   if (LAN_MODE) return 'shop network (LAN) mode is on';
-  if (!BIND_IS_LOOPBACK) return 'EFRIS Connect is reachable from other computers (BIND_HOST=' + BIND_HOST + ')';
+  if (!BIND_IS_LOOPBACK) return 'EFRISConnect is reachable from other computers (BIND_HOST=' + BIND_HOST + ')';
   return '';
 }
 function singleUserRec() { try { return vault.getRelay('singleUser', []) || {}; } catch (_) { return {}; } }
@@ -864,7 +864,7 @@ app.post('/api/admin/single-user', (req, res) => {
   const b = req.body || {};
   if (typeof b.enabled !== 'boolean') return res.status(400).json({ success: false, error: 'Say whether single-user mode is on or off.' });
   const blocked = singleUserBlockReason();
-  if (b.enabled && blocked) return res.status(409).json(Object.assign(singleUserView(), { success: false, error: 'Single-user mode cannot be turned on while ' + blocked + ': people on other computers would still sign in, but it is only meant for one PC. Leave it off when tills or other computers use EFRIS Connect.' }));
+  if (b.enabled && blocked) return res.status(409).json(Object.assign(singleUserView(), { success: false, error: 'Single-user mode cannot be turned on while ' + blocked + ': people on other computers would still sign in, but it is only meant for one PC. Leave it off when tills or other computers use EFRISConnect.' }));
   const was = !!singleUserRec().enabled;
   const me = req.auth && !req.auth.service ? auth.getUser(req.auth.id) : null;
   try {
@@ -874,7 +874,7 @@ app.post('/api/admin/single-user', (req, res) => {
   if (!b.enabled) auth.revokeLocalAutoSessions();
   if (was !== b.enabled) {
     const o = singleUserOwner();
-    console.log('   Security: single-user mode turned ' + (b.enabled ? 'ON' : 'OFF') + ' by ' + actorText(req) + (b.enabled ? ': EFRIS Connect opens without sign-in as "' + (o ? o.name : '?') + '" on this computer; other computers still sign in' : ': everyone signs in again'));
+    console.log('   Security: single-user mode turned ' + (b.enabled ? 'ON' : 'OFF') + ' by ' + actorText(req) + (b.enabled ? ': EFRISConnect opens without sign-in as "' + (o ? o.name : '?') + '" on this computer; other computers still sign in' : ': everyone signs in again'));
     securityAlert(b.enabled ? 'single-user-on' : 'single-user-off', req, { user: o, actor: actorText(req) });
   }
   res.json(singleUserView());
@@ -887,7 +887,7 @@ app.post('/api/admin/single-user', (req, res) => {
     vault.putRelay('singleUser', { enabled: false, autoDisabledAt: new Date().toISOString(), autoDisabledReason: blocked }, []);
     auth.revokeLocalAutoSessions();
     console.log('   ⚠ Single-user mode was turned OFF because ' + blocked + '. Everyone signs in, also on this computer.');
-    mailer.alert('single-user-off', { owners: auth.listOwners(), user: singleUserOwner(), detail: 'turned off at start because ' + blocked, computer: 'the computer that runs EFRIS Connect (at start)' });
+    mailer.alert('single-user-off', { owners: auth.listOwners(), user: singleUserOwner(), detail: 'turned off at start because ' + blocked, computer: 'the computer that runs EFRISConnect (at start)' });
   } catch (e) { console.log('   ⚠ Single-user mode could not be turned off: ' + e.message); }
 })();
 
@@ -3978,6 +3978,9 @@ app.post('/api/manager/create-receipt', async (req, res) => {
     form.QuantityColumn = true;
     form.UnitPriceColumn = true;
     form.HasLineDescription = true;
+    // The line prices are tax-inclusive (as sent to URA). Say so on the receipt: without
+    // the flag a reader of the receipt (a reprint rebuilt from Manager) added VAT on top.
+    form.AmountsIncludeTax = true;
     // Theme: Manager applies Form Defaults only in its own screens, and its API has
     // no Form Defaults endpoint, so set the theme on the receipt itself. Manager
     // needs both the "Custom theme" tick and WHICH theme (CustomThemeId). Use the
@@ -9173,7 +9176,7 @@ function networkBindProblem(o) {
   const missing = [];
   if (!o.allowedHosts || !o.allowedHosts.length) missing.push('ALLOWED_HOSTS=<the name other computers use to reach this relay>');
   if (!o.https && !o.trustProxy) missing.push('HTTPS (run the HTTPS setup to create https.pfx in the data folder, or put the relay behind a TLS reverse proxy and set TRUST_PROXY)');
-  return missing.length ? 'BIND_HOST=' + o.bindHost + ' makes EFRIS Connect reachable from other computers, but this is missing: ' + missing.join('; and ') + '. Set it and start again, or remove BIND_HOST to use this computer only.' : '';
+  return missing.length ? 'BIND_HOST=' + o.bindHost + ' makes EFRISConnect reachable from other computers, but this is missing: ' + missing.join('; and ') + '. Set it and start again, or remove BIND_HOST to use this computer only.' : '';
 }
 
 // ── Start HTTP server (only when run directly, not during tests) ──────────
@@ -9184,7 +9187,7 @@ else if (require.main === module) {
   // First run: no account yet. A one-time code lets the owner be created from
   // another computer; on this PC no code is needed.
   let setupCode = null;
-  try { const sc = auth.ensureSetupCode(); if (sc) setupCode = sc.code; if (sc) console.log('   No account yet. Open EFRIS Connect in Manager on this PC to create the owner account' + (sc.file ? ' (from another computer, use the setup code shown below; it is also saved in ' + sc.file + ')' : '') + '.'); }
+  try { const sc = auth.ensureSetupCode(); if (sc) setupCode = sc.code; if (sc) console.log('   No account yet. Open EFRISConnect in Manager on this PC to create the owner account' + (sc.file ? ' (from another computer, use the setup code shown below; it is also saved in ' + sc.file + ')' : '') + '.'); }
   catch (e) { console.log('   ⚠ Could not prepare the setup code: ' + e.message); }
   // Log retention: remove day log files older than LOG_RETENTION_DAYS (default 90), now and daily.
   const pruneLogs = () => {

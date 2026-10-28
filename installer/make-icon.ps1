@@ -1,12 +1,12 @@
 # EFRISConnect - build the application icon (installer\efrisconnect.ico) from the
-# brand kit's app mark (brand\EFRISConnect_Brand_Kit_v1.2\04_PNG\efrisconnect-app.png,
+# brand kit's app mark (brand\EFRISConnect_Brand_Kit\04_PNG\efrisconnect-app.png,
 # 2400 px): the same interlocked EC at every size, 16 px included, scaled down in
 # halving steps so small sizes stay sharp.
 # 16 to 128 px are stored as 32-bit bitmaps, 256 px as PNG: the layout every reader
 # accepts (.NET's Icon class, used by the tray icon, fails on small PNG frames).
 #   powershell -ExecutionPolicy Bypass -File installer\make-icon.ps1 [-Kit <brand kit folder>]
 param(
-  [string]$Kit = (Join-Path (Split-Path -Parent $PSScriptRoot) 'brand\EFRISConnect_Brand_Kit_v1.2'),
+  [string]$Kit = (Join-Path (Split-Path -Parent $PSScriptRoot) 'brand\EFRISConnect_Brand_Kit'),
   [string]$Out = (Join-Path $PSScriptRoot 'efrisconnect.ico'),
   [string]$PreviewDir = ''
 )

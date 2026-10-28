@@ -11,7 +11,7 @@
 //                relay restart keeps "remember this computer" sessions.
 // owner-reset.json  a hashed one-time owner reset code written by reset-owner.js.
 //                Kept apart from users.json so the CLI never races the relay.
-// EFRIS Connect setup code.txt  the plaintext setup or reset code for the person
+// EFRISConnect setup code.txt  the plaintext setup or reset code for the person
 //                at the server (DATA_DIR is restricted to admins and the service).
 //
 // All files live in DATA_DIR, are written atomically, and a file that exists but
@@ -26,7 +26,10 @@ const { writeDurable, readJsonDurable } = require('./safe-file');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const RESET_FILE = path.join(DATA_DIR, 'owner-reset.json');
-const CODE_FILE = path.join(DATA_DIR, 'EFRIS Connect setup code.txt');
+const CODE_FILE = path.join(DATA_DIR, 'EFRISConnect setup code.txt');
+// The same file under its name before 1.0.28; removed whenever the code file is.
+const OLD_CODE_FILE = path.join(DATA_DIR, 'EFRIS Connect setup code.txt');
+function removeCodeFiles() { for (const f of [CODE_FILE, OLD_CODE_FILE]) { try { fs.rmSync(f, { force: true }); } catch (_) {} } }
 
 const SCRYPT = { N: 16384, r: 8, p: 1 };
 const MIN_PASSWORD = 8;
@@ -129,8 +132,9 @@ const normWordCode = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]+/g, '
 
 function writeCodeFile(code, what) {
   const text = what === 'reset'
-    ? 'EFRIS Connect owner password reset code (one use, valid 24 hours). Enter it under "Forgot password" on the relay\'s own computer.\r\n\r\n' + code + '\r\n'
-    : 'EFRIS Connect setup code (one use, valid 24 hours). Enter it in "Create the owner account" when you are not on the relay\'s own computer.\r\n\r\n' + code + '\r\n';
+    ? 'EFRISConnect owner password reset code (one use, valid 24 hours). Enter it under "Forgot password" on the relay\'s own computer.\r\n\r\n' + code + '\r\n'
+    : 'EFRISConnect setup code (one use, valid 24 hours). Enter it in "Create the owner account" when you are not on the relay\'s own computer.\r\n\r\n' + code + '\r\n';
+  try { fs.rmSync(OLD_CODE_FILE, { force: true }); } catch (_) {}
   writeFileAtomic(CODE_FILE, text);
   return CODE_FILE;
 }
@@ -211,7 +215,7 @@ function createOwner({ name, displayName, password }) {
   db.users.push(u);
   delete db.setup;   // single use
   saveDb(db);
-  try { if (fs.existsSync(CODE_FILE)) fs.rmSync(CODE_FILE, { force: true }); } catch (_) {}
+  removeCodeFiles();
   return { user: publicUser(u), recoveryCode };
 }
 
@@ -333,7 +337,7 @@ function recover(name, code, newPassword, opts) {
   const recoveryCode = newRecoveryCode();
   u.recoveryHash = hashSecret(normRecovery(recoveryCode));   // the old code is spent
   saveDb(db);
-  if (usedReset) { try { fs.rmSync(RESET_FILE, { force: true }); fs.rmSync(CODE_FILE, { force: true }); } catch (_) {} }
+  if (usedReset) { try { fs.rmSync(RESET_FILE, { force: true }); } catch (_) {} removeCodeFiles(); }
   revokeUserSessions(u.id);
   const s = createSession(u.id, false);
   const method = usedReset ? 'reset' : usedEmail ? 'email' : 'recovery';
@@ -381,7 +385,7 @@ function setOwnEmail(userId, current, email) {
 function writeResetCode(ownerName) {
   const db = loadDb();
   const owners = db.users.filter(u => u.owner);
-  if (!owners.length) throw new Error('There is no owner account yet. Start EFRIS Connect and create it in Manager.');
+  if (!owners.length) throw new Error('There is no owner account yet. Start EFRISConnect and create it in Manager.');
   let userId = null;
   if (ownerName) {
     const u = owners.find(x => normName(x.name) === normName(ownerName));
