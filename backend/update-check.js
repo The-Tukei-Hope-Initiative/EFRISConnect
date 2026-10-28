@@ -19,7 +19,14 @@ function newer(a, b) {
   for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); }
   return false;
 }
-function isSecurity(notes) { return /\[security\]|^\s*security update/im.test(String(notes || '')); }
+// A security update for this installation. Notes that name who needs it ("Security
+// update for anyone on 1.0.17 or earlier") count only for those versions.
+function isSecurity(notes, version) {
+  const t = String(notes || '');
+  if (!/\[security\]|^\s*security update/im.test(t)) return false;
+  const m = /^\s*security update for anyone on v?(\d+(?:\.\d+)*) or earlier/im.exec(t);
+  return !(m && version && newer(version, m[1]));
+}
 
 function create({ dataDir, version, log, get }) {
   const file = path.join(dataDir, 'update_check.json');
@@ -43,7 +50,7 @@ function create({ dataDir, version, log, get }) {
     try {
       const rel = await fetchJson(RELEASES);
       const latest = String(rel.tag_name || '').replace(/^v/i, '');
-      Object.assign(s, { latest, security: isSecurity(rel.body), url: rel.html_url || '', checkedAt: new Date().toISOString() });
+      Object.assign(s, { latest, security: isSecurity(rel.body, version), url: rel.html_url || '', checkedAt: new Date().toISOString() });
       if (latest && newer(latest, version)) {
         const again = s.security && (!s.announcedAt || Date.now() - Date.parse(s.announcedAt) > DAY - 60000);
         if (s.announced !== latest || again) {

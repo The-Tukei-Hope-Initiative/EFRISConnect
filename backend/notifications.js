@@ -17,6 +17,8 @@ const RULES = [
     title: () => 'Credit note updated in Manager', body: m => `FDN ${m[2]} of credit note ${m[1]} was written to the Manager credit note.` },
   { re: /Credit note (\S+): no Manager credit note with reference (.+); not written/, kind: 'credit-not-written', level: 'warning', perm: 'credit',
     title: () => 'Credit note not found in Manager', body: m => `URA approved ${m[1]}, but no Manager credit note has the reference ${m[2]}. Create it in Manager with that reference; EFRISConnect will then fill in the FDN.` },
+  { re: /Cancellation request (\S+) for (\S+) is now (.+) at URA/, kind: 'cancel-status', level: 'info', perm: 'credit',
+    title: m => 'Cancellation request ' + m[3].toLowerCase(), body: m => `URA's answer to cancellation request ${m[1]} for ${m[2]}: ${m[3]}.` },
   { re: /Offline queue: (\d+) queued document\(s\) fiscalised automatically(?: \(([^)]*)\))?: (.+)/, kind: 'queue-sent', level: 'success', perm: 'queue',
     title: () => 'Sales saved offline were sent to URA', body: m => `${m[1]} sale${m[1] === '1' ? '' : 's'} saved offline received an FDN: ${m[3]}.` },
   { re: /Offline queue: (\S+) was rejected by URA \((.+)\)/, kind: 'queue-rejected', level: 'critical', perm: 'queue',
@@ -31,12 +33,13 @@ const RULES = [
     title: m => 'Offline Enabler ' + (m[2] ? m[1] + ' failed' : m[1] === 'stop' ? 'stopped' : 'started'), body: m => m[2] || 'Done.' },
 ];
 // The document a notification is about, to open it in Documents.
-const REFS = { 'credit-approved': m => m[1], 'credit-status': m => m[1], 'credit-written': m => m[1], 'credit-not-written': m => m[1],
+const REFS = { 'credit-approved': m => m[1], 'credit-status': m => m[1], 'credit-written': m => m[1], 'credit-not-written': m => m[1], 'cancel-status': m => m[2],
   'queue-sent': m => String(m[3]).split(' ')[0], 'queue-rejected': m => m[1] };
 RULES.forEach(r => {
   if (REFS[r.kind]) r.ref = REFS[r.kind];
   if (r.kind === 'enabler') r.levelFor = m => (m[2] ? 'critical' : 'info');
   if (r.kind === 'update') { r.levelFor = m => (m[2] ? 'critical' : 'info'); r.link = m => m[3]; }
+  if (r.kind === 'cancel-status') r.levelFor = m => (/reject/i.test(m[3]) ? 'critical' : 'info');
   if (r.kind === 'credit-status') r.levelFor = m => (/reject|fail|cancel/i.test(m[2]) ? 'critical' : 'info');
 });
 
@@ -82,7 +85,10 @@ function create(opts) {
     for (const day of activity.listDays()) {
       for (const n of forDay(day)) if ((n.tenantId === tenantId || !n.tenantId) && mayRead(n.perm)) out.push(n);
     }
-    return out.sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0));
+    out.sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0));
+    // "Not found in Manager" was logged on every retry before 1.0.24: keep the newest per credit note.
+    const once = new Set();
+    return out.filter(n => n.kind !== 'credit-not-written' || (!once.has(n.ref) && once.add(n.ref)));
   }
 
   function loadState() { try { return JSON.parse(fs.readFileSync(readFile, 'utf8')) || {}; } catch (_) { return {}; } }

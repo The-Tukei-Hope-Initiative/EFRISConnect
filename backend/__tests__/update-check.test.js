@@ -18,6 +18,13 @@ test('security releases are recognised from their notes', () => {
   expect(isSecurity('Security update: please install')).toBe(true);
   expect(isSecurity('New: notification centre')).toBe(false);
 });
+test('a security update for "1.0.17 or earlier" counts only for those versions', () => {
+  const notes = 'Download it.\n\nSecurity update for anyone on 1.0.17 or earlier: Node.js 24.22.1.';
+  expect(isSecurity(notes, '1.0.17')).toBe(true);
+  expect(isSecurity(notes, '1.0.9')).toBe(true);
+  expect(isSecurity(notes, '1.0.18')).toBe(false);
+  expect(isSecurity(notes, '1.0.22')).toBe(false);
+});
 test('a newer release is announced once', async () => {
   const lines = []; const u = create({ dataDir: tmp(), version: '1.0.7', log: t => lines.push(t), get: release('v1.0.8', 'New things') });
   const s = await u.check(true);

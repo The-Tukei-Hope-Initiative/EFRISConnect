@@ -245,7 +245,7 @@
   /* Inputs - rounder, softer border, refined focus ring, comfortable size */
   .fg{margin-bottom:13px;}
   .fg input,.fg select,.fg textarea{width:100%;border:1px solid var(--line);border-radius:9px;padding:11px 13px;font-size:14px;line-height:1.35;background:#fff;transition:border-color .15s ease, box-shadow .15s ease;}
-  .fg select{min-height:42px;}
+  .fg select{min-height:42px;-webkit-appearance:none;appearance:none;padding-right:38px;cursor:pointer;background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") no-repeat right 13px center;}
   .fg input:focus,.fg select:focus,.fg textarea:focus{border-color:var(--g);box-shadow:0 0 0 3px var(--ring);}
   .fg label{color:var(--txtl);letter-spacing:.5px;font-size:11px;margin-bottom:4px;}
   .fg .hint{font-size:11px;}
@@ -979,7 +979,18 @@
   </div>
 
   <div id="tStat" class="hidden">
-    <div class="card"><div class="ct"><span class="ico-emoji"><span class="ico" data-icon="clip"></span></span><svg class="ico-svg" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg> EFRIS Status</div><div id="statCont"><div style="color:var(--gray);font-size:11px;text-align:center;padding:14px;">Open an invoice to see its status</div></div></div>
+    <div class="card">
+      <div class="ct"><span class="ico" data-icon="search"></span> Check a document</div>
+      <p style="font-size:12px;color:var(--gray);margin:0 0 10px;">Enter an FDN or a receipt / invoice number to see whether URA has it, its verification code, any credit or debit notes against it, and whether the FDN reached Manager.</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <div style="flex:1;min-width:200px;display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:10px;padding:9px 12px;background:#fff;transition:border-color .15s,box-shadow .15s;" onfocusin="this.style.borderColor='var(--g)';this.style.boxShadow='0 0 0 3px var(--ring)';" onfocusout="this.style.borderColor='var(--line)';this.style.boxShadow='none';">
+          <span class="ico" data-icon="search" style="color:var(--gray);flex-shrink:0;"></span>
+          <input id="chkDocQ" placeholder="FDN or receipt / invoice number" onkeydown="if(event.key==='Enter')checkDocument()" style="flex:1;border:none;outline:none;background:transparent;font-size:13px;padding:0;min-width:0;"/>
+        </div>
+        <button class="btn bg bsm" id="chkDocBtn" style="width:auto;" onclick="checkDocument()"><span class="ico" data-icon="search"></span> Check</button>
+      </div>
+      <div id="chkDocResult" class="mt"></div>
+    </div>
     <div class="card">
       <div class="ct"><span class="ico-emoji"><span class="ico" data-icon="search"></span></span><svg class="ico-svg" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Verify Taxpayer TIN</div>
       <div class="fg"><label>TIN to verify <span style="font-weight:400;color:var(--gray)">(B2B customer lookup)</span></label><input id="tinQ" placeholder="Enter TIN number"/></div>
@@ -2009,7 +2020,7 @@
       <div id="payAcctMapBox"><div style="font-size:11px;color:var(--gray);">Loading your Manager accounts…</div></div>
       <button type="button" class="btn bo bsm" style="width:auto;margin-top:6px;" onclick="renderPayAcctMap(true)"><span class="ico" data-icon="refresh"></span> Reload accounts</button>
     </div>
-    <div class="card set-panel" data-panel="currencies"><div class="ct"><span class="ico" data-icon="link"></span> Currencies <span class="ico info-tip" data-icon="info" style="cursor:pointer;" onclick="openHelp('currenciesInfo')" title="Help"></span></div>
+    <div class="card set-panel" data-panel="currencies"><div class="ct"><span class="ico" data-icon="exchange"></span> Currencies <span class="ico info-tip" data-icon="info" style="cursor:pointer;" onclick="openHelp('currenciesInfo')" title="Help"></span></div>
       <div class="hint" style="margin-bottom:8px;">Foreign-currency receipts/invoices only work once the currency exists in Manager. This scans your Manager currencies and lets you add any missing one with correct ISO-4217 details (symbol, decimals) - and set your base currency if it isn't set.</div>
       <div id="ccyBox"><div style="font-size:11px;color:var(--gray);">Open this tab to scan your Manager currencies.</div></div>
       <button type="button" class="btn bo bsm" style="width:auto;margin-top:8px;" onclick="renderCurrencies()"><span class="ico" data-icon="refresh"></span> Re-scan</button>
@@ -2256,7 +2267,12 @@
   <div class="card" style="max-width:560px;width:100%;max-height:88vh;display:flex;flex-direction:column;position:relative;margin:0;">
     <button onclick="$('glossaryModal').style.display='none'" style="position:absolute;top:10px;right:12px;background:none;border:none;font-size:18px;cursor:pointer;color:#666;"><span class="ico" data-icon="x"></span></button>
     <div class="ct" style="display:flex;align-items:center;gap:6px;"><span class="ico" data-icon="info" style="width:18px;height:18px;color:var(--g);"></span> Help &amp; Glossary</div>
-    <input id="glossarySearch" placeholder="Search features (e.g. excise, credit note, offline)…" oninput="renderGlossary(this.value)" style="margin-bottom:10px;"/>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;border:1px solid var(--line);border-radius:10px;padding:9px 12px;background:#fff;transition:border-color .15s,box-shadow .15s;" onfocusin="this.style.borderColor='var(--g)';this.style.boxShadow='0 0 0 3px var(--ring)';" onfocusout="this.style.borderColor='var(--line)';this.style.boxShadow='none';">
+      <span class="ico" data-icon="search" style="color:var(--gray);flex-shrink:0;"></span>
+      <input id="glossarySearch" placeholder="Search features (e.g. excise, credit note, offline)" oninput="renderGlossary(this.value)" style="flex:1;border:none;outline:none;background:transparent;font-size:13px;padding:0;min-width:0;"/>
+      <button type="button" id="glossaryClear" title="Clear search" onclick="var s=$('glossarySearch');s.value='';renderGlossary('');s.focus();" style="display:none;background:none;border:none;padding:0;cursor:pointer;color:var(--gray);line-height:0;"><span class="ico" data-icon="x"></span></button>
+    </div>
+    <div id="glossaryCount" style="font-size:12px;color:var(--gray);margin:0 2px 10px;"></div>
     <div id="glossaryBody" style="overflow-y:auto;font-size:12.5px;line-height:1.5;flex:1;"></div>
   </div>
 </div>
@@ -2916,8 +2932,11 @@ function openGlossary(){
 function renderGlossary(q){
   q=(q||'').toLowerCase().trim();
   var keys=Object.keys(HELP).sort(function(a,b){return HELP[a].t.localeCompare(HELP[b].t);});
-  var html=keys.filter(function(k){var h=HELP[k];return !q||((h.t+' '+h.d+' '+h.u+' '+h.e).toLowerCase().indexOf(q)>=0);})
-    .map(function(k){var h=HELP[k];return '<div style="border:1px solid var(--bdr);border-radius:10px;padding:12px 14px;margin-bottom:10px;">'
+  var hits=keys.filter(function(k){var h=HELP[k];return !q||((h.t+' '+h.d+' '+h.u+' '+h.e).toLowerCase().indexOf(q)>=0);});
+  var c=$('glossaryCount'); if(c) c.textContent=q?(hits.length+' of '+keys.length+' topics'):(keys.length+' topics');
+  var x=$('glossaryClear'); if(x) x.style.display=q?'':'none';
+  renderIcons($('glossaryModal'));
+  var html=hits.map(function(k){var h=HELP[k];return '<div style="border:1px solid var(--bdr);border-radius:10px;padding:12px 14px;margin-bottom:10px;">'
       +'<div style="font-weight:700;color:var(--gd);margin-bottom:4px;">'+esc(h.t)+'</div>'
       +'<div class="hlp-sec" style="margin-top:4px;"><div class="hlp-h">What it is</div><div>'+h.d+'</div></div>'
       +'<div class="hlp-sec"><div class="hlp-h">When to use it</div><div>'+h.u+'</div></div>'
@@ -3589,11 +3608,13 @@ async function renderCurrencies(){
   if(base&&base.code) h+='<div class="pay-note" style="border-style:solid;">'+ic('check')+' Set to <strong>'+esc(base.code)+'</strong>'+(base.name?(' ('+esc(base.name)+')'):'')+'</div>';
   else h+='<div class="al ai" style="margin:0;font-size:11.5px;">Your base currency is configured in Manager (Settings, Currencies, Base Currency); the API did not return it on this build, so we cannot show it here. If your base is not UGX, set it in Manager. <button type="button" class="btn bo bsm" style="width:auto;margin-left:6px;" onclick="ccyAdd(\'base\',\'UGX\')">Set base to UGX</button></div>';
   h+='</div>';
-  h+='<label style="display:block;font-size:10px;font-weight:700;color:var(--txtl);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px;">Foreign currencies</label>';
-  h+='<input id="ccySearch" oninput="ccyResults(this.value)" placeholder="Search any currency by name or code, e.g. Australian or AUD" style="width:100%;margin-bottom:8px;padding:8px 10px;border:1px solid var(--bdr);border-radius:8px;font-size:12px;color:var(--txt);"/>';
+  h+='<label style="display:block;font-size:11px;font-weight:700;color:var(--txtl);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Foreign currencies</label>';
+  h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;border:1px solid var(--line);border-radius:10px;padding:9px 12px;background:#fff;transition:border-color .15s,box-shadow .15s;" onfocusin="this.style.borderColor=\'var(--g)\';this.style.boxShadow=\'0 0 0 3px var(--ring)\';" onfocusout="this.style.borderColor=\'var(--line)\';this.style.boxShadow=\'none\';">'
+    +'<span class="ico" data-icon="search" style="color:var(--gray);flex-shrink:0;"></span>'
+    +'<input id="ccySearch" oninput="ccyResults(this.value)" placeholder="Search any currency by name or code, e.g. Australian or AUD" style="flex:1;border:none;outline:none;background:transparent;font-size:13px;padding:0;min-width:0;"/></div>';
   h+='<div id="ccyResults"></div>';
   h+='<div style="border-top:1px solid var(--line);margin-top:12px;padding-top:10px;">'
-    +'<label style="display:block;font-size:10px;font-weight:700;color:var(--txtl);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px;">Add a currency not listed above</label>'
+    +'<label style="display:block;font-size:11px;font-weight:700;color:var(--txtl);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">Add a currency not listed above</label>'
     +'<div style="display:grid;grid-template-columns:70px 1fr 64px 60px 60px auto;gap:6px;align-items:end;">'
     +'<div class="fg" style="margin:0;"><label>Code</label><input id="ccyCode" maxlength="3" placeholder="AUD" style="text-transform:uppercase;"/></div>'
     +'<div class="fg" style="margin:0;"><label>Name</label><input id="ccyName" placeholder="Australian Dollar"/></div>'
@@ -3618,7 +3639,7 @@ function ccyResults(q){
   if(!src.length) h+='<div style="font-size:12px;color:var(--gray);">No match. Use "Add a currency not listed above".</div>';
   src.slice(0,60).forEach(c=>{
     const has=!!have[c.code];
-    h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;border:1px solid var(--bdr);border-radius:8px;padding:6px 10px;">'
+    h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;border:1px solid var(--line);border-radius:9px;padding:7px 10px;background:#fff;">'
       +'<div style="min-width:0;"><div style="font-weight:600;font-size:12.5px;">'+c.code+' <span style="font-weight:400;color:var(--gray);">'+esc(c.prefix||'')+'</span></div><div style="font-size:10.5px;color:var(--gray);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+esc(c.name)+'</div></div>'
       +(has?'<span style="font-size:12px;color:var(--g);font-weight:700;white-space:nowrap;" title="Added">'+ic('check')+'</span>':'<button type="button" class="btn bo bsm" style="width:auto;white-space:nowrap;padding:4px 10px;" onclick="ccyAdd(\'foreign\',\''+jsq(c.code)+'\')">Add</button>')
       +'</div>';
@@ -4518,11 +4539,6 @@ function renderInv(inv){
       +'<td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;">'+fn(l.LineTotal||0)+'</td></tr>'; });
     h+='</table></div>';ht('dItems',h);
   }
-  const sFdn=sGet('Fiscal Document Number','EFRIS FDN');
-  const sSt=sGet('Status','EFRIS Status');
-  const sDt=sGet('Submission Date','EFRIS Submission Date');
-  const sVer=sGet('Verification Code','EFRIS Antifake Code');
-  ht('statCont','<div class="ig"><div class="if"><div class="lb">Status</div><div class="vl '+(sSt==='Submitted'?'vg':'')+'">&#8203;'+esc(sSt||'Not submitted')+'</div></div><div class="if"><div class="lb">Submission Date</div><div class="vl">'+esc(sDt||'-')+'</div></div><div class="if full"><div class="lb">Fiscal Document Number</div><div class="vl">'+esc(sFdn||'-')+'</div></div>'+(sVer?'<div class="if full"><div class="lb">Verification Code</div><div class="vl">'+esc(sVer)+'</div></div>':'')+'</div>'+(s['EFRIS Error Message']?'<div class="al aw">Last error: '+esc(s['EFRIS Error Message'])+'</div>':''));
 }
 
 window.__invList=[];
@@ -4997,6 +5013,62 @@ function cnChip(e){
   const s=cnStatusInfo(e); if(!s) return '';
   return '<span style="font-size:10px;padding:1px 7px;border-radius:10px;background:'+s.bg+';color:'+s.fg+';font-weight:600;white-space:nowrap;" title="'+esc(e.statusText||s.txt)+'">'+s.txt+'</span>';
 }
+// Status tab > Check a document: what the history, URA and Manager each know about
+// one FDN or reference.
+async function checkDocument(){
+  const q=gvi('chkDocQ').trim(); if(!q){ alert('Enter an FDN or a receipt / invoice number.'); return; }
+  if(!efReady()){ ht('chkDocResult','<div class="al aw">Checking a document needs EFRIS turned on with your TIN and device number in Settings.</div>'); return; }
+  const btn=$('chkDocBtn'); if(btn){ btn.disabled=true; btn.dataset._t=btn.innerHTML; btn.innerHTML=SPIN+' Checking…'; }
+  ht('chkDocResult','<p style="color:var(--gray);font-size:12px;">Asking URA and Manager…</p>');
+  try{
+    const d=await efPost('/api/efris/check-document',{q,config:efCfg(),managerEndpoint:CFG.managerEndpoint||MGR_EP||'',accessToken:CFG.accessToken||MGR_TK||''});
+    if(!d.success){ ht('chkDocResult','<div class="al ae">'+esc(d.error||'Could not check the document')+'</div>'); return; }
+    ht('chkDocResult',chkDocHtml(d)); renderIcons($('chkDocResult'));
+  }catch(e){ ht('chkDocResult','<div class="al ae">'+esc(e.message)+'</div>'); }
+  finally{ if(btn){ btn.disabled=false; btn.innerHTML=btn.dataset._t||'Check'; } }
+}
+function chkDocHtml(d){
+  const row=(lb,vl,cls)=>'<div class="if'+(cls?' '+cls:'')+'"><div class="lb">'+lb+'</div><div class="vl">'+vl+'</div></div>';
+  const sec=(title,state,body)=>{ const c=state==='ok'?['#e8f5e9','#2e7d32','check']:state==='bad'?['#ffebee','#c62828','x']:['#fff8e1','#e65100','warning'];
+    return '<div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px;">'
+      +'<div style="display:flex;align-items:center;gap:6px;font-weight:700;font-size:13px;margin-bottom:6px;"><span style="display:inline-flex;width:20px;height:20px;border-radius:50%;align-items:center;justify-content:center;background:'+c[0]+';color:'+c[1]+';">'+ic(c[2])+'</span>'+title+'</div>'+body+'</div>'; };
+  const h=d.history, u=d.ura, m=d.manager;
+  let out='';
+  // URA
+  if(!d.fdn) out+=sec('URA','warn','<div style="font-size:12px;">'+(h&&h.managerOnly?'This document was recorded in Manager only and was never sent to URA.':h?'This document has no FDN yet'+(h.statusText?' ('+esc(h.statusText)+')':'')+'.':'"'+esc(d.q)+'" is not in EFRISConnect\'s history. Enter the FDN to ask URA directly.')+'</div>');
+  else if(u&&u.found) out+=sec('URA has it','ok','<div class="ig">'+row('FDN',esc(u.fdn))+row('Issued',esc(u.issuedDate||'-'))
+      +row('Verification code','<span style="font-family:JetBrains Mono,ui-monospace,Consolas,monospace;">'+esc(u.antifakeCode||'-')+'</span>')+row('Amount',esc(u.currency||'UGX')+' '+(u.grossAmount!==''?fn(u.grossAmount):'-'))
+      +(u.buyer?row('Buyer',esc(u.buyer)+(u.buyerTin?' (TIN '+esc(u.buyerTin)+')':''),'full'):'')+'</div>'
+      +(u.validationUrl?'<a class="btn bo bsm" style="width:auto;margin-top:6px;" href="'+esc(u.validationUrl)+'" target="_blank" rel="noopener">'+ic('globe')+' Verify on the URA portal</a>':''));
+  else out+=sec('URA','bad','<div style="font-size:12px;">'+esc((u&&(u.error||u.message))||'URA did not answer.')+'</div>');
+  // History
+  if(h) out+=sec('EFRISConnect history','ok','<div class="ig">'+row('Reference',esc(h.reference||'-'))+row('Recorded',h.submittedAt?esc(new Date(h.submittedAt).toLocaleString('en-UG',{dateStyle:'medium',timeStyle:'short'})):'-')
+      +row('Customer',esc(h.customerName||'Walk-in Customer'))+row('Amount',esc(h.currency)+' '+fn(h.amount||0))+(h.userName?row('Issued by',esc(h.userName)):'')+(h.mode?row('Mode',h.mode==='production'?'Live':'Sandbox'):'')+'</div>');
+  else if(d.fdn) out+=sec('EFRISConnect history','warn','<div style="font-size:12px;">Not in EFRISConnect\'s history (issued elsewhere, or before the history was kept). Submission History > EFRIS Report can add documents URA has.</div>');
+  // Credit and debit notes
+  if(d.fdn&&(d.notes||d.notesError)){
+    const ns=d.notes||[];
+    const body=(ns.length?ns.map(n=>{ const s=cnStatusInfo(Object.assign({kind:'credit-note'},n));
+        return '<div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;padding:5px 0;border-top:1px solid var(--line);">'
+          +'<span>'+(n.kind==='debit-note'?'Debit':'Credit')+' note '+esc(n.reference||'-')+(n.fdn?' · FDN '+esc(n.fdn):'')+(n.uraOnly?' <span style="color:var(--gray);">(at URA only)</span>':'')+cnCancelLine(n)+'</span>'
+          +'<span style="white-space:nowrap;">'+(n.kind==='credit-note'&&s?'<span style="font-size:10px;padding:1px 7px;border-radius:10px;background:'+s.bg+';color:'+s.fg+';font-weight:600;">'+s.txt+'</span> ':'')+fn(n.amount||0)+'</span></div>'; }).join('')
+      :'<div style="font-size:12px;color:var(--gray);">None.</div>')+(d.notesError?'<div style="font-size:11px;color:var(--red);margin-top:4px;">'+esc(d.notesError)+'</div>':'');
+    out+=sec('Credit and debit notes against it',ns.length?'warn':'ok',body);
+  }
+  // Manager
+  if(m){
+    if(!m.found) out+=sec('Manager',m.error?'bad':'warn','<div style="font-size:12px;">'+(m.error?esc(m.error):'No sales invoice or receipt in Manager has the reference <strong>'+esc(m.reference)+'</strong>.')+'</div>');
+    else out+=sec(m.matches?'FDN is in Manager':'Manager',m.matches?'ok':'bad','<div class="ig">'+row(esc(m.type),esc(m.reference))+row('FDN on it',esc(m.fdn||'(empty)'))+'</div>'
+      +(!m.matches?'<div style="font-size:12px;color:var(--red);margin-top:4px;">'+(m.fdn?'The FDN in Manager differs from the one URA issued.':'The FDN was not written to the Manager document.')+'</div>':''));
+  } else if(!(CFG.managerEndpoint||MGR_EP)) out+=sec('Manager','warn','<div style="font-size:12px;">Manager is not connected, so this was not checked.</div>');
+  return out;
+}
+// URA's answer to a request to cancel this document (kept by the relay).
+function cnCancelLine(e){
+  const c=e&&e.cancelRequest; if(!c||!c.approveStatus) return '';
+  const s=String(c.approveStatus), col=s==='103'?'var(--red)':s==='101'?'var(--g)':'var(--gray)';
+  return '<div style="font-size:11px;color:'+col+';">Cancellation request'+(c.reference?' '+esc(c.reference):'')+': '+esc(c.statusText||s)+'</div>';
+}
 // Row actions: withdraw a pending application, cancel an approved credit note.
 function cnActions(e){
   if(CFG.efrisEnabled===false) return '';
@@ -5019,8 +5091,14 @@ async function cnCheckApproval(silent){
     if(!d.success){ if(!silent) alert('Could not check URA approval: '+(d.error||'unknown error')); }
     else {
       if(!silent){
-        const n={'101':0,'102':0,'103':0,'104':0}; (d.items||[]).forEach(i=>{ const k=String(i.approveStatus||''); if(k in n) n[k]++; });
-        alert((d.items||[]).length ? ('URA has '+(d.items||[]).length+' credit note application'+((d.items||[]).length>1?'s':'')+': '+n['101']+' approved, '+n['102']+' pending, '+n['103']+' rejected, '+n['104']+' withdrawn. The list is updated.') : 'URA has no credit note applications for this period.');
+        // Credit notes and requests to cancel an issued note are counted apart, and
+        // anything rejected or withdrawn is named so it can be found in Documents.
+        const all=d.items||[], isCx=i=>i.categoryCode&&i.categoryCode!=='101';
+        const sum=(list,what)=>{ const n={'101':0,'102':0,'103':0,'104':0}; list.forEach(i=>{ const k=String(i.approveStatus||''); if(k in n) n[k]++; });
+          return list.length+' '+what+(list.length===1?'':'s')+': '+n['101']+' approved, '+n['102']+' pending, '+n['103']+' rejected, '+n['104']+' withdrawn'; };
+        const notes=all.filter(i=>!isCx(i)), cx=all.filter(isCx);
+        const named=all.filter(i=>i.approveStatus==='103'||i.approveStatus==='104').map(i=>'- '+(isCx(i)?'Cancellation request ':'Credit note ')+(i.referenceNo||i.id)+(isCx(i)&&i.oriInvoiceNo?' (for FDN '+i.oriInvoiceNo+')':'')+': '+(i.statusText||i.approveStatus));
+        alert(all.length ? ('URA has '+sum(notes,'credit note application')+(cx.length?'; and '+sum(cx,'cancellation request'):'')+'.'+(named.length?'\n\n'+named.join('\n'):'')+'\n\nThe list is updated.') : 'URA has no credit note applications for this period.');
       }
       docsLoad(_docsPage);
       const th=$('tHist'); if(th&&!th.classList.contains('hidden')) histLoad(_histPage);
@@ -5201,6 +5279,7 @@ async function docsLoad(page){
         +'<div style="font-size:11px;color:var(--gray);">'+esc(e.reference||'-')+' · '+dt+'</div>'
         +'<div style="font-size:11px;font-family:JetBrains Mono,ui-monospace,Consolas,Courier New,monospace;color:var(--gray);">'+fdnLine+'</div>'
         +(cs&&cs.k==='rejected'&&e.statusText?'<div style="font-size:11px;color:var(--red);">'+esc(e.statusText)+'</div>':'')
+        +cnCancelLine(e)
         +(e.unlinked?'<div style="font-size:11px;color:#5d4037;background:#fff8e1;border:1px solid #ffe082;border-radius:8px;padding:5px 8px;margin-top:4px;">Earlier document, not linked to a business yet. It shows in every business with this TIN. <a href="#" onclick="docLink('+Number(e.id)+');return false;" style="font-weight:700;color:var(--gd);">Link to this business</a></div>':'')
         +'<div style="font-size:14px;font-weight:700;color:var(--gd);margin-top:2px;">'+esc(e.currency||'UGX')+' '+amt+'</div>'
         +'<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">'

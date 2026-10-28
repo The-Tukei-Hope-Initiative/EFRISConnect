@@ -369,7 +369,7 @@ const ROUTE_PERMS = [
   // Cashier: offline queue (see it, Try now, link the Manager document)
   ['GET', '/offline-queue', 'queue'], ['POST', '/offline-queue/:id/link', 'queue'], ['POST', '/offline-queue/retry-now', 'queue'], ['POST', '/offline-queue/flush', 'queue'],
   // Cashier: own submission-log entries (accountants and admins see all)
-  ['GET', '/submission-log', 'log-own'], ['GET', '/submission-log/by-fdn/:fdn', 'log-own'],
+  ['GET', '/submission-log', 'log-own'], ['GET', '/submission-log/by-fdn/:fdn', 'log-own'], ['POST', '/efris/check-document', 'log-own'],
   // Accountant: credit and debit notes
   ['POST', '/efris/credit-note', 'credit'], ['POST', '/efris/credit-notes/status', 'credit'], ['POST', '/efris/credit-notes/void', 'credit'],
   ['POST', '/efris/credit-notes/cancel', 'credit'], ['POST', '/efris/debit-notes/cancel', 'credit'], ['POST', '/efris/debit-note', 'credit'], ['POST', '/manager/create-credit-note', 'credit'],
@@ -5847,11 +5847,15 @@ function applyCnStatus(items, tin, adopt) {
     };
     const seen = new Set();
     for (const it of items) {
+      // A cancellation request is about an issued note: kept on that note, never adopted.
+      if (it.categoryCode && it.categoryCode !== '101') { if (cnCancelRequest(log, it, tin, mode)) changed = true; continue; }
       const k = refKey(it.referenceNo);
       let e = find(it);
       if (!e) {
-        // Adopt only credit-note applications (not cancellations of other notes).
-        if (!adopt || !(k || it.id) || (it.categoryCode && it.categoryCode !== '101')) continue;
+        // Already in another business with this TIN: update it there, add no copy here.
+        const twins = cnTwins(log, it, tin, mode);
+        if (twins.length) { if (cnSyncTwins(twins, it)) changed = true; continue; }
+        if (!adopt || !(k || it.id)) continue;
         const gross = Math.abs(parseFloat(it.grossAmount) || 0);
         e = {
           id: crypto.randomUUID(), kind: 'credit-note', docType: 'Credit note', adopted: true,
@@ -5888,11 +5892,53 @@ function applyCnStatus(items, tin, adopt) {
           else console.log(`   Credit note ${e.reference} is now ${it.statusText} at URA`);
         }
       }
+      // The same application in another business (sharing the TIN) gets the same status.
+      if (it.id && cnSyncTwins(cnTwins(log, it, tin, mode).filter(x => x !== e), it)) changed = true;
       if (e.approveStatus === '101' && e.fdn && !e.mgrWritten && !e.cancelled) pending.push({ ...e });
     }
     return changed ? undefined : false;
   });
   return pending;
+}
+// Credit-note entries of any business for URA application `it` (same TIN and mode):
+// by application id, or by reference when URA gives no id.
+function cnTwins(log, it, tin, mode) {
+  const k = String(it.referenceNo || '').trim().toLowerCase();
+  return log.filter(x => x.kind === 'credit-note' && String(x.tin || '') === String(tin) && (!mode || !x.mode || x.mode === mode)
+    && (it.id ? String(x.applicationId || '') === String(it.id) : (k && String(x.reference || '').trim().toLowerCase() === k)));
+}
+function cnSyncTwins(list, it) {
+  let changed = false;
+  for (const x of list) {
+    const fdn = it.approveStatus === '101' && it.invoiceNo && !x.fdn ? it.invoiceNo : '';
+    if (x.approveStatus === it.approveStatus && !fdn) continue;
+    x.approveStatus = it.approveStatus; x.statusText = it.statusText;
+    if (fdn) x.fdn = fdn;
+    changed = true;
+  }
+  return changed;
+}
+// URA's answer to a request to cancel an issued note, kept as `cancelRequest` on
+// that note's entries (found by the FDN URA names; the note itself first, else
+// any document with that FDN). The latest request per note wins.
+function cnCancelRequest(log, it, tin, mode) {
+  const fdns = [it.invoiceNo, it.oriInvoiceNo].map(v => String(v || '')).filter(Boolean);
+  if (!fdns.length) return false;
+  const fits = x => String(x.tin || '') === String(tin) && (!mode || !x.mode || x.mode === mode) && fdns.includes(String(x.fdn || ''));
+  let docs = log.filter(x => fits(x) && (x.kind === 'credit-note' || x.kind === 'debit-note'));
+  if (!docs.length) docs = log.filter(x => fits(x) && String(x.fdn) === String(it.oriInvoiceNo || ''));
+  const at = uraTimeIso(it.applicationTime);
+  let changed = false, was = null;
+  for (const x of docs) {
+    const c = x.cancelRequest || {};
+    if (c.id && c.id !== it.id && at && c.at && c.at > at) continue;   // a newer request is already kept
+    if (c.id === it.id && c.approveStatus === it.approveStatus) continue;
+    if (was === null) was = c.id === it.id ? c.approveStatus : '';
+    x.cancelRequest = { id: it.id, reference: it.referenceNo || '', category: it.categoryCode, approveStatus: it.approveStatus, statusText: it.statusText, at };
+    changed = true;
+  }
+  if (changed && was !== it.approveStatus) console.log(`   Cancellation request ${it.referenceNo || it.id} for ${docs[0].reference || docs[0].fdn} is now ${it.statusText} at URA`);
+  return changed;
 }
 // The Manager credit note whose Reference is one of `refs`: { key, formBase } or null.
 // Manager's credit-note list has no Reference column (its search does not match it
@@ -5988,7 +6034,8 @@ async function cnWriteBack(ep, tk, e) {
     const log = readSubmissionLog();
     const refs = cnMgrRefs(e, log);
     const hit = await findMgrCreditNoteByReference(ep, tk, refs, cnUsedKeys(e, log));
-    if (!hit) console.log(`   Credit note ${e.reference}: no Manager credit note with reference ${refs.join(' or ')}; not written`);
+    // Said once per credit note (each retry would otherwise add a notification).
+    if (!hit && !(e.mgrAttempts > 0)) console.log(`   Credit note ${e.reference}: no Manager credit note with reference ${refs.join(' or ')}; not written`);
     if (hit) {
       const fiscal = { fdn: e.fdn, antifakeCode: e.antifakeCode || '', validationUrl: e.validationUrl || e.qrCode || '', deviceNo: e.deviceNo || '' };
       const w = await saveEfrisToManager(ep, tk, hit.key, fiscal, null, { formBase: hit.formBase, status: 'Approved', note: 'Credit Note FDN: ' + e.fdn });
@@ -6023,8 +6070,9 @@ app.post('/api/efris/credit-notes/status', async (req, res) => {
     if (managerEndpoint && accessToken && toWrite.length) {
       const ep = normEp(managerEndpoint);
       await cnEnrich(config, toWrite);
-      // Stop retrying (and logging) notes with no Manager credit note after 3 tries.
-      for (const e of toWrite) if ((e.mgrAttempts || 0) < 3 && await cnWriteBack(ep, accessToken, e)) managerUpdated++;
+      // A check asked for by the user always looks again (the credit note may have
+      // been created in Manager since); "not found" is logged only the first time.
+      for (const e of toWrite) if (await cnWriteBack(ep, accessToken, e)) managerUpdated++;
     }
     res.json({ success: true, items, managerUpdated });
   } catch (e) {
@@ -7820,6 +7868,86 @@ app.get('/api/submission-log/by-fdn/:fdn', (req, res) => {
   } catch(e) {
     res.status(500).json({ success: false, error: e.message });
   }
+});
+
+// Status tab > Check a document: one FDN or reference, answered from the history,
+// URA (T108 for the document, T111 for credit notes against it) and Manager (is
+// the FDN on the Manager document). Each part reports its own failure, so URA
+// being unreachable still shows what the history and Manager know.
+app.post('/api/efris/check-document', rateLimit(30), async (req, res) => {
+  const b = req.body || {};
+  const q = String(b.q || '').trim();
+  let config = b.config;
+  if (!q) return res.status(400).json({ success: false, error: 'Enter an FDN or a receipt / invoice number' });
+  if (!config || !config.tin) return res.status(400).json({ success: false, error: 'config.tin required' });
+  const tid = reqTenant(req);
+  let saved = null;
+  if (tid) { try { saved = vault.getTenant(tid); } catch (_) {} }
+  if (saved) config = { ...config, tin: saved.tin || config.tin, mode: saved.mode || config.mode };
+  const out = { success: true, q };
+  const view = logView(req), creditView = scopedView(req, 'credit');
+  const isNote = e => e.kind === 'credit-note' || e.kind === 'debit-note';
+  const log = readSubmissionLog().filter(e => view.sees(e) && (!isNote(e) || creditView.sees(e)));
+  const low = q.toLowerCase();
+  const hit = log.find(e => String(e.fdn || '') === q) || log.find(e => !isNote(e) && String(e.reference || '').trim().toLowerCase() === low)
+    || log.find(e => String(e.reference || '').trim().toLowerCase() === low);
+  if (hit) out.history = { id: hit.id, kind: hit.kind || 'sale', reference: hit.reference || '', fdn: hit.fdn || '', customerName: hit.customerName || '',
+    amount: hit.totalAmount || 0, currency: hit.currency || 'UGX', submittedAt: hit.submittedAt || '', mode: hit.mode || '', userName: hit.userName || '',
+    antifakeCode: hit.antifakeCode || '', approveStatus: hit.approveStatus || '', statusText: hit.statusText || '', managerOnly: !!hit.managerOnly };
+  const fdn = (hit && hit.fdn) || (/^\d{8,}$/.test(q) ? q : '');
+  out.fdn = fdn;
+  if (fdn) {
+    try {
+      const { eu, cfg, session } = await efrisQuerySession(config);
+      const r = await efrisSecure(eu, 'T108', { invoiceNo: fdn }, cfg.tin, cfg.deviceNo, session);
+      const { rc, rm } = efrisRcOf(r);
+      if (rc !== '00') out.ura = { found: false, message: 'URA ' + rc + ': ' + rm };
+      else {
+        const d = efrisContentJson(r, session) || {};
+        const bi = d.basicInformation || {}, sm = d.summary || {}, by = d.buyerDetails || {};
+        const code = bi.antifakeCode || bi.antiFakeCode || d.antifakeCode || '';
+        out.ura = { found: true, fdn: bi.invoiceNo || fdn, issuedDate: bi.issuedDate || '', antifakeCode: code, currency: bi.currency || '',
+          grossAmount: sm.grossAmount != null ? sm.grossAmount : '', buyer: by.buyerLegalName || by.buyerBusinessName || '', buyerTin: by.buyerTin || '',
+          invoiceKind: String(bi.invoiceKind || ''), invoiceType: String(bi.invoiceType || ''), operator: bi.operator || '',
+          validationUrl: efrisValidationUrl(config.mode, bi.invoiceNo || fdn, code) };
+      }
+    } catch (e) { out.ura = { found: false, error: efrisFriendly(e, 'URA could not be asked') }; }
+    // Notes against it: the history's, and URA's credit-note applications (credit permission only).
+    const notes = log.filter(e => isNote(e) && String(e.oriInvoiceNo || e.originalFdn || '') === fdn)
+      .map(e => ({ kind: e.kind, reference: e.reference || '', fdn: e.fdn || '', approveStatus: e.approveStatus || '', statusText: e.statusText || '',
+        amount: e.totalAmount || 0, cancelled: !!e.cancelled, cancelRequest: e.cancelRequest || null }));
+    if (creditView.sees({ tenantId: tid })) {
+      try {
+        for (const it of await t111Query(config, { oriInvoiceNo: fdn })) {
+          if (it.categoryCode && it.categoryCode !== '101') continue;
+          if (notes.some(n => (n.reference && n.reference === it.referenceNo) || (n.fdn && n.fdn === it.invoiceNo))) continue;
+          notes.push({ kind: 'credit-note', reference: it.referenceNo, fdn: it.invoiceNo || '', approveStatus: it.approveStatus, statusText: it.statusText,
+            amount: -Math.abs(parseFloat(it.grossAmount) || 0), uraOnly: true });
+        }
+      } catch (e) { out.notesError = efrisFriendly(e, 'URA\'s credit notes could not be listed'); }
+    }
+    out.notes = notes;
+  }
+  // Manager: the document with this reference, and the FDN it carries.
+  const ep = normEp(b.managerEndpoint || ''), tk = String(b.accessToken || '');
+  const ref = (hit && hit.reference) || (!/^\d{8,}$/.test(q) ? q : '');
+  if (ep && tk && ref && !(hit && isNote(hit))) {
+    try {
+      const key = await findMgrDocByReference(ep, tk, ref);
+      if (!key) out.manager = { found: false, reference: ref };
+      else {
+        let f = await managerCall(ep, tk, 'GET', '/sales-invoice-form/' + key, null), type = 'Sales invoice';
+        if (f.status !== 200 || !f.data || f.data.error) { f = await managerCall(ep, tk, 'GET', '/receipt-form/' + key, null); type = 'Receipt'; }
+        const cf = await mgrTextCustomFields(ep, tk);
+        const strs = (f.data && f.data.CustomFields2 && f.data.CustomFields2.Strings) || {};
+        const val = names => { for (const n of names) { const k = cf.byName[n]; if (k && strs[k]) return String(strs[k]); } return ''; };
+        const mfdn = val(['FDN', 'Fiscal Document Number', 'EFRIS FDN']);
+        out.manager = { found: true, reference: ref, type, fdn: mfdn, verificationCode: val(['Verification Code', 'EFRIS Antifake Code']),
+          matches: !!fdn && mfdn === fdn };
+      }
+    } catch (e) { out.manager = { found: false, reference: ref, error: e.message }; }
+  }
+  res.json(out);
 });
 
 // Add documents URA has (from its T106 report) that are missing from the local
